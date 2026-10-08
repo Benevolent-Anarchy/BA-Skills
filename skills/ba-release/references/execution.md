@@ -1,0 +1,197 @@
+# Execution and recovery
+
+Use `pwsh -NoProfile -File <skill>/scripts/release.ps1`. The following arguments
+are passed after the script path. Comma-separated destination IDs work with
+`pwsh -File`; an array also works when calling from PowerShell.
+
+```powershell
+-Mode doctor -Repository <game-root> -Destination steam,itch-windows,notes
+-Mode plan -Repository <game-root> -Destination itch-windows,notes -VersionChange patch
+-Mode prepare -Repository <game-root> -Destination itch-windows,notes -VersionChange patch
+-Mode extend -StatePath <prepared-state-directory> -Destination google-play
+-Mode status -StatePath <prepared-state-directory>
+-Mode publish -StatePath <prepared-state-directory> -ApprovedPlanId <displayed-id> -ApprovedNotesSha256 <displayed-notes-hash>
+-Mode confirm -StatePath <prepared-state-directory> -ReceiptPath <observed-store-receipt.json>
+```
+
+`validate` checks schema and actual project files. `plan` emits JSON to stdout and
+reads only local Git/project data. Exit codes: `0` successful, `1` invalid input
+or precondition failure, `2` blocked plan/doctor, `3` incomplete preparation/publication.
+Do not redirect plan output into the source repo during a read-only check.
+
+## Runtime readiness
+
+Run `doctor` with the same explicit selection before preparation. It inspects
+source/configuration readiness, selected executable paths, a bounded Godot version
+probe and that engine's release templates. Project `config/features` supplies the
+engine major/minor requirement. Selected Android exports additionally inspect
+Godot's configured SDK/JDK, release signing inputs and the Gradle project template
+when applicable. Private credentials and keystore names/paths are never emitted.
+Unselected destinations need no tools, signing inputs or authentication checks.
+
+Host paths stay out of release.json. Supply `-GodotExecutable`,
+`-ButlerExecutable`, `-SteamCmdExecutable`, `-GhExecutable`, `-TemplateRoot`,
+`-EditorSettingsPath`, `-AndroidSdkPath` or `-JavaSdkPath` when discovery needs an
+explicit override. Godot's normal Windows/Linux/WSL data paths and self-contained
+editor mode are supported. This does not translate Windows tools into Linux tools.
+
+Each check reports `passed`, `blocked`, `skipped` or `unverified`. `ready` means
+no local blockers; `remoteAccessVerified` remains false. Presence of a token or
+username cannot prove validity, store access or cached SteamCMD authentication.
+SDK/JDK and signing presence cannot prove compatibility or a valid signature.
+The complete project gate, real exports and store preflights still supply those
+checks. Doctor makes no remote calls, login attempts, exports or source/state writes.
+
+## Local preparation
+
+Prepare requires explicit selection; omission returns a chooser without writes,
+or prompts with `-Interactive`. Version operations are `patch`, `minor`, `major`,
+`current` (default); plan previews the requested operation consistently in its
+version, labels and notes paths. `sourceVersion` is the actual Godot setting;
+`preview` identifies a projected version that still requires a source commit.
+`exports` inventories configured presets; `requiredExports` lists only the union
+needed for the explicit selection. Automatic bumps
+require a plain semantic version; select prereleases explicitly in the project.
+New version settings and each first selected Android preset's independent counter
+increment are journaled before edits. `increment-selected` covers itch APK and
+Play AAB independently; holding Play leaves its AAB counter unchanged.
+Prepare returns `source-update-required` before checks/exports: review and commit
+those settings locally, then repeat the same request. Retries reuse the reservation,
+including interrupted file writes. `-NewRelease` explicitly starts a later bump
+after the previous reservation is committed; ordinary retries never do.
+
+With clean source, prepare runs the configured complete verification script,
+then Godot's `--headless --path <project> --export-release <existing-preset>
+<staged-filename>` for the union of selected itch, Steam depot and Play presets.
+Each shared preset exports once. It writes into per-user state,
+leaving existing `dist/` exports untouched. It exports no builds for a notes-only
+selection. `-GodotExecutable` can specify an inspected engine when PATH does not
+select the correct one; that machine-specific path is not release.json data.
+It then runs selected itch desktops' standalone functionality checks with specific
+excluded files physically unavailable, restores the common artifacts and checks
+Butler `push --dry-run` output. `selection.<id>.txt` records the preview for review.
+Supply `-ButlerExecutable` if needed. These checks do not upload; an ordinary push
+is live publication and is approval gated. Failed checks prevent publication.
+
+State defaults to `%LOCALAPPDATA%/ba-release/releases/` on Windows and
+`${XDG_STATE_HOME:-~/.local/state}/ba-release/releases/` on Linux. `-StateRoot`
+overrides it but must remain outside the source tree, including linked ancestors.
+A source identity/version
+directory contains `state.json`, `notes.md`, build snapshots and an exclusive
+lock. HEAD, config bytes, version, previous-release commit and sorted selection
+identify the plan. A different plan for the same version is refused; resolve it
+explicitly instead of bumping a version to retry. Do not edit state.json by hand.
+
+`extend` explicitly adds destinations while retaining canonical notes, artifact
+provenance, previous plan/approval history and completed operations. It exports
+only missing presets and requires approval of the expanded plan/new note variants.
+Source/config/version stay the same, except a first later Android inclusion may
+reserve that new artifact's counter-only source change. Commit it before export; existing
+desktops retain their original source commit. Unrelated source changes are refused
+before any counter edit. Extend never bumps the game version. Repeat it after
+failure to reuse added destinations. Use the original checkout/state to distribute
+an older release instead of silently selecting newer source.
+
+Review the returned state path, plan, staged artifact manifest and notes. Replace
+the raw commit draft in `notes.md` with reviewed player-facing text; retain its
+source provenance comment. Each selected Play destination has a plain-text
+`notes.<id>.txt` for its configured locale (1–500 characters); review it alongside
+the full notes without silent truncation. `status` displays an approval digest of
+all selected notes (the file SHA-256 when no Play destination is selected). First
+publication requires approval of the concrete plan and notes plus both matching
+hash arguments. Approval persists for unchanged retries and is bound to the
+artifact manifest. Changed notes, added/deleted/changed build files, a dirty
+source tree or changed HEAD/config invalidate publication. Reapproval cannot
+change notes after a destination has started store publication.
+Canonical text and already-started Play locale variants remain frozen across
+extensions. Catch-up variants use the channel's older baseline and previous
+approved canonical notes to cover changes its players missed. Inspect full diffs,
+direct commits and reversions; raw titles are evidence rather than public claims.
+
+Publication uses argument arrays, existing Butler/GitHub login and no stored
+credentials. Butler receives `--userversion` from Godot and one `--ignore` per
+pattern. Public notes preflight checks visibility, write permission and existing
+canonical content before any selected store publication. It copies the exact
+approved `releases/<version>.md` only after at least one store is actually live,
+or a matching live receipt already exists; until then notes are `awaiting-release`.
+Keep `[Release availability](../availability/<version>.json)` in canonical notes.
+Separate owned JSON records live, held, submitted and pending destinations;
+updates create ordinary subsequent commits. Re-run publish after console
+confirmation to refresh availability without repeating uploads. Identical notes
+count as complete; different
+content is a failure. No source repository commit, tag or push operation exists
+in this workflow. Publication of notes does create a commit in the public notes
+repository, only after release approval.
+
+Read [store operations](stores.md) for SteamCMD invocation, Play edit/track
+publication, runtime authentication and required console steps. Override
+`-SteamCmdExecutable` at runtime to point at the inspected SDK executable. The
+test-only module transport injects disposable Play responses; the CLI always
+uses the fixed Android Publisher host.
+
+Play's reviewed text is also packaged locally as
+`fastlane/metadata/android/<configured-language>/changelogs/<numeric-code>.txt`.
+The adapter uses that same text; no fastlane command or listing update is
+implicitly run. Steam's build description is internal version metadata; public
+announcements remain a separate verified console operation.
+Available browser tools can complete these approved console steps and supply
+observed receipts; follow [browser completion](browser-completion.md). Missing
+browser access or pending review remains an explicit incomplete state.
+
+Retry `prepare` with the same repository and destination selection to reuse
+verified exports. Retry `publish -StatePath <same-directory>` to reuse approval
+and skip successful destinations. Failed local export output is retained in a
+separate staging folder for inspection; only successful manifests can publish.
+
+| Destination status | Meaning |
+| --- | --- |
+| `not-selected` | No operation requested for this destination. |
+| `pending` | Prepared, awaiting approved publication. |
+| `in-progress` | Journal saved before invoking the external command. |
+| `succeeded` | External tool returned success, or existing public notes matched. |
+| `awaiting-store-action` | Store upload completed; activation/announcement or draft publication still needs console work. |
+| `awaiting-release` | Notes are ready but no matching store release is live yet. |
+| `submitted` | Play edit committed; review/managed publishing/rollout still needs verification. |
+| `failed` | The attempt failed; other destinations retain their own results. |
+| `uncertain` | An external operation was interrupted; its remote outcome needs inspection. |
+
+An interrupted `in-progress` operation becomes `uncertain` on resume and is not
+automatically repeated. Inspect the remote channel/file before deciding whether
+to retry. `-RetryUncertain` explicitly authorizes another attempt at the same
+version after that inspection; require user authorization for that retry. A
+failed command can also have ambiguous remote effects: reconcile before retrying
+when needed. Repeating a note attempt recognizes already-published identical
+content. A Butler success means the ordinary pushed update is available to players;
+configured page labels can still need an Edit game action. It does not establish
+untested runtime behavior. Steam/Play uploads remain separate from observed live
+activation/review completion.
+
+Overall status is `prepared`, `preparation-failed`, `published`, `submitted`,
+`needs-store-action`, `partial-failure`, `publication-failed`, or
+`needs-reconciliation`, or `awaiting-release`. Report the
+individual destinations and errors alongside that status. Never convert a
+partial failure into a whole-release success claim.
+
+An invalidated/expired Play edit can be replaced only with explicit
+`-ReplacePlayEdit` authorization after remote reconciliation. Confirmed HTTP 404
+is required; ordinary retries and other API failures never replace edits. The
+same bundle/code/approval is retained. For uncertain operations combine it with
+`-RetryUncertain`; see the store reference before authorizing this recovery.
+
+Store completion uses a local `confirm` receipt after observing the actual
+console result. It checks the plan and notes approval, unchanged artifacts,
+matching app/build/branch or package/code/track/rollout, and store evidence URL.
+It performs no remote writes or uploads. Only record what the user or agent has
+actually verified. A receipt can also reconcile an uncertain store operation
+whose exact remote result is known. See the receipt shapes in the store reference.
+Overall `submitted` and `needs-store-action` preserve pending store work; only
+all verified/completed destinations become `published`.
+
+Local `live.json` advances only channels with live evidence, keyed by exact Butler
+target, Steam app/branch or Play package/track. Held/submitted stores retain their
+older baseline and the actual artifact source commit. Later plans use that baseline
+for missed-change evidence; frozen plans keep their original baselines on retry.
+Do not roll a channel backwards without explicit reconciliation. Canonical note
+corrections belong in explicit subsequent public-repo commits, preserving history
+instead of duplicate entries. The automatic writer refuses conflicting canonical
+content and foreign availability files.
