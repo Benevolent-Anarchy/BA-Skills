@@ -2,7 +2,7 @@
 
 Date: 2026-10-09
 
-Status: proposed design for review. This document does not authorize implementation or create a project.
+Status: design approved by Cicely on 2026-10-09. Implementation begins after review of the written implementation plan and selection of its execution method.
 
 ## Purpose and agreed scope
 
