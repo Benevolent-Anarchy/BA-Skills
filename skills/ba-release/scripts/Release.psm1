@@ -445,7 +445,7 @@ function Invoke-ReleasePrepare([string]$Repository, [string[]]$Destination, [str
         if (Test-Path -LiteralPath $stateFile) {
             $state = [IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable
             if ($state.plan.planId -cne $plan.planId) { throw 'This version already has a different release plan. Resume that snapshot; do not bump the version just to retry.' }
-            if ($state.status -in @('prepared','published','submitted','needs-store-action','partial-failure','publication-failed','needs-reconciliation')) {
+            if ($state.status -in @('prepared','published','submitted','needs-store-action','partial-failure','publication-failed','needs-reconciliation','on-hold','awaiting-release')) {
                 Assert-ReleaseArtifacts $statePath $state
                 if ($state.status -eq 'prepared') {
                     try {Invoke-ReleaseDistributionChecks $settings $state $statePath $ButlerExecutable {Write-ReleaseJson $stateFile $state}}

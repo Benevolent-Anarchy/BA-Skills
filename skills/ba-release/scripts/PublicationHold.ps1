@@ -29,7 +29,7 @@ function Set-ReleaseDestinationHold([string]$StatePath, [string[]]$Destination, 
             }
         }
         if ($changed) {
-            $state.status=if (@($state.destinations.Values | Where-Object {$_.attempts -gt 0}).Count) {Get-ReleaseOverallStatus $state} else {'prepared'}
+            $state.status=if (@($state.destinations.Values | Where-Object {$_.attempts -gt 0 -or $_.status -notin @('pending','held','not-selected')}).Count) {Get-ReleaseOverallStatus $state} else {'prepared'}
             Write-ReleaseJson $stateFile $state
         }
         return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}

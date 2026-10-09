@@ -1,5 +1,51 @@
 # Verifies prepared-store holds survive retries without contacting held stores or rebuilding.
 
+Test 'publication hold survives preparation resume without an installed engine' {
+    $repo=New-StoreFixture 'hold-prepare-resume'
+    $root=Join-Path $sandbox 'hold-prepare-resume-state'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','google-play') $root $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    Set-ReleaseDestinationHold $prepared.statePath @('google-play') 'Review pending.' | Out-Null
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+    Assert ($result.status -eq 'on-hold') 'Fixture did not reach a partially shipped release on hold.'
+    $before=(Get-FileHash $stateFile).Hash
+    $resumed=Invoke-ReleasePrepare $repo @('itch-windows','google-play') $root (Join-Path $sandbox 'uninstalled-godot.exe')
+    Assert ($resumed.status -eq 'on-hold' -and (Get-FileHash $stateFile).Hash -ceq $before) 'Preparation resume changed publication progress or required another export.'
+}
+
+Test 'publication hold preserves notes preflight failure before any upload attempt' {
+    $repo=New-StoreFixture 'hold-after-preflight'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','google-play','notes') (Join-Path $sandbox 'hold-after-preflight-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'hold-after-preflight-note.md';$env:BA_FIXTURE_NO_PUSH='1'
+    try {
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+        Assert ($result.status -eq 'publication-failed' -and $result.destinations.notes.attempts -eq 0) 'Fixture did not fail notes preflight before publication.'
+        $held=Set-ReleaseDestinationHold $prepared.statePath @('google-play') 'Review pending.'
+        Assert ($held.status -eq 'publication-failed' -and $held.destinations.notes.status -eq 'failed' -and $held.destinations['itch-windows'].attempts -eq 0) 'Hold concealed a failed prerequisite or started store publication.'
+        $released=Set-ReleaseDestinationHold $prepared.statePath @('google-play') -Release
+        Assert ($released.status -eq 'publication-failed') 'Unhold concealed the failed notes preflight.'
+    } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE;Remove-Item Env:BA_FIXTURE_NO_PUSH}
+}
+
+Test 'publication hold recovery preserves notes awaiting a shipped destination' {
+    $repo=New-StoreFixture 'awaiting-release-resume'
+    $root=Join-Path $sandbox 'awaiting-release-resume-state'
+    $prepared=Invoke-ReleasePrepare $repo @('notes') $root
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'awaiting-release-resume-note.md'
+    try {
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+        Assert ($result.status -eq 'awaiting-release') 'Fixture did not defer public notes until a store ships.'
+        $before=(Get-FileHash $stateFile).Hash
+        $resumed=Invoke-ReleasePrepare $repo @('notes') $root
+        Assert ($resumed.status -eq 'awaiting-release' -and (Get-FileHash $stateFile).Hash -ceq $before) 'Preparation resume rewrote the awaiting-release journal.'
+    } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE}
+}
+
 Test 'publication hold leaves prepared Play untouched across publication and retries' {
     $repo=New-StoreFixture 'prepared-play-hold'
     $prepared=Invoke-ReleasePrepare $repo @('itch-windows','steam','google-play','notes') (Join-Path $sandbox 'prepared-play-hold-state') $engine
