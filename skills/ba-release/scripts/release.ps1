@@ -2,7 +2,7 @@
 #requires -Version 7.2
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('setup','validate','doctor','plan','prepare','extend','publish','status','confirm')][string]$Mode,
+    [Parameter(Mandatory)][ValidateSet('setup','validate','doctor','plan','prepare','extend','hold','unhold','publish','status','confirm')][string]$Mode,
     [string]$Repository,
     [string[]]$Destination = @(),
     [string]$StateRoot,
@@ -23,6 +23,7 @@ param(
     [switch]$NewRelease,
     [string]$ApprovedPlanId,
     [string]$ApprovedNotesSha256,
+    [string]$HoldReason,
     [switch]$RetryUncertain,
     [switch]$ReplacePlayEdit
 )
@@ -31,7 +32,7 @@ Import-Module (Join-Path $PSScriptRoot 'Release.psm1') -Force
 $selected = @($Destination | ForEach-Object {$_.Split(',')} | Where-Object {$_})
 try {
     if ($Mode -in @('setup','validate','doctor','plan','prepare') -and -not $Repository) { throw '-Repository must name the inspected game Git root.' }
-    if ($Mode -in @('extend','publish','status','confirm') -and -not $StatePath) { throw '-StatePath must name an existing prepared release.' }
+    if ($Mode -in @('extend','hold','unhold','publish','status','confirm') -and -not $StatePath) { throw '-StatePath must name an existing prepared release.' }
     if ($Mode -eq 'confirm' -and -not $ReceiptPath) {throw '-ReceiptPath must name an actual observed store result.'}
     switch ($Mode) {
         'setup' {
@@ -69,6 +70,12 @@ try {
             $result=Expand-ReleaseDestinations -StatePath $StatePath -Destination $selected -GodotExecutable $GodotExecutable -ButlerExecutable $ButlerExecutable
             $result | ConvertTo-Json -Depth 20
             if ($result.status -in @('preparation-failed','source-update-required')) {exit 3}
+        }
+        'hold' {
+            Set-ReleaseDestinationHold -StatePath $StatePath -Destination $selected -Reason $HoldReason | ConvertTo-Json -Depth 20
+        }
+        'unhold' {
+            Set-ReleaseDestinationHold -StatePath $StatePath -Destination $selected -Release | ConvertTo-Json -Depth 20
         }
         'publish' {
             if ($selected.Count -gt 0 -or $Repository -or $StateRoot -or $GodotExecutable) { throw 'Publish uses only the sealed StatePath; selection and source options cannot replace the prepared plan.' }

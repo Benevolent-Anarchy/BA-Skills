@@ -80,7 +80,12 @@ These bind a persisted approval to the prepared artifacts as well.
 
 Resume the existing state directory after a failure; never bump the version as
 part of a retry. Report each destination separately. Keep successful operations
-complete while retrying failed operations. An interrupted upload remains
+complete while retrying failed operations. Hold prepared destinations that must
+not publish yet with `hold` and a public reason. Use `unhold` only when the user's
+condition is satisfied or they explicitly authorize resuming. Ordinary publish
+and retries retain holds and skip those stores completely. Source, notes,
+artifacts and plan identity stay unchanged. Started store operations require
+reconciliation rather than a hold. An interrupted upload remains
 `uncertain`; inspect its remote result and obtain explicit authorization before
 using `-RetryUncertain`. An expired/invalidated Play edit needs separate explicit
 authorization for `-ReplacePlayEdit` after inspecting the remote outcome and

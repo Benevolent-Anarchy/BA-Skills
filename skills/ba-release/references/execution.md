@@ -10,6 +10,8 @@ are passed after the script path. Comma-separated destination IDs work with
 -Mode prepare -Repository <game-root> -Destination itch-windows,notes -VersionChange patch
 -Mode extend -StatePath <prepared-state-directory> -Destination google-play
 -Mode status -StatePath <prepared-state-directory>
+-Mode hold -StatePath <prepared-state-directory> -Destination google-play -HoldReason "Waiting for existing review to clear."
+-Mode unhold -StatePath <prepared-state-directory> -Destination google-play
 -Mode publish -StatePath <prepared-state-directory> -ApprovedPlanId <displayed-id> -ApprovedNotesSha256 <displayed-notes-hash>
 -Mode confirm -StatePath <prepared-state-directory> -ReceiptPath <observed-store-receipt.json>
 ```
@@ -41,6 +43,23 @@ username cannot prove validity, store access or cached SteamCMD authentication.
 SDK/JDK and signing presence cannot prove compatibility or a valid signature.
 The complete project gate, real exports and store preflights still supply those
 checks. Doctor makes no remote calls, login attempts, exports or source/state writes.
+
+## Prepared destination holds
+
+Use `hold` with explicit prepared destination IDs and `-HoldReason` before any
+publication attempt for those destinations. The reason is public availability
+text; include no private discussion or credentials. Holds survive ordinary
+publish, retry and preparation. They preserve the sealed plan, notes, artifacts,
+version and counter reservations. Held stores receive no credential checks or
+API calls. Other approved destinations proceed independently.
+
+Use `unhold` only after verifying the user's release condition has been met or
+receiving explicit authorization to proceed. It returns that destination to
+pending; the next publish reuses the same approved release and skips completed
+stores. Neither command contacts stores. They refuse operations that already
+started, which require the ordinary reconciliation process. `on-hold` reports
+remaining intentional holds once other selected operations have completed;
+failures and outstanding console actions retain their own statuses.
 
 ## Local preparation
 
@@ -158,6 +177,7 @@ separate staging folder for inspection; only successful manifests can publish.
 | --- | --- |
 | `not-selected` | No operation requested for this destination. |
 | `pending` | Prepared, awaiting approved publication. |
+| `held` | Prepared but explicitly withheld; no store or credential operations occur until unheld. |
 | `in-progress` | Journal saved before invoking the external command. |
 | `succeeded` | External tool returned success, or existing public notes matched. |
 | `awaiting-store-action` | Store upload completed; activation/announcement or draft publication still needs console work. |
@@ -177,7 +197,7 @@ configured page labels can still need an Edit game action. It does not establish
 untested runtime behavior. Steam/Play uploads remain separate from observed live
 activation/review completion.
 
-Overall status is `prepared`, `preparation-failed`, `published`, `submitted`,
+Overall status is `prepared`, `preparation-failed`, `published`, `on-hold`, `submitted`,
 `needs-store-action`, `partial-failure`, `publication-failed`, or
 `needs-reconciliation`, or `awaiting-release`. Report the
 individual destinations and errors alongside that status. Never convert a

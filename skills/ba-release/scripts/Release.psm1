@@ -561,10 +561,11 @@ function Get-ReleaseOverallStatus($State) {
     $statuses=@($State.plan.selectedDestinations | ForEach-Object {$State.destinations[$_].status})
     if ($statuses -contains 'uncertain') {return 'needs-reconciliation'}
     $complete=@($statuses | Where-Object {$_ -in @('succeeded','submitted','awaiting-store-action')})
-    if (@($statuses | Where-Object {$_ -notin @('succeeded','submitted','awaiting-store-action','awaiting-release')}).Count -eq 0) {
+    if (@($statuses | Where-Object {$_ -notin @('succeeded','submitted','awaiting-store-action','awaiting-release','held')}).Count -eq 0) {
         if ($statuses -contains 'awaiting-store-action') {return 'needs-store-action'}
         if ($statuses -contains 'submitted') {return 'submitted'}
         if ($statuses -contains 'awaiting-release') {return 'awaiting-release'}
+        if ($statuses -contains 'held') {return 'on-hold'}
         return 'published'
     }
     if ($complete.Count) {return 'partial-failure'}
@@ -599,7 +600,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             Write-ReleaseJson $stateFile $state
         }
         if (-not $state.approval -or $state.approval.planId -cne $state.plan.planId -or $state.approval.notesSha256 -cne $notesHash -or $state.approval.artifactsSha256 -cne $artifactHash) { throw 'Publication requires approval of the exact release plan, notes and artifacts.' }
-        $notesDestination=@($state.plan.destinations | Where-Object {$_.selected -and $_.type -eq 'notes'})
+        $notesDestination=@($state.plan.destinations | Where-Object {$_.selected -and $_.type -eq 'notes' -and $state.destinations[$_.id].status -ne 'held'})
         if ($notesDestination.Count) {
             try {Assert-ReleaseNotesDestination $state.plan $notes $StatePath $GhExecutable}
             catch {
@@ -612,6 +613,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
         foreach ($destination in @($state.plan.destinations | Sort-Object { $_.type -eq 'notes' })) {
             if (-not $destination.selected) { continue }
             $record = $state.destinations[$destination.id]
+            if ($record.status -eq 'held') {continue}
             if ($destination.type -eq 'notes') {
                 if (-not (Test-ReleaseShipped $state $StatePath)) {$record.status='awaiting-release';$record.error=$null;Write-ReleaseJson $stateFile $state;continue}
                 if ($record.status -eq 'succeeded') {
@@ -751,4 +753,5 @@ function Confirm-ReleaseStoreCompletion([string]$StatePath, [string]$ReceiptPath
 . (Join-Path $PSScriptRoot 'ReleaseRecord.ps1')
 . (Join-Path $PSScriptRoot 'PublicNotes.ps1')
 . (Join-Path $PSScriptRoot 'Doctor.ps1')
-Export-ModuleMember -Function Get-ReleaseDoctor,Get-ReleaseConfiguration,Get-ReleasePlan,Get-ReleaseSetup,Set-ReleaseSetup,Invoke-ReleaseInteractiveSetup,Get-ReleaseVersion,Get-ReleaseLiveLedger,Expand-ReleaseDestinations,Export-ReleasePlayChangelogs,Invoke-ReleasePrepare,Invoke-ReleasePublish,Get-ReleaseNotesHash,Confirm-ReleaseStoreCompletion
+. (Join-Path $PSScriptRoot 'PublicationHold.ps1')
+Export-ModuleMember -Function Set-ReleaseDestinationHold,Get-ReleaseDoctor,Get-ReleaseConfiguration,Get-ReleasePlan,Get-ReleaseSetup,Set-ReleaseSetup,Invoke-ReleaseInteractiveSetup,Get-ReleaseVersion,Get-ReleaseLiveLedger,Expand-ReleaseDestinations,Export-ReleasePlayChangelogs,Invoke-ReleasePrepare,Invoke-ReleasePublish,Get-ReleaseNotesHash,Confirm-ReleaseStoreCompletion

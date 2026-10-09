@@ -1040,6 +1040,7 @@ Test 'version operations are explicit and holding Play leaves Android counters u
 . (Join-Path $PSScriptRoot 'doctor-tests.ps1')
 . (Join-Path $PSScriptRoot 'play-auth-tests.ps1')
 . (Join-Path $PSScriptRoot 'host-runtime-tests.ps1')
+. (Join-Path $PSScriptRoot 'publication-hold-tests.ps1')
 Write-Output "Results: $script:Passed passed; $script:Failed failed. Fixture directory: $sandbox"
 if ($script:Passed + $script:Failed -eq 0) {throw 'No tests matched Filter.'}
 if ($script:Failed -gt 0) { exit 1 }
