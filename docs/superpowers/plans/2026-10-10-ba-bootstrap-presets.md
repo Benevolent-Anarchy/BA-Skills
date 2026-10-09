@@ -212,7 +212,7 @@ $selection = [ordered]@{
 
 **Interfaces:** `New-BootstrapJournal` and `Get-BootstrapInputHash` gain optional `-PresetSelection`. With it, create schema v2; without it, retain schema v1 for existing Obsidian callers and compatibility fixtures. Produce `Get-BootstrapPreparedManifest`, `Save-BootstrapPreparedProject` and `Read-BootstrapPreparedProject`. Preparation orchestration is added in Task 7.
 
-- [ ] **Add failing frozen-byte/state cases.** Use a literal v1 fixture captured from the old constructor, not the new renderer. Test completed v1 reporting and preserved unfinished v1 recovery, omitted versus conflicting options, corrupted snapshot bytes and a missing snapshot.
+- [x] **Add failing frozen-byte/state cases.** Use a literal v1 fixture captured from the old constructor, not the new renderer. Test completed v1 reporting and preserved unfinished v1 recovery, omitted versus conflicting options, corrupted snapshot bytes and a missing snapshot.
 
 ```powershell
 Test 'preparation replays frozen bytes after upstream and skill changes' {
@@ -233,8 +233,8 @@ Test 'preparation replays frozen bytes after upstream and skill changes' {
 }
 ```
 
-- [ ] **Run `preparation*` and new `state*` cases to establish failure.** Existing v1 atomic-write and exclusive-lock tests must keep passing.
-- [ ] **Implement v2 validation and durable checkpoints.** Keep the existing journal key based on owner/repository; hash normalized identity plus canonical selection for v2. Record `presetSelection`, `recipeVersion`, `resolution`, `preparation` and `verification` in addition to existing identity/repository/ref/phases fields. Validate types, required keys and contained relative paths on read; unknown schemas remain preserved/blocked.
+- [x] **Run `preparation*` and new `state*` cases to establish failure.** Existing v1 atomic-write and exclusive-lock tests must keep passing.
+- [x] **Implement v2 validation and durable checkpoints.** Keep the existing journal key based on owner/repository; hash normalized identity plus canonical selection for v2. Record `presetSelection`, `recipeVersion`, `resolution`, `preparation` and `verification` in addition to existing identity/repository/ref/phases fields. Validate types, required keys and contained relative paths on read; unknown schemas remain preserved/blocked.
 
 ```powershell
 $journal.schemaVersion = 2
@@ -249,8 +249,8 @@ $journal.verification = @{staging=$null;checkout=$null}
 ```
 
 This records added fields alongside the existing identity/ref data. Store prepared source under the journal's state root; validate every ancestor against reparse points and traversal. Promote snapshots atomically, then record the receipt atomically under the existing invocation lock. A crash after snapshot promotion but before journal publication requires verifying/adopting that invocation-owned snapshot by its identity and hashes, not running the generator again. Never overwrite a differing snapshot.
-- [ ] **Verify interruption boundaries.** Interrupt after selection recording, generator output retention, lockfile retention, snapshot promotion and receipt publication. Resume reuses retained output/locks; no moving resolver or generator runs after its phase is durably complete. If an interrupted dependency step has no valid lock/receipt, preserve it and report the exact unresolved preparation rather than substituting a newer set. Completed creation reports must not revalidate the original files against later project work. Incomplete v1 whose original manifest no longer matches gives the matching-skill-version instruction before mutations; local Obsidian v1 journals still work.
-- [ ] **Run state, preparation and Obsidian suites**, then commit: `feat: freeze preset preparation and preserve legacy bootstrap state`.
+- [x] **Verify interruption boundaries.** Interrupt after selection recording, generator output retention, lockfile retention, snapshot promotion and receipt publication. Resume reuses retained output/locks; no moving resolver or generator runs after its phase is durably complete. If an interrupted dependency step has no valid lock/receipt, preserve it and report the exact unresolved preparation rather than substituting a newer set. Completed creation reports must not revalidate the original files against later project work. Incomplete v1 whose original manifest no longer matches gives the matching-skill-version instruction before mutations; local Obsidian v1 journals still work.
+- [x] **Run state, preparation and Obsidian suites**, then commit: `feat: freeze preset preparation and preserve legacy bootstrap state`.
 
 ## Task 4: Upstream dependency resolution and artifact integrity
 

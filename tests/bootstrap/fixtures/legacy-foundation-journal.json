@@ -1,0 +1,30 @@
+{
+  "templateVersion": "e4637acd9220a78fca0667f26120e46369c4ef24ef6d6ac33370a8a768d835c1",
+  "browserEvidence": {},
+  "manifest": [
+    {
+      "path": "README.md",
+      "sha256": "8e924706f61923d7e50a3f892f6442297f16d2b580f5cec6b9b9ba6bc6214802"
+    }
+  ],
+  "repositories": {},
+  "inputHash": "32bc5899b9a7c39766eb5b7ff13e0e1d142d42395acd42fed146c0dc806f1344",
+  "invocationId": "8a630b27-d548-43cb-ad0d-ee1b391a03e8",
+  "phases": {},
+  "refs": {},
+  "identity": {
+    "owner": "Benevolent-Anarchy",
+    "description": "Original v1 creation",
+    "defaultBranch": "main",
+    "repository": "Legacy-Fixture",
+    "parent": "C:\\Users\\cicel\\Dev",
+    "fullName": "Benevolent-Anarchy/Legacy-Fixture",
+    "title": "Legacy Fixture",
+    "notesFullName": "Benevolent-Anarchy/Legacy-Fixture-release-notes",
+    "vaultPath": "C:\\Users\\cicel\\Dev\\Legacy-Fixture\\docs",
+    "projectPath": "C:\\Users\\cicel\\Dev\\Legacy-Fixture",
+    "notesRepository": "Legacy-Fixture-release-notes"
+  },
+  "createdAt": "2026-10-09T22:33:21.1774740Z",
+  "schemaVersion": 1
+}

@@ -77,15 +77,21 @@ function Get-PublicReadme([hashtable]$Identity) {
     return $template.Replace('{{PROJECT_TITLE}}',$title)
 }
 
-function Assert-FoundationPath([string]$Root,[string]$Path) {
+function Assert-BootstrapOwnedPath([string]$Root,[string]$Path) {
     $rootPath=[IO.Path]::GetFullPath($Root)
     $current=[IO.Path]::GetFullPath($Path)
     if ($current -ne $rootPath -and -not $current.StartsWith($rootPath+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw 'Foundation path escapes its project.' }
     while ($current) {
         $item=Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
-        if ($item -and $item.LinkType) { throw "Foundation link conflict: $current" }
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Foundation link conflict: $current" }
         if ($current -eq $rootPath) { break }
         $current=Split-Path $current -Parent
+    }
+}
+function Assert-BootstrapRelativePath([string]$Path) {
+    if (-not $Path -or $Path -match '(^/|[\\:]|(^|/)\.{1,2}(/|$)|(^|/)\.git(/|$)|//)' -or [IO.Path]::IsPathRooted($Path)) {throw "Unsafe manifest path: $Path"}
+    foreach ($part in $Path.Split('/')) {
+        if (-not $part -or $part -match '[<>"|?*\x00-\x1f]' -or $part -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)' -or $part -match '[. ]$') {throw "Unsafe manifest path: $Path"}
     }
 }
 
@@ -94,16 +100,13 @@ function Write-BootstrapManifest([string]$Repository,[object[]]$Manifest) {
     $paths=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     # Preflight the entire manifest before creating even the first parent/file.
     foreach ($entry in $manifest) {
-        if (-not $entry.path -or $entry.path -match '(^/|[\\:]|(^|/)\.{1,2}(/|$)|(^|/)\.git(/|$)|//)' -or [IO.Path]::IsPathRooted($entry.path)) {throw "Unsafe manifest path: $($entry.path)"}
-        foreach ($part in $entry.path.Split('/')) {
-            if (-not $part -or $part -match '[<>"|?*\x00-\x1f]' -or $part -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)' -or $part -match '[. ]$') {throw "Unsafe manifest path: $($entry.path)"}
-        }
+        Assert-BootstrapRelativePath $entry.path
         if (-not $paths.Add($entry.path)) {throw "Duplicate manifest path: $($entry.path)"}
         [byte[]]$bytes=@(if ($entry.ContainsKey('bytes')) {$entry.bytes} else {[Text.Encoding]::UTF8.GetBytes($entry.text)})
         $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
         if ($hash -cne $entry.sha256) {throw "Manifest hash differs from bytes: $($entry.path)"}
         $target=Join-Path $Repository $entry.path
-        Assert-FoundationPath $Repository $target
+        Assert-BootstrapOwnedPath $Repository $target
         $item=Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
         if ($item -and ($item.PSIsContainer -or (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha256)) { throw "Foundation file conflict: $target" }
         $ancestor=Split-Path $target -Parent
@@ -133,4 +136,4 @@ function Write-BootstrapManifest([string]$Repository,[object[]]$Manifest) {
 function Write-ProjectFoundation([hashtable]$Identity,[string]$AssetRoot=(Join-Path $PSScriptRoot '../assets/project')) {
     Write-BootstrapManifest -Repository $Identity.projectPath -Manifest @(Get-ProjectManifest -Identity $Identity -AssetRoot $AssetRoot)
 }
-Export-ModuleMember -Function Resolve-BootstrapRepositoryName,New-BootstrapIdentity,Get-BootstrapContentHash,Get-ProjectManifest,Get-PublicReadme,Write-ProjectFoundation,Write-BootstrapManifest
+Export-ModuleMember -Function Resolve-BootstrapRepositoryName,New-BootstrapIdentity,Get-BootstrapContentHash,Get-ProjectManifest,Get-PublicReadme,Write-ProjectFoundation,Write-BootstrapManifest,Assert-BootstrapRelativePath,Assert-BootstrapOwnedPath
