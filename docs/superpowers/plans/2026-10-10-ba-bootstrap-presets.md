@@ -173,7 +173,7 @@ The common ignore adds literal `dist/` and `.test-results/` alongside existing l
 
 **Interfaces:** Produce `Resolve-BootstrapPreset`, `Assert-BootstrapPresetOverride` and `Get-BootstrapPrerequisites`. Do not switch the public CLI default until both engines and state recovery are integrated in Task 7.
 
-- [ ] **Add failing selection tests**, including this default/override behavior and renderer/identifier validation.
+- [x] **Add failing selection tests**, including this default/override behavior and renderer/identifier validation.
 
 ```powershell
 Test 'preset defaults to Godot and restores explicit choices' {
@@ -188,8 +188,8 @@ Test 'preset defaults to Godot and restores explicit choices' {
 }
 ```
 
-- [ ] **Run `preset*` cases and confirm they fail** because the resolver does not exist.
-- [ ] **Implement canonical selection.** Godot renderer values are `compatibility`, `forward-plus`, `mobile`; foundation/Tauri reject explicitly supplied Godot-only options. Suggest Tauri identifiers as `org.benevolent-anarchy.<package>` or `com.cicely-f.<package>` for the two known owners, with `com.<normalized-owner>.<package>` for another valid owner. Validate at least two nonempty dot-separated segments, each using ASCII letters/digits/hyphens and starting with a letter. Show the suggestion and allow an override. Independently derive lowercase npm package and Rust crate names, handling leading digits and reserved words; use a `project-` prefix for illegal/reserved bases, replace unsupported characters with hyphens and retain human title/repository case unchanged. Validate the resulting names against tool rules instead of assuming the GitHub slug is legal everywhere.
+- [x] **Run `preset*` cases and confirm they fail** because the resolver does not exist.
+- [x] **Implement canonical selection.** Godot renderer values are `compatibility`, `forward-plus`, `mobile`; foundation/Tauri reject explicitly supplied Godot-only options. Suggest Tauri identifiers as `org.benevolent-anarchy.<package>` or `com.cicely-f.<package>` for the two known owners, with `com.<normalized-owner>.<package>` for another valid owner. Validate at least two nonempty dot-separated segments, each using ASCII letters/digits/hyphens and starting with a letter. Show the suggestion and allow an override. Independently derive lowercase npm package and Rust crate names, handling leading digits and reserved words; use a `project-` prefix for illegal/reserved bases, replace unsupported characters with hyphens and retain human title/repository case unchanged. Validate the resulting names against tool rules instead of assuming the GitHub slug is legal everywhere.
 
 ```powershell
 $selection = [ordered]@{
@@ -203,8 +203,8 @@ $selection = [ordered]@{
 # Populate only fields belonging to the selected engine; serialize in this order.
 ```
 
-- [ ] **Add boundary cases and prerequisite inspection.** Exercise `1 Project`, `Foo_Bar`, `Foo.Bar`, `fn`, invalid identifiers, explicit non-applicable options, blank values, and personal owner suggestions. A read-only probe checks resolved executable/version and required components without installing anything. Godot supports the recipe's 4.7 family; Tauri reports Node/npm, Rust/cargo, rustfmt/clippy, MSVC and WebView2 separately. A missing executable is a diagnostic, not permission to invoke an installer.
-- [ ] **Run selection/prerequisite tests**, including a probe that throws if called as a mutation, then commit: `feat: resolve bootstrap presets and inspect native prerequisites`.
+- [x] **Add boundary cases and prerequisite inspection.** Exercise `1 Project`, `Foo_Bar`, `Foo.Bar`, `fn`, invalid identifiers, explicit non-applicable options, blank values, and personal owner suggestions. A read-only probe checks resolved executable/version and required components without installing anything. Godot supports the recipe's 4.7 family; Tauri reports Node/npm, Rust/cargo, rustfmt/clippy, MSVC and WebView2 separately. A missing executable is a diagnostic, not permission to invoke an installer.
+- [x] **Run selection/prerequisite tests**, including a probe that throws if called as a mutation, then commit: `feat: resolve bootstrap presets and inspect native prerequisites`.
 
 ## Task 3: Versioned state and frozen prepared-source replay
 
