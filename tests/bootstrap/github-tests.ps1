@@ -11,7 +11,7 @@ Test 'creation preflights both names auth owner and local collisions before muta
         if ($failure -eq 'owner') {$f.ownerStatus=404}
         if ($failure -eq 'access') {$f.orgRole='member'}
         if ($failure -eq 'local') {Write-FixtureText "$($id.projectPath)/unrelated.txt" 'Preserve'}
-        $report=Invoke-Bootstrap -Identity $id -StateRoot $f.stateRoot -Request $f.request -Git $f.git
+        $report=Invoke-Bootstrap -Identity $id -StateRoot $f.stateRoot -Request $f.request -Git $f.git -ObsidianSetup $f.obsidianSetup
         Assert ($report.status -eq 'blocked') "Collision accepted: $failure"
         Assert (@($f.calls | Where-Object method -ne 'GET').Count -eq 0) "Mutation preceded preflight: $failure"
     }
@@ -26,7 +26,7 @@ Test 'creation plans without changing remote or local state' {
 }
 Test 'creation seeds exact private and public trees with main and labels' {
     $f=New-GitHubFixture;$id=New-ApiIdentity 'Foundation'
-    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git
+    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
     Assert ($report.status -eq 'partial') ($report | ConvertTo-Json -Depth 9 -Compress)
     Assert (@($report.pending | Where-Object {$_ -match 'Pull requests'}).Count -eq 1) 'Missing browser phase falsely complete.'
     $private=$f.repos[$id.fullName];$public=$f.repos[$id.notesFullName]
@@ -41,33 +41,33 @@ Test 'creation seeds exact private and public trees with main and labels' {
 }
 Test 'creation resumes failed labels without recreating repos or contents' {
     $f=New-GitHubFixture -FailPhase labels;$id=New-ApiIdentity 'Retry'
-    $first=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git
+    $first=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
     Assert ($first.status -eq 'partial') 'Failed phase not partial.'
     $f.failPhase=''
-    $second=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git
+    $second=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
     Assert (@($f.calls | Where-Object isRepositoryCreate).Count -eq 2) 'Repos duplicated.'
     Assert ($second.phases.labels -eq 'verified') 'Labels did not resume.'
     Assert (@($f.calls | Where-Object { $_.method -eq 'PUT' -and $_.endpoint -like '*/contents/*' }).Count -eq 1) 'Content seed duplicated.'
 }
 Test 'creation quarantines an unconfirmed lost repository creation outcome' {
     $f=New-GitHubFixture;$f.lostCreate=$true;$id=New-ApiIdentity 'Ambiguous'
-    $first=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git
+    $first=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
     Assert ($first.status -eq 'identity-unconfirmed') ($first | ConvertTo-Json -Compress -Depth 9)
     $f.lostCreate=$false
-    $second=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git
+    $second=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
     Assert ($second.status -eq 'identity-unconfirmed') 'Unconfirmed repo adopted.'
     Assert (@($f.calls | Where-Object isRepositoryCreate).Count -eq 1) 'Ambiguous create retried.'
 }
 Test 'creation verifies lost push and public seed by readback before any retry' {
     $f=New-GitHubFixture;$f.lostPush=$true;$f.lostContents=$true;$id=New-ApiIdentity 'Lost Response'
-    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git
+    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
     Assert ($report.phases.privateContent -eq 'verified' -and $report.phases.publicContent -eq 'verified') ($report | ConvertTo-Json -Depth 9 -Compress)
     Assert (@($f.gitCalls | Where-Object {$_.arguments[0] -eq 'push'}).Count -eq 1) 'Push repeated.'
 }
 Test 'creation refuses changed repository IDs origins and staged content during recovery' {
     foreach ($change in @('id','visibility','origin','stage','input')) {
         $f=New-GitHubFixture -FailPhase labels;$id=New-ApiIdentity ('Recovery '+$change)
-        Invoke-Bootstrap $id $f.stateRoot $f.request $f.git | Out-Null
+        Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup | Out-Null
         $before=@($f.calls | Where-Object method -ne 'GET').Count
         switch ($change) {
             id {$f.repos[$id.fullName].id++}
@@ -77,14 +77,14 @@ Test 'creation refuses changed repository IDs origins and staged content during 
             input {$id.description='Changed'}
         }
         $f.failPhase=''
-        $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git
+        $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
         Assert ($report.status -eq 'blocked') "Changed $change accepted."
         Assert (@($f.calls | Where-Object method -ne 'GET').Count -eq $before) "Mutation preceded recovery validation: $change"
     }
 }
 Test 'creation accepts only browser evidence tied to the public repository ID' {
     $f=New-GitHubFixture;$id=New-ApiIdentity 'Browser'
-    Invoke-Bootstrap $id $f.stateRoot $f.request $f.git | Out-Null
+    Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup | Out-Null
     $evidence=@{repositoryId=0;disabled=$true;sourceUrl="https://github.com/$($id.notesFullName)/settings";observedAt=[datetime]::UtcNow.ToString('o')}
     Expect-Error {Set-BootstrapBrowserEvidence $id 'pullRequests' $evidence $f.stateRoot $f.request} 'identity|repository'
     $evidence.repositoryId=$f.repos[$id.notesFullName].id
@@ -100,13 +100,13 @@ Test 'creation CLI rejects missing inputs promptly with structured output' {
 }
 Test 'creation status reloads stored inputs without a description or parent prompt' {
     $f=New-GitHubFixture;$id=New-ApiIdentity 'Stored Inputs'
-    Invoke-Bootstrap $id $f.stateRoot $f.request $f.git | Out-Null
+    Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup | Out-Null
     $loaded=Get-BootstrapStoredIdentity -Name $id.title -Owner $id.owner -StateRoot $f.stateRoot
     Assert ($loaded.description -eq $id.description -and $loaded.projectPath -eq $id.projectPath) 'Stored inputs replaced.'
 }
 Test 'creation status reads effective public settings without repairing changes' {
     $f=New-GitHubFixture;$id=New-ApiIdentity 'Status Drift'
-    Invoke-Bootstrap $id $f.stateRoot $f.request $f.git | Out-Null
+    Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup | Out-Null
     $f.repos[$id.notesFullName].actions.enabled=$true
     $mutations=@($f.calls | Where-Object method -ne 'GET').Count
     $report=Get-BootstrapStatus $id $f.stateRoot $f.request
@@ -116,7 +116,7 @@ Test 'creation status reads effective public settings without repairing changes'
 Test 'creation rejects incompatible manifests corrupt journals and altered public seed' {
     foreach ($change in @('template','journal','content')) {
         $f=New-GitHubFixture -FailPhase labels;$id=New-ApiIdentity ('Bad '+$change)
-        Invoke-Bootstrap $id $f.stateRoot $f.request $f.git | Out-Null
+        Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup | Out-Null
         $path=Get-BootstrapJournalPath $id $f.stateRoot
         switch ($change) {
             template {$j=Read-BootstrapJournal $path;$j.templateVersion='old';Write-BootstrapJournal $path $j}
@@ -124,18 +124,30 @@ Test 'creation rejects incompatible manifests corrupt journals and altered publi
             content {$j=Read-BootstrapJournal $path;$j.phases.Remove('publicContent');Write-BootstrapJournal $path $j;$f.repos[$id.notesFullName].readme='Changed README'}
         }
         $before=@($f.calls | Where-Object method -ne 'GET').Count
-        $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git
+        $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
         Assert ($report.status -in @('partial','blocked')) "Changed $change accepted."
         Assert (@($f.calls | Where-Object method -ne 'GET').Count -eq $before) "Mutated before detecting $change conflict."
     }
 }
 Test 'creation repairs labels across pages while retaining extra labels' {
     $f=New-GitHubFixture -FailPhase labels;$id=New-ApiIdentity 'Label Pages'
-    Invoke-Bootstrap $id $f.stateRoot $f.request $f.git | Out-Null
+    Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup | Out-Null
     $repo=$f.repos[$id.fullName]
     for ($i=0;$i -lt 103;$i++) {$repo.labels["extra-$i"]=@{name="extra-$i";color='ffffff';description='Keep'}}
     $repo.labels.bug=@{name='bug';color='000000';description='Different'}
     $f.failPhase=''
-    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git
+    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
     Assert ($report.phases.labels -eq 'verified' -and $repo.labels.Count -eq 126 -and $repo.labels.bug.color -eq 'd73a4a') 'Labels lost or not repaired across pages.'
+}
+Test 'creation becomes complete only after browser and actual app verification' {
+    $f=New-GitHubFixture;$id=New-ApiIdentity 'Complete'
+    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($report.status -eq 'partial' -and $report.phases.obsidian -eq 'needs-app') 'App pending state missing.'
+    Set-BootstrapBrowserEvidence $id 'pullRequests' @{repositoryId=$f.repos[$id.notesFullName].id;disabled=$true;sourceUrl="https://github.com/$($id.notesFullName)/settings";observedAt=[datetime]::UtcNow.ToString('o')} $f.stateRoot $f.request | Out-Null
+    $f.appEnabled=$true
+    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($report.status -eq 'complete') 'Verified foundation did not complete.'
+    Write-FixtureText "$($id.projectPath)/docs/design/new-topic.md" '# Later development'
+    $after=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($after.status -eq 'complete' -and [IO.File]::ReadAllText("$($id.projectPath)/docs/design/new-topic.md") -ceq '# Later development') 'Completed invocation overwrote later canon.'
 }

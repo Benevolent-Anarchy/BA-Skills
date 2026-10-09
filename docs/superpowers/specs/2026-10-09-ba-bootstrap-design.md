@@ -247,3 +247,8 @@ The implementation plan is the next artifact after review of this design. No ski
 - [Obsidian: CLI and plugin commands](https://obsidian.md/help/cli).
 - [Obsidian: plugin release assets](https://docs.obsidian.md/Plugins/Releasing/Submit%20your%20plugin).
 - [Vault Nickname: configuration and display names](https://community.obsidian.md/plugins/vault-nickname).
+
+## Approved plugin packaging fallback (2026-10-09)
+
+If the newest published plugin release has inconsistent required assets or version metadata, choose the newest non-draft, non-prerelease release whose metadata is consistent. Report each skipped release and its reason alongside the installed version. A failed network request is an unresolved download, not evidence of inconsistent metadata. This was explicitly selected after observing Dataview's 0.5.70 release with a 0.5.68 manifest.
+

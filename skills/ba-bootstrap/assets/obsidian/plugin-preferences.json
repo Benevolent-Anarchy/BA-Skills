@@ -1,0 +1,82 @@
+{
+  "vault-nickname": {
+    "data.json": {
+      "overrideAppTitle": "override-app-title:vault-first",
+      "enableBackwardsCompatibilty": true
+    }
+  },
+  "dataview": {
+    "data.json": {
+      "renderNullAs": "\\-",
+      "taskCompletionTracking": true,
+      "taskCompletionUseEmojiShorthand": true,
+      "taskCompletionText": "completion",
+      "taskCompletionDateFormat": "yyyy-MM-dd",
+      "recursiveSubTaskCompletion": false,
+      "warnOnEmptyResult": true,
+      "refreshEnabled": true,
+      "refreshInterval": 2500,
+      "defaultDateFormat": "yyyy-MM-dd",
+      "defaultDateTimeFormat": "yyyy-MM-dd HH:mm:ss",
+      "maxRecursiveRenderDepth": 4,
+      "tableIdColumnName": "File",
+      "tableGroupColumnName": "Group",
+      "showResultCount": true,
+      "allowHtml": true,
+      "inlineQueryPrefix": "=",
+      "inlineJsQueryPrefix": "$=",
+      "inlineQueriesInCodeblocks": true,
+      "enableInlineDataview": true,
+      "enableDataviewJs": true,
+      "enableInlineDataviewJs": true,
+      "prettyRenderInlineFields": true,
+      "prettyRenderInlineFieldsInLivePreview": true,
+      "dataviewJsKeyword": "dataviewjs"
+    }
+  },
+  "vault-inspector": {
+    "data.json": {
+      "settings": {
+        "enabledScanners": {
+          "broken-links": true,
+          "orphan-attachments": true,
+          "empty-notes": true,
+          "external-links": false,
+          "duplicate-files": true,
+          "frontmatter-types": true,
+          "tag-usage": true,
+          "large-files": true
+        },
+        "enableFixActions": true,
+        "duplicateKeepMode": "always-ask",
+        "largeMarkdownBytes": 256000,
+        "largeAttachmentBytes": 5242880,
+        "ignoredLargeMarkdownFrontmatterKeys": [
+          "excalidraw-plugin"
+        ],
+        "ignoredLargeMarkdownPathPatterns": [],
+        "duplicateHashMaxBytes": 1048576,
+        "lowUsageTagThreshold": 2,
+        "emptyNoteWordThreshold": 5,
+        "watchedTags": [],
+        "ignoredIssueFingerprints": [],
+        "ignoredFolders": [],
+        "ignoredFoldersByScanner": {
+          "broken-links": [],
+          "orphan-attachments": [],
+          "empty-notes": [],
+          "external-links": [],
+          "duplicate-files": [],
+          "frontmatter-types": [],
+          "tag-usage": [],
+          "large-files": []
+        },
+        "ignoreUnresolvedNoteLinks": false,
+        "ignoredProperties": [],
+        "automaticScanIntervalHours": 0,
+        "automaticScanNetworkChecks": false,
+        "reportFolderPath": "Vault Inspector Reports"
+      }
+    }
+  }
+}

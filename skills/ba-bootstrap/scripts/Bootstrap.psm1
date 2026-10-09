@@ -4,6 +4,7 @@ $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'Project.psm1')
 Import-Module (Join-Path $PSScriptRoot 'State.psm1')
 Import-Module (Join-Path $PSScriptRoot 'GitHub.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Obsidian.psm1')
 $script:DefaultRequest={param($Method,$Endpoint,$Body) Invoke-GitHubRequest $Method $Endpoint $Body}
 $script:DefaultGit={param($Repository,$Arguments) Invoke-BootstrapGit $Repository $Arguments}
 function Invoke-CheckedApi($Request,$Method,$Endpoint,$Body=$null,$Allowed=@(200,201,204)) {
@@ -80,6 +81,7 @@ function Get-BootstrapPlan([hashtable]$Identity,[scriptblock]$Request=$script:De
     try {
         $manifest=Get-ProjectManifest $Identity
         $journal=Read-BootstrapJournal (Get-BootstrapJournalPath $Identity $StateRoot)
+        if ($null -ne $journal -and $journal.inputHash -ne (Get-BootstrapInputHash $Identity)) {throw 'Journal input differs from the requested identity.'}
         if ($null -ne $journal -and -not ($journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified')) {Assert-BootstrapJournal $journal $Identity $manifest}
         Test-BootstrapLocalState $Identity $journal $manifest $Git ($null -ne $journal -and $journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified')
         $user=(Invoke-CheckedApi $Request GET '/user').Data
@@ -132,7 +134,10 @@ function Get-BootstrapStatus([hashtable]$Identity,[string]$StateRoot=(Get-Bootst
         return $report
     } catch {return Get-BootstrapReport $Identity $null 'blocked' @() @($_.Exception.Message)}
 }
-function Invoke-Bootstrap([hashtable]$Identity,[string]$StateRoot=(Get-BootstrapStateRoot),[scriptblock]$Request=$script:DefaultRequest,[scriptblock]$Git=$script:DefaultGit) {
+function Invoke-Bootstrap(
+    [hashtable]$Identity,[string]$StateRoot=(Get-BootstrapStateRoot),[scriptblock]$Request=$script:DefaultRequest,[scriptblock]$Git=$script:DefaultGit,
+    [scriptblock]$ObsidianSetup={param($id,$state,$refresh) Install-ProjectObsidian -Identity $id -StateRoot $state -RefreshPlugins:$refresh},[switch]$RefreshPlugins
+) {
     $lock=$null;$journal=$null;$path=Get-BootstrapJournalPath $Identity $StateRoot
     try {
         $plan=Get-BootstrapPlan $Identity $Request $StateRoot $Git
@@ -246,6 +251,17 @@ function Invoke-Bootstrap([hashtable]$Identity,[string]$StateRoot=(Get-Bootstrap
         if ($pages.StatusCode -ne 404) {throw 'Public repository has unexpected Pages configuration.'}
         Save-Phase 'publicSettings'
         if (-not $journal.phases.ContainsKey('pullRequests')) {Save-Phase 'pullRequests' 'needs-browser'}
+        if ($RefreshPlugins -or -not ($journal.phases.ContainsKey('obsidian') -and $journal.phases.obsidian -eq 'verified')) {
+            $obsidian=& $ObsidianSetup $Identity $StateRoot $RefreshPlugins.IsPresent
+            $journal.obsidian=@{journalPath=$obsidian.journalPath;plugins=$obsidian.plugins;enabledVerified=$obsidian.enabledVerified;observedAt=[datetime]::UtcNow.ToString('o')}
+            Save-Phase 'obsidian' $(if (-not $obsidian.installedVerified) {'incomplete'} elseif ($obsidian.enabledVerified) {'verified'} else {'needs-app'})
+            if (-not $obsidian.installedVerified -or -not $obsidian.enabledVerified) {
+                $report=Get-BootstrapStatus $Identity $StateRoot $Request
+                $report.pending+=@($obsidian.pending)
+                return $report
+            }
+        }
+        if ($journal.phases.pullRequests -eq 'verified' -and $journal.phases.obsidian -eq 'verified') {Save-Phase 'complete'}
         return Get-BootstrapStatus $Identity $StateRoot $Request
     } catch {
         $status=if ($null -ne $journal) {'partial'} else {'blocked'}

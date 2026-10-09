@@ -1,5 +1,7 @@
 function New-GitHubFixture([switch]$ExistingPublic,[string]$FailPhase='') {
     $fixture=@{stateRoot=(New-BootstrapFixture 'api-state');bareRoot=(New-BootstrapFixture 'bare');repos=@{};calls=[Collections.Generic.List[object]]::new();gitCalls=[Collections.Generic.List[object]]::new();failPhase=$FailPhase;lostCreate=$false;lostPush=$false;lostContents=$false;initialBranch='master';nextId=100;authStatus=200;ownerStatus=200;user='cicely-f';orgRole='admin';existingPublic=$ExistingPublic.IsPresent}
+    $fixture.appEnabled=$false
+    $fixture.obsidianSetup={param($Identity,$StateRoot,$Refresh) @{installedVerified=$true;enabledVerified=$fixture.appEnabled;plugins=@();pending=@('Fixture app enablement pending');journalPath='fixture'}}.GetNewClosure()
     $fixture.request={param($Method,$Endpoint,$Body)
         $fixture.calls.Add(@{method=$Method;endpoint=$Endpoint;body=$Body;isRepositoryCreate=($Method -eq 'POST' -and $Endpoint -match '^/(orgs/[^/]+|user)/repos$')})
         if ($Endpoint -eq '/user') {return @{StatusCode=$fixture.authStatus;Data=@{login=$fixture.user}}}
