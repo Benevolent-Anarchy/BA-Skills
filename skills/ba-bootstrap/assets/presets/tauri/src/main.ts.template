@@ -1,0 +1,9 @@
+import "./styles.css";
+
+const projectTitle = {{TITLE_JSON}};
+document.title = projectTitle;
+const app = document.querySelector<HTMLDivElement>("#app");
+if (!app) throw new Error("The starter requires an #app element.");
+const title = document.createElement("h1");
+title.textContent = projectTitle;
+app.replaceChildren(title);

@@ -32,7 +32,7 @@ function Invoke-VerificationProcess([string]$Executable,[string[]]$Arguments,[st
     } finally {$process.Dispose()}
 }
 function Invoke-ProjectVerification([string]$Repository,[scriptblock]$Process={param($exe,$arguments,$cwd,$environment) Invoke-VerificationProcess $exe $arguments $cwd $environment}) {
-    $stages=[Collections.Generic.List[object]]::new();$diagnostics=[Collections.Generic.List[string]]::new()
+    $stages=[Collections.Generic.List[object]]::new();$diagnostics=[Collections.Generic.List[string]]::new();$binary=$null
     try {$config=Read-ProjectVerificationConfig $Repository}
     catch {return @{Passed=$false;Stages=@();Diagnostics=@($_.Exception.Message)}}
     try {
@@ -48,6 +48,7 @@ function Invoke-ProjectVerification([string]$Repository,[scriptblock]$Process={p
             if (-not (Test-Path -LiteralPath $module -PathType Leaf)) {throw "Required preset helper missing: $module"}
             Import-Module $module -Force
             $engine=if ($config.preset -eq 'godot') {Invoke-GodotVerification $Repository $config $Process} else {Invoke-TauriVerification $Repository $config $Process}
+            if ($engine.ContainsKey('BinaryPath')) {$binary=$engine.BinaryPath}
             foreach ($stage in $engine.Stages) {$stages.Add($stage)}
             foreach ($message in $engine.Diagnostics) {$diagnostics.Add($message)}
         } catch {$stages.Add(@{Name=$config.preset;Passed=$false;ExitCode=1;Diagnostics=@($_.Exception.Message)})}
@@ -56,6 +57,6 @@ function Invoke-ProjectVerification([string]$Repository,[scriptblock]$Process={p
         if (@($stages | Where-Object Name -eq $required).Count -ne 1) {$stages.Add(@{Name=$required;Passed=$false;ExitCode=1;Diagnostics=@("Required stage did not report exactly one result: $required")})}
     }
     foreach ($stage in $stages) {foreach ($message in $stage.Diagnostics) {$diagnostics.Add([string]$message)}}
-    return @{Passed=(@($stages | Where-Object {-not $_.Passed}).Count -eq 0);Stages=$stages.ToArray();Diagnostics=$diagnostics.ToArray()}
+    return @{Passed=(@($stages | Where-Object {-not $_.Passed}).Count -eq 0);Stages=$stages.ToArray();Diagnostics=$diagnostics.ToArray();BinaryPath=$binary}
 }
 Export-ModuleMember -Function Read-ProjectVerificationConfig,Invoke-ProjectVerification,Invoke-VerificationProcess

@@ -362,7 +362,7 @@ The preset ignore fragment includes `.godot/`, `*.translation`, `export_credenti
 
 **Interfaces:** Produce `Initialize-TauriPreset`, `Assert-TauriSelectedRelease` and project-owned `Invoke-TauriVerification`; consume recorded selections, owned staging and the common process/gate contracts. Backend configuration, icons and Rust source originate from the recorded official generator, not a BA v2 stub.
 
-- [ ] **Add failing generator/preparation tests.** The process fixture writes representative official starter files, including binary icons, and logs invocation arguments. Test exact generator version, vanilla TypeScript/npm choice, names/identifier, actual locked Tauri release, changed generator layout, ignore merging, source exclusions, and missing/failed package installation or lockfile generation.
+- [x] **Add failing generator/preparation tests.** The process fixture writes representative official starter files, including binary icons, and logs invocation arguments. Test exact generator version, vanilla TypeScript/npm choice, names/identifier, actual locked Tauri release, changed generator layout, ignore merging, source exclusions, and missing/failed package installation or lockfile generation.
 
 ```powershell
 Test 'Tauri selected-release check rejects the application using an older major' {
@@ -377,8 +377,8 @@ Test 'Tauri selected-release check rejects the application using an older major'
 }
 ```
 
-- [ ] **Run `Tauri*` cases to confirm missing-helper failure.** In the generator fixture define all expected layout files for success tests; missing-layout tests deliberately remove one. Never let an unknown fixture request contact the real network.
-- [ ] **Execute the recorded upstream generator once and apply the BA overlay.** The initial supported command shape is below, with flags checked against that recorded generator's help; adapt concrete flag/layout changes only after inspection. The version argument comes from state, never a literal `latest` on retry.
+- [x] **Run `Tauri*` cases to confirm missing-helper failure.** In the generator fixture define all expected layout files for success tests; missing-layout tests deliberately remove one. Never let an unknown fixture request contact the real network.
+- [x] **Execute the recorded upstream generator once and apply the BA overlay.** The initial supported command shape is below, with flags checked against that recorded generator's help; adapt concrete flag/layout changes only after inspection. The version argument comes from state, never a literal `latest` on retry.
 
 ```powershell
 $arguments = @('exec','--yes',"--package=create-tauri-app@$($Resolution.selections.generator)",'--',
@@ -405,10 +405,10 @@ test("the starter renders the project title", async () => {
 });
 ```
 
-- [ ] **Generate locks and validate actual dependencies.** Resolve the selected stable Tauri crate exactly; retain upstream-compatible CLI/API/plugin/build crate selections instead of equating their version numbers. Use npm to produce `package-lock.json` with real integrity/resolved entries, and Cargo to produce `Cargo.lock`; checkpoint and retain these files before installing/running remaining build steps. Verify through Cargo metadata that the application uses the selected Tauri release. Subsequent installation uses `npm ci`; Cargo checks/builds use locked resolution. Unknown upstream incompatibility blocks preparation, never selects an older major.
+- [x] **Generate locks and validate actual dependencies.** Resolve the selected stable Tauri crate exactly; retain upstream-compatible CLI/API/plugin/build crate selections instead of equating their version numbers. Use npm to produce `package-lock.json` with real integrity/resolved entries, and Cargo to produce `Cargo.lock`; checkpoint and retain these files before installing/running remaining build steps. Verify through Cargo metadata that the application uses the selected Tauri release. Subsequent installation uses `npm ci`; Cargo checks/builds use locked resolution. Unknown upstream incompatibility blocks preparation, never selects an older major.
 
 Merge upstream `.gitignore` entries with shared `dist/`, local tooling and BA verification output. Validate ignored actual `node_modules/`, Rust `target/`, generated schema paths, Vite/TypeScript/test caches and local env files while retaining deliberate examples, icons, locks, permission files and source. Do not put installed package-manager dependencies in the source snapshot.
-- [ ] **Implement and test the aggregate Tauri stages.** Required stages are documentation, TypeScript checking, frontend tests, frontend build, Rust formatting, Rust lint, Rust tests and native desktop build without installer bundles. Initial command contracts are:
+- [x] **Implement and test the aggregate Tauri stages.** Required stages are documentation, TypeScript checking, frontend tests, frontend build, Rust formatting, Rust lint, Rust tests and native desktop build without installer bundles. Initial command contracts are:
 
 ```powershell
 npm run typecheck
@@ -421,8 +421,8 @@ npm run tauri -- build --no-bundle --ci -- --locked
 ```
 
 Project-owned commands retain the selected release's supported invocation. Confirm the CLI accepts the locked Cargo forwarding; never use `--ignore-version-mismatches`. Treat absent rustfmt/clippy, missing node modules, stale/mutated locks, malformed test results and any stage failure as failure. Record the native binary path after build; do not equate a frontend-only build with desktop success. Separate app launch evidence from build evidence.
-- [ ] **Run fixture gate cases for each required stage failing alone**, for paths containing spaces and for unavailable native dependencies. Run a real native Tauri starter when Rust/MSVC/WebView2 prerequisites are available; otherwise keep this task's native validation pending and continue independent offline work.
-- [ ] **Commit after the meaningful fixture checks pass**, retaining an explicit native-pending record if prerequisites remain: `feat: prepare latest-stable Tauri starters with locked native verification`.
+- [x] **Run fixture gate cases for each required stage failing alone**, for paths containing spaces and for unavailable native dependencies. Run a real native Tauri starter when Rust/MSVC/WebView2 prerequisites are available; otherwise keep this task's native validation pending and continue independent offline work.
+- [x] **Commit after the meaningful fixture checks pass**, retaining an explicit native-pending record if prerequisites remain: `feat: prepare latest-stable Tauri starters with locked native verification`.
 
 ## Task 7: Integrate preparation with the creation, resume and status ceremony
 
