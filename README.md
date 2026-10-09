@@ -2,7 +2,8 @@
 BA's shared agent skills and deterministic tooling for Codex and Claude Code.
 
 The canonical release skill is [skills/ba-release/SKILL.md](skills/ba-release/SKILL.md).
-Install its user-level links from PowerShell 7.2 or newer:
+Use PowerShell 7.3 or newer for release operations and tests; installation also
+supports PowerShell 7.2:
 
 ```powershell
 pwsh -NoProfile -File ./install.ps1 -IncludeWsl

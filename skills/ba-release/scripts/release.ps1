@@ -1,5 +1,5 @@
 # Exposes validation, read-only planning, local preparation, publication and journal inspection.
-#requires -Version 7.2
+#requires -Version 7.3
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidateSet('setup','validate','doctor','plan','prepare','extend','hold','unhold','publish','status','confirm')][string]$Mode,
@@ -24,6 +24,7 @@ param(
     [string]$ApprovedPlanId,
     [string]$ApprovedNotesSha256,
     [string]$HoldReason,
+    [switch]$PlayTrackReviewed,
     [switch]$RetryUncertain,
     [switch]$ReplacePlayEdit
 )
@@ -31,6 +32,8 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Release.psm1') -Force
 $selected = @($Destination | ForEach-Object {$_.Split(',')} | Where-Object {$_})
 try {
+    if ($Mode -eq 'unhold' -and $PSBoundParameters.ContainsKey('HoldReason')) {throw '-HoldReason cannot be supplied to unhold.'}
+    if ($PlayTrackReviewed -and $Mode -ne 'unhold') {throw '-PlayTrackReviewed applies only to unhold.'}
     if ($Mode -in @('setup','validate','doctor','plan','prepare') -and -not $Repository) { throw '-Repository must name the inspected game Git root.' }
     if ($Mode -in @('extend','hold','unhold','publish','status','confirm') -and -not $StatePath) { throw '-StatePath must name an existing prepared release.' }
     if ($Mode -eq 'confirm' -and -not $ReceiptPath) {throw '-ReceiptPath must name an actual observed store result.'}
@@ -75,7 +78,7 @@ try {
             Set-ReleaseDestinationHold -StatePath $StatePath -Destination $selected -Reason $HoldReason | ConvertTo-Json -Depth 20
         }
         'unhold' {
-            Set-ReleaseDestinationHold -StatePath $StatePath -Destination $selected -Release | ConvertTo-Json -Depth 20
+            Set-ReleaseDestinationHold -StatePath $StatePath -Destination $selected -Release -PlayTrackReviewed:$PlayTrackReviewed | ConvertTo-Json -Depth 20
         }
         'publish' {
             if ($selected.Count -gt 0 -or $Repository -or $StateRoot -or $GodotExecutable) { throw 'Publish uses only the sealed StatePath; selection and source options cannot replace the prepared plan.' }
