@@ -66,7 +66,8 @@ function Get-ProjectManifest([hashtable]$Identity,[string]$AssetRoot=(Join-Path 
         $text=[IO.File]::ReadAllText($file.FullName).Replace("`r`n","`n")
         # Replace tokens in one pass, so supplied text containing a token stays literal.
         $text=[regex]::Replace($text,'\{\{(?:PROJECT_TITLE|DESCRIPTION|ISSUES_URL)\}\}',[Text.RegularExpressions.MatchEvaluator]{param($match) $tokens[$match.Value]})
-        @{path=$relative; text=$text; sha256=(Get-BootstrapContentHash $text)}
+        $text=$text.Replace("`r`n","`n")
+        @{path=$relative; text=$text; bytes=[Text.Encoding]::UTF8.GetBytes($text); sha256=(Get-BootstrapContentHash $text)}
     }
 }
 
@@ -88,28 +89,48 @@ function Assert-FoundationPath([string]$Root,[string]$Path) {
     }
 }
 
-function Write-ProjectFoundation([hashtable]$Identity,[string]$AssetRoot=(Join-Path $PSScriptRoot '../assets/project')) {
-    $manifest=@(Get-ProjectManifest -Identity $Identity -AssetRoot $AssetRoot)
+function Write-BootstrapManifest([string]$Repository,[object[]]$Manifest) {
+    $Repository=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Repository))
+    $paths=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     # Preflight the entire manifest before creating even the first parent/file.
     foreach ($entry in $manifest) {
-        $target=Join-Path $Identity.projectPath $entry.path
-        Assert-FoundationPath $Identity.projectPath $target
+        if (-not $entry.path -or $entry.path -match '(^/|[\\:]|(^|/)\.{1,2}(/|$)|(^|/)\.git(/|$)|//)' -or [IO.Path]::IsPathRooted($entry.path)) {throw "Unsafe manifest path: $($entry.path)"}
+        foreach ($part in $entry.path.Split('/')) {
+            if (-not $part -or $part -match '[<>"|?*\x00-\x1f]' -or $part -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)' -or $part -match '[. ]$') {throw "Unsafe manifest path: $($entry.path)"}
+        }
+        if (-not $paths.Add($entry.path)) {throw "Duplicate manifest path: $($entry.path)"}
+        [byte[]]$bytes=@(if ($entry.ContainsKey('bytes')) {$entry.bytes} else {[Text.Encoding]::UTF8.GetBytes($entry.text)})
+        $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+        if ($hash -cne $entry.sha256) {throw "Manifest hash differs from bytes: $($entry.path)"}
+        $target=Join-Path $Repository $entry.path
+        Assert-FoundationPath $Repository $target
         $item=Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
         if ($item -and ($item.PSIsContainer -or (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha256)) { throw "Foundation file conflict: $target" }
         $ancestor=Split-Path $target -Parent
         while ($ancestor) {
             $parentItem=Get-Item -LiteralPath $ancestor -Force -ErrorAction SilentlyContinue
             if ($parentItem -and -not $parentItem.PSIsContainer) { throw "Foundation parent conflict: $ancestor" }
-            if ($ancestor -eq $Identity.projectPath) { break }; $ancestor=Split-Path $ancestor -Parent
+            if ($ancestor -eq $Repository) { break }; $ancestor=Split-Path $ancestor -Parent
+        }
+    }
+    foreach ($relative in $paths) {
+        $parent=$relative
+        while ($parent.Contains('/')) {
+            $parent=$parent.Substring(0,$parent.LastIndexOf('/'))
+            if ($paths.Contains($parent)) {throw "Manifest parent file conflict: $parent"}
         }
     }
     foreach ($entry in $manifest) {
-        $target=Join-Path $Identity.projectPath $entry.path
+        $target=Join-Path $Repository $entry.path
         if (-not (Test-Path -LiteralPath $target)) {
             New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force | Out-Null
-            [IO.File]::WriteAllText($target,$entry.text,[Text.UTF8Encoding]::new($false))
+            [byte[]]$bytes=@(if ($entry.ContainsKey('bytes')) {$entry.bytes} else {[Text.Encoding]::UTF8.GetBytes($entry.text)})
+            [IO.File]::WriteAllBytes($target,$bytes)
         }
     }
     return $manifest
 }
-Export-ModuleMember -Function Resolve-BootstrapRepositoryName,New-BootstrapIdentity,Get-BootstrapContentHash,Get-ProjectManifest,Get-PublicReadme,Write-ProjectFoundation
+function Write-ProjectFoundation([hashtable]$Identity,[string]$AssetRoot=(Join-Path $PSScriptRoot '../assets/project')) {
+    Write-BootstrapManifest -Repository $Identity.projectPath -Manifest @(Get-ProjectManifest -Identity $Identity -AssetRoot $AssetRoot)
+}
+Export-ModuleMember -Function Resolve-BootstrapRepositoryName,New-BootstrapIdentity,Get-BootstrapContentHash,Get-ProjectManifest,Get-PublicReadme,Write-ProjectFoundation,Write-BootstrapManifest

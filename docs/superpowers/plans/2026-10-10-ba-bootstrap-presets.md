@@ -125,7 +125,7 @@ Keep this a single implementation plan: both presets share byte manifests, state
 
 **Interfaces:** Retain `Get-ProjectManifest` and `Write-ProjectFoundation`. Produce `Write-BootstrapManifest`, `Read-ProjectVerificationConfig` and `Invoke-ProjectVerification`. Initially only foundation checks are runnable; engine configurations require helpers/stages instead of falling back.
 
-- [ ] **Write behavior tests for source bytes, ignore rules and gate corruption.** Add the binary roundtrip test below. Add subcases for a junction parent, path traversal, duplicate paths differing only in case, and a late conflict which must prevent earlier writes.
+- [x] **Write behavior tests for source bytes, ignore rules and gate corruption.** Add the binary roundtrip test below. Add subcases for a junction parent, path traversal, duplicate paths differing only in case, and a late conflict which must prevent earlier writes.
 
 ```powershell
 Test 'manifest preserves binary files and preflights all conflicts' {
@@ -144,8 +144,8 @@ Test 'manifest preserves binary files and preflights all conflicts' {
 }
 ```
 
-- [ ] **Establish the red result.** Run `pwsh -NoProfile -File tests/bootstrap/run-tests.ps1 -Filter 'manifest*'`; expect missing byte writer. Run new `gate*` cases separately; missing/invalid config and declared-engine-with-missing-helper must currently fail their assertions.
-- [ ] **Implement the byte writer and explicit gate schema.** Compute binary hashes from actual bytes, normalize only text templates to LF, and write with `WriteAllBytes`. Do not decode icons, archives or assets as UTF-8. Keep static `.text` for old fixture compatibility, but choose `.bytes` when present. Enforce configuration shape and required stage sets; configuration cannot omit a required stage for its declared preset.
+- [x] **Establish the red result.** Run `pwsh -NoProfile -File tests/bootstrap/run-tests.ps1 -Filter 'manifest*'`; expect missing byte writer. Run new `gate*` cases separately; missing/invalid config and declared-engine-with-missing-helper must currently fail their assertions.
+- [x] **Implement the byte writer and explicit gate schema.** Compute binary hashes from actual bytes, normalize only text templates to LF, and write with `WriteAllBytes`. Do not decode icons, archives or assets as UTF-8. Keep static `.text` for old fixture compatibility, but choose `.bytes` when present. Enforce configuration shape and required stage sets; configuration cannot omit a required stage for its declared preset.
 
 ```json
 {"schemaVersion":1,"preset":"foundation","requiredChecks":["documentation"]}
@@ -164,8 +164,8 @@ Test 'manifest preserves binary files and preflights all conflicts' {
 ```
 
 The common ignore adds literal `dist/` and `.test-results/` alongside existing local-tooling rules. Gate failures remain nonzero; report each executed/blocked stage and its diagnostic. Preserve `Test-ProjectDocumentation` and its full index/heading checks.
-- [ ] **Verify effective Git behavior and text filters.** In isolated fixture Git with system/global configuration and `core.excludesFile` disabled, assert `dist/export.exe` and `nested/dist/export.zip` are ignored while `assets/source.png` and `tools/helper.exe` are addable. Initialize Git, add/commit the binary fixture and LF templates, then compare `git hash-object --no-filters` with committed blobs. Configure `core.autocrlf=true` in a second case to prove the generated attributes preserve intended initial bytes.
-- [ ] **Run all existing documentation/project tests and the new gate cases**, then commit these cohesive shared changes: `feat: add byte-safe bootstrap manifests and explicit verification configuration`.
+- [x] **Verify effective Git behavior and text filters.** In isolated fixture Git with system/global configuration and `core.excludesFile` disabled, assert `dist/export.exe` and `nested/dist/export.zip` are ignored while `assets/source.png` and `tools/helper.exe` are addable. Initialize Git, add/commit the binary fixture and LF templates, then compare `git hash-object --no-filters` with committed blobs. Configure `core.autocrlf=true` in a second case to prove the generated attributes preserve intended initial bytes.
+- [x] **Run all existing documentation/project tests and the new gate cases**, then commit these cohesive shared changes: `feat: add byte-safe bootstrap manifests and explicit verification configuration`.
 
 ## Task 2: Pure preset selection and deterministic tool names
 

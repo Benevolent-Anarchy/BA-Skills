@@ -3,13 +3,12 @@
 param()
 $ErrorActionPreference='Stop'
 try {
-    Import-Module (Join-Path $PSScriptRoot 'Documentation.psm1') -Force
-    $report=Test-ProjectDocumentation -Repository (Split-Path $PSScriptRoot -Parent)
-    foreach ($item in $report.Diagnostics) {
-        Write-Output ("{0}:{1}: {2}: {3}" -f $item.File,$item.Line,$item.Code,$item.Message)
-    }
+    Import-Module (Join-Path $PSScriptRoot 'Verification.psm1') -Force
+    $report=Invoke-ProjectVerification -Repository (Split-Path $PSScriptRoot -Parent)
+    foreach ($message in $report.Diagnostics) {Write-Output $message}
+    foreach ($stage in $report.Stages) {Write-Output ("{0}: {1}" -f $stage.Name,$(if($stage.Passed){'passed'}else{'FAILED'}))}
     if (-not $report.Passed) {exit 1}
-    Write-Output 'Verification passed: documentation.'
+    Write-Output 'Verification passed: complete project gate.'
     exit 0
 } catch {
     Write-Error $_ -ErrorAction Continue
