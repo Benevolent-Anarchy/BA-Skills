@@ -4,6 +4,42 @@ Import-Module "$skillRoot/scripts/State.psm1" -Force
 if (Test-Path "$skillRoot/scripts/Bootstrap.psm1") {Import-Module "$skillRoot/scripts/Bootstrap.psm1" -Force}
 . "$PSScriptRoot/GitHubFixture.ps1"
 function New-ApiIdentity($Name) {New-BootstrapIdentity -Name $Name -Description 'Private project purpose' -Parent (New-BootstrapFixture 'project-parent')}
+Test 'creation disables pull requests through supported API readback and status detects reactivation' {
+    $f=New-GitHubFixture;$id=New-ApiIdentity 'API Pull Requests';$f.supportsPullRequests=$true
+    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($report.phases.pullRequests -eq 'verified' -and -not $f.repos[$id.notesFullName].has_pull_requests) 'API Pull requests were not disabled and verified.'
+    $f.repos[$id.notesFullName].has_pull_requests=$true
+    $offset=$f.calls.Count
+    $status=Get-BootstrapStatus $id $f.stateRoot $f.request
+    Assert ($status.status -eq 'blocked' -and @($f.calls | Select-Object -Skip $offset | Where-Object method -ne 'GET').Count -eq 0) 'Status silently accepted/repaired reactivated pull requests.'
+}
+Test 'creation verifies public settings with current API fields and no legacy downloads field' {
+    $f=New-GitHubFixture;$id=New-ApiIdentity 'Current Fields';$f.omitDownloads=$true
+    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($report.phases.publicSettings -eq 'verified') 'Omitted legacy field blocked supported settings.'
+    $status=Get-BootstrapStatus $id $f.stateRoot $f.request
+    Assert ($status.status -eq 'partial' -and $status.conflicts.Count -eq 0) 'Status required an unavailable field.'
+}
+Test 'creation compares recursive tree files while preserving unexpected-file failures' {
+    foreach ($type in @('tree','blob')) {
+        $f=New-GitHubFixture;$id=New-ApiIdentity 'Recursive Tree'
+        $f.privateTreeExtras=@(@{path='docs';type=$type})
+        $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+        if ($type -eq 'tree') {Assert ($report.phases.privateContent -eq 'verified') 'Directory nodes blocked manifest verification.'}
+        else {Assert (-not $report.phases.ContainsKey('privateContent') -and ($report.pending -join ' ') -match 'tree differs') 'Unexpected file passed tree verification.'}
+    }
+}
+Test 'creation handles the documented empty repository ref conflict without hiding other conflicts' {
+    foreach ($message in @('Git Repository is empty.','Unrelated repository conflict.')) {
+        $f=New-GitHubFixture;$id=New-ApiIdentity 'Empty Ref';$f.emptyRefStatus=409;$f.emptyRefMessage=$message
+        $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+        if ($message -eq 'Git Repository is empty.') {
+            Assert ($report.phases.privateContent -eq 'verified' -and $report.phases.publicContent -eq 'verified') 'Empty repository blocked initial push.'
+        } else {
+            Assert ($report.status -eq 'partial' -and @($f.gitCalls | Where-Object {$_.arguments[0] -eq 'push'}).Count -eq 0) 'Unrelated conflict caused a push.'
+        }
+    }
+}
 Test 'creation and status report installed plugins and skipped inconsistent releases' {
     $f=New-GitHubFixture;$id=New-ApiIdentity 'Plugin Report'
     $f.obsidianSetup={param($Identity,$StateRoot,$Refresh) @{installedVerified=$true;enabledVerified=$false;plugins=@(@{id='dataview';version='9.0.0';skipped=@(@{tag='9.1.0';reason='Manifest version differs'})});pending=@('App pending');journalPath='fixture'}}

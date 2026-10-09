@@ -1,6 +1,11 @@
 function New-GitHubFixture([switch]$ExistingPublic,[string]$FailPhase='') {
     $fixture=@{stateRoot=(New-BootstrapFixture 'api-state');bareRoot=(New-BootstrapFixture 'bare');repos=@{};calls=[Collections.Generic.List[object]]::new();gitCalls=[Collections.Generic.List[object]]::new();failPhase=$FailPhase;lostCreate=$false;lostPush=$false;lostContents=$false;initialBranch='master';nextId=100;authStatus=200;ownerStatus=200;user='cicely-f';orgRole='admin';existingPublic=$ExistingPublic.IsPresent}
     $fixture.appEnabled=$false
+    $fixture.emptyRefStatus=404
+    $fixture.emptyRefMessage='Git Repository is empty.'
+    $fixture.privateTreeExtras=@()
+    $fixture.omitDownloads=$false
+    $fixture.supportsPullRequests=$false
     $fixture.obsidianSetup={param($Identity,$StateRoot,$Refresh) @{installedVerified=$true;enabledVerified=$fixture.appEnabled;plugins=@();pending=@('Fixture app enablement pending');journalPath='fixture'}}.GetNewClosure()
     $fixture.request={param($Method,$Endpoint,$Body)
         $fixture.calls.Add(@{method=$Method;endpoint=$Endpoint;body=$Body;isRepositoryCreate=($Method -eq 'POST' -and $Endpoint -match '^/(orgs/[^/]+|user)/repos$')})
@@ -11,6 +16,7 @@ function New-GitHubFixture([switch]$ExistingPublic,[string]$FailPhase='') {
             $name='Benevolent-Anarchy/'+$Body.name
             $fixture.nextId++
             $repo=@{id=$fixture.nextId;full_name=$name;private=$Body.private;description=$null;default_branch=$fixture.initialBranch;has_issues=$Body.has_issues;has_wiki=$true;has_projects=$true;has_discussions=$true;has_downloads=$true;allow_auto_merge=$true;archived=$false;has_pages=$false;permissions=@{push=$true;admin=$true};actions=@{enabled=$true};labels=@{};readme=$null;tree=@()}
+            if ($fixture.supportsPullRequests) {$repo.has_pull_requests=$true}
             if ($Body.ContainsKey('description')) {$repo.description=$Body.description}
             foreach ($key in @('has_wiki','has_projects')) {if ($Body.ContainsKey($key)) {$repo[$key]=$Body[$key]}}
             $repo.bare=Join-Path $fixture.bareRoot ($Body.name+'.git')
@@ -27,8 +33,9 @@ function New-GitHubFixture([switch]$ExistingPublic,[string]$FailPhase='') {
         }
         $repo=$fixture.repos[$name]
         if ($route -eq '') {
-            if ($Method -eq 'PATCH' -and $name.EndsWith('-release-notes') -and $Body.ContainsKey('has_downloads') -and $fixture.failPhase -eq 'publicSettings') {return @{StatusCode=503;Data=$null}}
+            if ($Method -eq 'PATCH' -and $name.EndsWith('-release-notes') -and $Body.ContainsKey('has_discussions') -and $fixture.failPhase -eq 'publicSettings') {return @{StatusCode=503;Data=$null}}
             if ($Method -eq 'PATCH') {foreach ($key in $Body.Keys) {$repo[$key]=$Body[$key]}}
+            if ($fixture.omitDownloads) {$data=$repo.Clone();$data.Remove('has_downloads');return @{StatusCode=200;Data=$data}}
             return @{StatusCode=200;Data=$repo}
         }
         if ($route -match '^/labels') {
@@ -57,11 +64,12 @@ function New-GitHubFixture([switch]$ExistingPublic,[string]$FailPhase='') {
                 $sha=& git --git-dir=$($repo.bare) rev-parse --verify refs/heads/main 2>$null
                 if ($LASTEXITCODE -eq 0) {return @{StatusCode=200;Data=@{object=@{sha=$sha}}}}
             }
+            if ($repo.private -and $fixture.emptyRefStatus -eq 409) {return @{StatusCode=409;Data=@{message=$fixture.emptyRefMessage}}}
             return @{StatusCode=404;Data=$null}
         }
         if ($route -match '^/git/trees/') {
             $tree=$repo.tree
-            if ($repo.private) {$tree=@(& git --git-dir=$($repo.bare) ls-tree -r --name-only main | ForEach-Object {@{path=$_;type='blob'}})}
+            if ($repo.private) {$tree=@(& git --git-dir=$($repo.bare) ls-tree -r --name-only main | ForEach-Object {@{path=$_;type='blob'}})+$fixture.privateTreeExtras}
             return @{StatusCode=200;Data=@{tree=$tree;truncated=$false}}
         }
         throw "Unexpected fake route: $Method $route"

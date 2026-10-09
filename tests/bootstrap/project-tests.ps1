@@ -31,8 +31,8 @@ Test 'foundation creates only the private skeleton and ignored local tooling' {
     Assert ((Get-Content -LiteralPath (Join-Path $id.projectPath 'README.md') -Raw).Contains($description)) 'Description was evaluated or changed.'
     Assert (-not (Test-Path (Join-Path $id.projectPath '_project-meta'))) 'Unexpected metadata directory.'
     Invoke-FixtureGit $id.projectPath @('init','--quiet','--initial-branch=main') | Out-Null
-    $ignored=Invoke-FixtureGit $id.projectPath @('check-ignore','docs/.obsidian/plugins/plugin/main.js','.scratch/plan.md')
-    Assert ($ignored -match 'docs/.obsidian' -and $ignored -match '.scratch') 'Tool state is not ignored.'
+    $ignored=Invoke-FixtureGit $id.projectPath @('check-ignore','docs/.obsidian/plugins/plugin/main.js','docs/.vault-nickname','.scratch/plan.md')
+    Assert ($ignored -match 'docs/.obsidian' -and $ignored -match 'docs/.vault-nickname' -and $ignored -match '.scratch') 'Tool state, including Vault Nickname legacy settings, is not ignored.'
     Assert (@($manifest | Where-Object {$_.sha256 -notmatch '^[a-f0-9]{64}$'}).Count -eq 0) 'Manifest lacks actual hashes.'
     $public=Get-PublicReadme -Identity $id
     Assert ($public -ceq "# Foundation Project release notes`n`nThis repository is the public record of release notes for Foundation Project.`n") 'Wrong public README.'

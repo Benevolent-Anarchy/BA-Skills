@@ -17,9 +17,9 @@ Creation journals live under `%LOCALAPPDATA%/BA-Skills/ba-bootstrap/state/`; vau
 
 ## Public release-notes repository
 
-The public companion contains only its initial README, has `main`, remains writable by its owner and is never archived. Issues, wiki, projects, discussions, downloads, auto-merge and Actions are disabled through supported APIs and read back. Pages must be absent. Private description/canon never belongs here.
+The public companion contains only its initial README, has `main`, remains writable by its owner and is never archived. Issues, wiki, projects, discussions, auto-merge and Actions are disabled through supported APIs and read back. Pages must be absent. The current update API and repository readback omit the legacy `has_downloads` field; its omission is not an enabled contribution feature. Private description/canon never belongs here.
 
-GitHub's documented repository API currently does not expose a verified Pull requests disable field. When the result says `needs-browser`, use authenticated browser tools for the exact public repository's **Settings → General → Features** page. Uncheck **Pull requests**; reopen/read the page and verify the unchecked state. If browser access is unavailable, keep that phase pending. Check the live surface for optional contribution/automation features; preserve security protections and owner publication access. Record any additional setting verified there in the trial receipt.
+GitHub's [current repository API](https://docs.github.com/en/rest/repos/repos#update-a-repository) supports `has_pull_requests`. When repository readback exposes it, the helper disables and verifies it; status checks that it stays disabled. If a host omits the field and the result says `needs-browser`, use authenticated browser tools for the exact public repository's **Settings → General → Features** page. Uncheck **Pull requests**; reopen/read the page and verify the unchecked state. If browser access is unavailable, keep that phase pending. Check the live surface for optional contribution/automation features; preserve security protections and owner publication access. Record any additional setting verified there in the trial receipt.
 
 Record the actual browser observation through the helper; this is an agent operation, not a user prompt:
 
@@ -45,6 +45,8 @@ The curated IDs are `dataview`, `mermaid-popup` (Diagram Popup), `vault-inspecto
 Verify minimum-app compatibility, `manifest.json`, `main.js` and an optional published stylesheet. Installation stages outside active plugin directories; refresh retains preferences and backups and restores prior binaries if promotion fails. An interrupted refresh retries its recorded releases. Ordinary setup preserves extra plugins, existing settings, nickname customisation and workspace/history. `.obsidian` must be ignored and untracked in the actual checkout.
 
 Installed files and configured IDs are separate from loaded plugins. When the official CLI is registered/enabled and the exact vault is registered, the helper addresses its ID, enables the plugins and reads back loaded IDs/versions. Never use the foreground vault as a substitute. Without that app access, report the exact first-use step: open this project's `docs` as a vault, enable Community plugins and all four plugins, then rerun local setup/resume for supported readback. Do not edit the global vault registry to simulate registration.
+
+On first use, Obsidian may ask the user to trust the vault's plugin authors and to allow Mermaid diagrams in this vault. Leave those choices to the user; explain the pending app check and continue after they answer. Do not suppress trust prompts or treat installed files as permission.
 
 Check that Vault Nickname identifies the project and Diagram Popup opens an embedded Mermaid diagram with fullscreen pan/zoom. CLI plugin presence alone does not prove that visual behavior. If this environment cannot operate Obsidian, leave those app checks explicit for Cicely instead of claiming them verified.
 

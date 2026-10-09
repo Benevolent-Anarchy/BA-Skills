@@ -29,9 +29,10 @@ function Get-BootstrapStoredIdentity([string]$Name,[string]$Owner='Benevolent-An
 }
 function Assert-BootstrapPublicSettings($Identity,$Request) {
     $public=(Invoke-CheckedApi $Request GET "/repos/$($Identity.notesFullName)").Data
-    foreach ($key in @('has_issues','has_wiki','has_projects','has_discussions','has_downloads','allow_auto_merge')) {
+    foreach ($key in @('has_issues','has_wiki','has_projects','has_discussions','allow_auto_merge')) {
         if (-not $public.ContainsKey($key) -or $public[$key] -ne $false) {throw "Public setting did not verify: $key"}
     }
+    if ($public.ContainsKey('has_pull_requests') -and $public.has_pull_requests -ne $false) {throw 'Public Pull requests are enabled.'}
     if ($public.private -or $public.archived -or $public.default_branch -ne 'main' -or -not $public.permissions.push) {throw 'Public visibility/main/release write access is wrong.'}
     $actions=(Invoke-CheckedApi $Request GET "/repos/$($Identity.notesFullName)/actions/permissions").Data
     if ($actions.enabled) {throw 'Public Actions are enabled.'}
@@ -183,15 +184,17 @@ function Invoke-Bootstrap(
                 $journal.refs.privateMain=Invoke-CheckedGit $Git $Identity.projectPath @('rev-parse','HEAD')
                 Write-BootstrapJournal $path $journal $lock
             }
-            $remote=Invoke-CheckedApi $Request GET "/repos/$($Identity.fullName)/git/ref/heads/main" $null @(200,404)
-            if ($remote.StatusCode -eq 404) {
+            $remote=Invoke-CheckedApi $Request GET "/repos/$($Identity.fullName)/git/ref/heads/main" $null @(200,404,409)
+            # GitHub uses this specific conflict for a newly created repository with no commits.
+            if ($remote.StatusCode -eq 409 -and ($null -eq $remote.Data -or $remote.Data.message -cne 'Git Repository is empty.')) {throw 'Initial main ref has an unresolved GitHub conflict; preserve the checkout.'}
+            if ($remote.StatusCode -in @(404,409)) {
                 $push=& $Git $Identity.projectPath @('push','--set-upstream','origin','main')
                 $remote=Invoke-CheckedApi $Request GET "/repos/$($Identity.fullName)/git/ref/heads/main" $null @(200,404)
                 if ($remote.StatusCode -ne 200) {throw "Initial main push is unresolved (exit $($push.ExitCode)); resume to compare the remote ref."}
             }
             if ($remote.Data.object.sha -ne $journal.refs.privateMain) {throw 'Remote main differs from the intended initial commit; do not force-push.'}
             $tree=(Invoke-CheckedApi $Request GET "/repos/$($Identity.fullName)/git/trees/$($journal.refs.privateMain)?recursive=1").Data
-            if ($tree.truncated -or (@($tree.tree | ForEach-Object path | Sort-Object) -join "`n") -cne (@($manifest.path | Sort-Object) -join "`n")) {throw 'Private remote tree differs from the generated manifest.'}
+            if ($tree.truncated -or (@($tree.tree | Where-Object type -ne 'tree' | ForEach-Object path | Sort-Object) -join "`n") -cne (@($manifest.path | Sort-Object) -join "`n")) {throw 'Private remote tree differs from the generated manifest.'}
             Invoke-CheckedApi $Request PATCH "/repos/$($Identity.fullName)" @{default_branch='main'} | Out-Null
             $repo=(Invoke-CheckedApi $Request GET "/repos/$($Identity.fullName)").Data
             if ($repo.default_branch -ne 'main' -or -not $repo.has_issues) {throw 'Private main/Issues settings did not verify.'}
@@ -239,7 +242,9 @@ function Invoke-Bootstrap(
             foreach ($label in $snapshot) {if (-not $actual.ContainsKey($label.name) -or $actual[$label.name].color -ine $label.color -or $actual[$label.name].description -cne $label.description) {throw "Label readback differs: $($label.name)"}}
             Save-Phase 'labels'
         }
-        $settings=@{has_issues=$false;has_wiki=$false;has_projects=$false;has_discussions=$false;has_downloads=$false;allow_auto_merge=$false}
+        $settings=@{has_issues=$false;has_wiki=$false;has_projects=$false;has_discussions=$false;allow_auto_merge=$false}
+        $before=(Invoke-CheckedApi $Request GET "/repos/$($Identity.notesFullName)").Data
+        if ($before.ContainsKey('has_pull_requests')) {$settings.has_pull_requests=$false}
         Invoke-CheckedApi $Request PATCH "/repos/$($Identity.notesFullName)" $settings | Out-Null
         Invoke-CheckedApi $Request PUT "/repos/$($Identity.notesFullName)/actions/permissions" @{enabled=$false} | Out-Null
         $public=(Invoke-CheckedApi $Request GET "/repos/$($Identity.notesFullName)").Data
@@ -250,7 +255,8 @@ function Invoke-Bootstrap(
         $pages=Invoke-CheckedApi $Request GET "/repos/$($Identity.notesFullName)/pages" $null @(200,404)
         if ($pages.StatusCode -ne 404) {throw 'Public repository has unexpected Pages configuration.'}
         Save-Phase 'publicSettings'
-        if (-not $journal.phases.ContainsKey('pullRequests')) {Save-Phase 'pullRequests' 'needs-browser'}
+        if ($settings.ContainsKey('has_pull_requests')) {Save-Phase 'pullRequests'}
+        elseif (-not $journal.phases.ContainsKey('pullRequests')) {Save-Phase 'pullRequests' 'needs-browser'}
         if ($RefreshPlugins -or -not ($journal.phases.ContainsKey('obsidian') -and $journal.phases.obsidian -eq 'verified')) {
             $obsidian=& $ObsidianSetup $Identity $StateRoot $RefreshPlugins.IsPresent
             $journal.obsidian=@{journalPath=$obsidian.journalPath;plugins=$obsidian.plugins;enabledVerified=$obsidian.enabledVerified;observedAt=[datetime]::UtcNow.ToString('o')}
