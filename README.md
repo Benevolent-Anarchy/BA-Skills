@@ -11,7 +11,7 @@ pwsh -NoProfile -File ./install.ps1 -IncludeWsl
 pwsh -NoProfile -File ./install.ps1 -Skill ba-bootstrap
 pwsh -NoProfile -File ./install.ps1 -Skill ba-release -CheckOnly
 pwsh -NoProfile -File ./skills/ba-release/scripts/verify-discovery.ps1
-pwsh -NoProfile -File ./tests/run-tests.ps1
+pwsh -NoProfile -File ./tools/verify.ps1
 ```
 
 The root installer defaults to both skills and preflights all selected aliases before creating any. Bootstrap requests both native `.agents` and `.claude` aliases even without their command-line executables; release keeps its existing executable-based discovery. Each points to one canonical source; unrelated skills and conflicting files are preserved. Permanent installation should use this canonical checkout after integration, not an unmerged worktree.

@@ -4,6 +4,14 @@ Import-Module "$skillRoot/scripts/State.psm1" -Force
 if (Test-Path "$skillRoot/scripts/Bootstrap.psm1") {Import-Module "$skillRoot/scripts/Bootstrap.psm1" -Force}
 . "$PSScriptRoot/GitHubFixture.ps1"
 function New-ApiIdentity($Name) {New-BootstrapIdentity -Name $Name -Description 'Private project purpose' -Parent (New-BootstrapFixture 'project-parent')}
+Test 'creation and status report installed plugins and skipped inconsistent releases' {
+    $f=New-GitHubFixture;$id=New-ApiIdentity 'Plugin Report'
+    $f.obsidianSetup={param($Identity,$StateRoot,$Refresh) @{installedVerified=$true;enabledVerified=$false;plugins=@(@{id='dataview';version='9.0.0';skipped=@(@{tag='9.1.0';reason='Manifest version differs'})});pending=@('App pending');journalPath='fixture'}}
+    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($report.obsidian.plugins[0].skipped[0].tag -eq '9.1.0') 'Create report hid skipped release.'
+    $status=Get-BootstrapStatus $id $f.stateRoot $f.request
+    Assert ($status.obsidian.plugins[0].version -eq '9.0.0' -and $status.obsidian.plugins[0].skipped[0].reason) 'Read-only status hid plugin receipt.'
+}
 Test 'creation preflights both names auth owner and local collisions before mutation' {
     foreach ($failure in @('public','auth','owner','access','local')) {
         $f=New-GitHubFixture -ExistingPublic:($failure -eq 'public');$id=New-ApiIdentity 'Collision'

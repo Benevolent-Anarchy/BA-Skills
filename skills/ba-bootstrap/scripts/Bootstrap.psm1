@@ -18,7 +18,7 @@ function Invoke-CheckedGit($Git,$Repository,$Arguments) {
     return $result.Output.Trim()
 }
 function Get-BootstrapReport($Identity,$Journal,$Status,$Pending=@(),$Conflicts=@(),[string]$StateRoot=(Get-BootstrapStateRoot)) {
-    @{status=$Status;identity=$Identity;phases=$(if ($null -ne $Journal) {$Journal.phases} else {@{}});pending=@($Pending);conflicts=@($Conflicts);browserEvidence=$(if ($null -ne $Journal) {$Journal.browserEvidence} else {@{}});journalPath=(Get-BootstrapJournalPath $Identity $StateRoot)}
+    @{status=$Status;identity=$Identity;phases=$(if ($null -ne $Journal) {$Journal.phases} else {@{}});pending=@($Pending);conflicts=@($Conflicts);browserEvidence=$(if ($null -ne $Journal) {$Journal.browserEvidence} else {@{}});obsidian=$(if ($null -ne $Journal -and $Journal.ContainsKey('obsidian')) {$Journal.obsidian} else {@{}});journalPath=(Get-BootstrapJournalPath $Identity $StateRoot)}
 }
 function Get-BootstrapStoredIdentity([string]$Name,[string]$Owner='Benevolent-Anarchy',[string]$StateRoot=(Get-BootstrapStateRoot)) {
     $repository=Resolve-BootstrapRepositoryName $Name
