@@ -107,7 +107,7 @@ function Get-DocumentationTokens([AllowEmptyString()][string]$Text,[string]$File
         $target=$parts[0].Trim()
         $label=if ($parts.Count -gt 1) {$parts[1].Trim()} else {($target -split '#',2)[0]}
         $line=1+[regex]::Matches($clean.Substring(0,$match.Index),"`n").Count
-        $links.Add(@{Kind='wiki'; Target=$target; Label=$label; Line=$line})
+        $links.Add(@{Kind='wiki'; Target=$target; Label=$label; HasAlias=($parts.Count -gt 1); Line=$line; EndColumn=$match.Index+$match.Length-($clean.LastIndexOf("`n",$match.Index)+1)})
         $wikiSpans.Add(@{Start=$match.Index; End=$match.Index+$match.Length-1})
     }
     foreach ($node in $nodes) {
@@ -115,7 +115,7 @@ function Get-DocumentationTokens([AllowEmptyString()][string]$Text,[string]$File
         $insideWiki=$false
         foreach ($span in $wikiSpans) { if ($node.Span.Start -ge $span.Start -and $node.Span.Start -le $span.End) { $insideWiki=$true; break } }
         if ($insideWiki) { continue }
-        $links.Add(@{Kind='markdown'; Target=$node.Url; Label=(Get-DocumentationInlineText $node); Line=$node.Line+1})
+        $links.Add(@{Kind='markdown'; Target=$node.Url; Label=(Get-DocumentationInlineText $node); HasAlias=$true; Line=$node.Line+1; EndColumn=$node.Span.End+1-($clean.LastIndexOf("`n",$node.Span.Start)+1)})
     }
     $visible=$clean.ToCharArray(); $linkable=$clean.ToCharArray()
     for ($i=0; $i -lt $clean.Length; $i++) {
@@ -125,4 +125,191 @@ function Get-DocumentationTokens([AllowEmptyString()][string]$Text,[string]$File
     }
     return @{Headings=$headings.ToArray(); Links=@($links | Sort-Object Line); VisibleLines=(-join $visible) -split "`n"; LinkableLines=(-join $linkable) -split "`n"}
 }
-Export-ModuleMember -Function Get-DocumentationTokens
+function Test-DocumentationDate([string]$Date) {
+    $parsed=[datetime]::MinValue
+    return [datetime]::TryParseExact($Date,'yyyy-MM-dd',[cultureinfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$parsed)
+}
+
+function Test-ProjectDocumentation([string]$Repository) {
+    $root=[IO.Path]::GetFullPath($Repository).TrimEnd('\','/')
+    $vault=Join-Path $root 'docs'
+    $diagnostics=[Collections.Generic.List[object]]::new()
+    $notes=@{}
+    function Add-DocDiagnostic($Code,$File,$Line,$Heading,$Message,$Severity='error') {
+        $diagnostics.Add(@{Code=$Code;Severity=$Severity;File=$File;Line=$Line;Heading=$Heading;Message=$Message})
+    }
+    function Get-DocNote([string]$Path) {
+        if (-not $notes.ContainsKey($Path)) {
+            try {
+                $notes[$Path]=Get-DocumentationTokens -Text ([IO.File]::ReadAllText($Path)) -File $Path
+            } catch {
+                Add-DocDiagnostic 'unreadable-file' ([IO.Path]::GetRelativePath($root,$Path).Replace('\','/')) 1 '' "Cannot read note: $($_.Exception.Message)"
+                $notes[$Path]=@{Headings=@();Links=@();VisibleLines=@();LinkableLines=@()}
+            }
+        }
+        return $notes[$Path]
+    }
+    function Resolve-DocLink($Source,$Link) {
+        $target=[string]$Link.Target
+        if ($target -match '^[a-zA-Z][a-zA-Z0-9+.-]*:' -or $target.StartsWith('//')) { return @{External=$true;Valid=$true} }
+        $parts=$target.Split('#',2)
+        $file=[uri]::UnescapeDataString($parts[0])
+        $fragment=if ($parts.Count -gt 1) {[uri]::UnescapeDataString($parts[1])} else {''}
+        $base=if ($Link.Kind -eq 'wiki') {$vault} elseif ($file.StartsWith('/')) {$root} else {Split-Path $Source -Parent}
+        if ($file -eq '') {$path=$Source}
+        else {
+            if ($Link.Kind -eq 'wiki' -and [IO.Path]::GetExtension($file) -eq '') {$file+='.md'}
+            $path=[IO.Path]::GetFullPath((Join-Path $base $file.TrimStart('/')))
+        }
+        if (-not $path.StartsWith($root+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { return @{External=$false;Valid=$false;Reason='Target leaves the repository.'} }
+        # Never traverse a linked directory or file while validating repository content.
+        $cursor=$path
+        while ($cursor -ne $root) {
+            if (Test-Path -LiteralPath $cursor) {
+                if ((Get-Item -LiteralPath $cursor -Force).LinkType) { return @{External=$false;Valid=$false;Reason='Target traverses a symbolic link or junction.'} }
+            }
+            $cursor=Split-Path $cursor -Parent
+        }
+        if (-not (Test-Path -LiteralPath $path)) { return @{External=$false;Valid=$false;Reason='Target file or directory is missing.'} }
+        $heading=$null
+        if ($fragment) {
+            if ([IO.Path]::GetExtension($path) -ne '.md' -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return @{External=$false;Valid=$false;Reason='A heading needs a Markdown file.'} }
+            $note=Get-DocNote $path
+            $matches=@($note.Headings | Where-Object { if ($Link.Kind -eq 'wiki') {$_.Title -ceq $fragment} else {$_.Anchor -ceq $fragment} })
+            if ($matches.Count -ne 1) { return @{External=$false;Valid=$false;Reason="Heading '$fragment' is missing or ambiguous."} }
+            $heading=$matches[0]
+        }
+        return @{External=$false;Valid=$true;Path=$path;Heading=$heading}
+    }
+    if (-not (Test-Path -LiteralPath $vault -PathType Container)) {
+        Add-DocDiagnostic 'required-path' 'docs' 1 '' 'Required documentation vault is missing.'
+        return @{Passed=$false;Diagnostics=$diagnostics.ToArray()}
+    }
+    # Explicit traversal avoids following tooling junctions or the ignored Obsidian tree.
+    $queue=[Collections.Generic.Queue[string]]::new(); $queue.Enqueue($vault)
+    while ($queue.Count) {
+        $dir=$queue.Dequeue()
+        try { $items=@(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop) } catch { Add-DocDiagnostic 'unreadable-file' ([IO.Path]::GetRelativePath($root,$dir)) 1 '' $_.Exception.Message; continue }
+        foreach ($item in $items) {
+            if ($item.Name -eq '.obsidian') {continue}
+            if ($item.LinkType) { Add-DocDiagnostic 'linked-path' ([IO.Path]::GetRelativePath($root,$item.FullName)) 1 '' 'Documentation must be readable without following a linked path.'; continue }
+            if ($item.PSIsContainer) {$queue.Enqueue($item.FullName)}
+            elseif ($item.Extension -eq '.md') {Get-DocNote $item.FullName | Out-Null}
+        }
+    }
+    foreach ($path in @($notes.Keys)) {
+        $relative=[IO.Path]::GetRelativePath($root,$path).Replace('\','/')
+        foreach ($link in $notes[$path].Links) {
+            try {$resolved=Resolve-DocLink $path $link} catch {$resolved=@{Valid=$false;Reason=$_.Exception.Message}}
+            if (-not $resolved.Valid) { Add-DocDiagnostic 'link-target' $relative $link.Line '' "$($link.Target): $($resolved.Reason)" }
+        }
+    }
+    foreach ($corpus in @('design','decisions','judgements')) {
+        $indexPath=Join-Path $vault ($corpus.ToUpperInvariant()+'.md')
+        $indexFile='docs/'+$corpus.ToUpperInvariant()+'.md'
+        $topicDir=Join-Path $vault $corpus
+        $missing=$false
+        foreach ($required in @($indexPath,$topicDir)) {
+            $kind=if ($required -eq $indexPath) {'Leaf'} else {'Container'}
+            if (-not (Test-Path -LiteralPath $required -PathType $kind) -or (Get-Item -LiteralPath $required -Force).LinkType) {
+                Add-DocDiagnostic 'required-path' ([IO.Path]::GetRelativePath($root,$required).Replace('\','/')) 1 '' 'Required index or topical directory is missing or linked.'; $missing=$true
+            }
+        }
+        if ($missing) {continue}
+        $index=Get-DocNote $indexPath
+        $sections=@($index.Headings | Where-Object {$_.Level -eq 2 -and $_.Title -ceq 'Index'})
+        if ($sections.Count -ne 1) {Add-DocDiagnostic 'index-section' $indexFile 1 'Index' 'Expected exactly one live ## Index heading.';continue}
+        $start=$sections[0].Line
+        $end=$index.VisibleLines.Count+1
+        $next=@($index.Headings | Where-Object {$_.Line -gt $start -and $_.Level -le 2} | Sort-Object Line)
+        if ($next.Count) {$end=$next[0].Line}
+        $topics=@($notes.Keys | Where-Object {$_.StartsWith($topicDir+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)})
+        $records=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        $keys=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        foreach ($topic in $topics) {
+            $note=$notes[$topic]; $file=[IO.Path]::GetRelativePath($root,$topic).Replace('\','/')
+            $titles=@($note.Headings | Where-Object Level -eq 1)
+            if ($titles.Count -ne 1) {Add-DocDiagnostic 'topic-title' $file 1 '' 'Each topical note needs exactly one top-level title.'}
+            $selected=@($note.Headings | Where-Object {if ($corpus -eq 'design') {$_.Level -ge 2} else {$_.Level -eq 3}})
+            foreach ($heading in $selected) {
+                $key=$topic.ToLowerInvariant()+'#'+$heading.Title
+                if ($records.ContainsKey($key)) {Add-DocDiagnostic 'duplicate-key' $file $heading.Line $heading.Title 'Duplicate heading in this topic.';continue}
+                $record=@{File=$file;Path=$topic;Heading=$heading;Count=0;Metadata=$null;Incomplete=$false}
+                $records.Add($key,$record)
+                if ($corpus -ne 'design') {
+                    if ($keys.ContainsKey($heading.Title)) {Add-DocDiagnostic 'duplicate-key' $file $heading.Line $heading.Title 'Citation key is already defined in another record.'} else {$keys.Add($heading.Title,$record)}
+                }
+                if ($corpus -eq 'decisions') {
+                    $groups=@($note.Headings | Where-Object {$_.Line -lt $heading.Line -and $_.Level -le 2} | Sort-Object Line)
+                    if (-not $groups.Count -or $groups[-1].Level -ne 2 -or -not (Test-DocumentationDate $groups[-1].Title)) {Add-DocDiagnostic 'decision-date' $file $heading.Line $heading.Title 'Decision must belong to a real ## YYYY-MM-DD date group.'}
+                }
+                if ($corpus -eq 'judgements') {
+                    $recordEnd=$note.VisibleLines.Count+1
+                    $after=@($note.Headings | Where-Object {$_.Line -gt $heading.Line -and $_.Level -le 3} | Sort-Object Line)
+                    if ($after.Count) {$recordEnd=$after[0].Line}
+                    $metadata=@()
+                    for ($line=$heading.Line+1; $line -lt $recordEnd; $line++) {
+                        if ($note.VisibleLines[$line-1] -match '^\*Judged .+\.\*$') {$metadata+=@{Line=$line;Text=$note.VisibleLines[$line-1].Substring(1,$note.VisibleLines[$line-1].Length-3)}}
+                    }
+                    if ($metadata.Count -ne 1 -or $metadata[0].Line -ne $heading.Line+1) {Add-DocDiagnostic 'judgement-metadata' $file $heading.Line $heading.Title 'Expected one immediate, single-line *Judged ... .* statement.';continue}
+                    $record.Metadata=$metadata[0].Text
+                    $first=($record.Metadata -split '\. ',2)[0]
+                    $dates=@([regex]::Matches($record.Metadata,'(?<![\p{L}\p{N}_])\d{4}-\d{2}-\d{2}(?![\p{L}\p{N}_])'))
+                    $dateValid=@($dates | Where-Object {Test-DocumentationDate $_.Value}).Count -gt 0
+                    $impossible=@($dates | Where-Object {-not (Test-DocumentationDate $_.Value)}).Count -gt 0
+                    $dateMissing=$record.Metadata -cmatch '\bDate not recorded\b'
+                    $hardwareMissing=$record.Metadata -cmatch '\bHardware not recorded\b'
+                    $hardwareValid=$record.Metadata -cmatch '\bHardware not applicable\b'
+                    $clauses=($first -replace '^Judged ','') -split ', '
+                    foreach ($clause in @($clauses | Select-Object -First 2)) {
+                        if ($clause.StartsWith('on ',[StringComparison]::Ordinal)) {
+                            $name=$clause.Substring(3) -replace '(?<![\p{L}\p{N}_])\d{4}-\d{2}-\d{2}(?![\p{L}\p{N}_])','' -replace '\bDate not recorded\b',''
+                            if ($name -match '\p{L}') {$hardwareValid=$true}
+                        }
+                    }
+                    $body=($note.VisibleLines[($heading.Line)..($recordEnd-2)] -join "`n")
+                    $record.Incomplete=($dateMissing -or $hardwareMissing) -and $body -cmatch '\bIncomplete historical record\b'
+                    if ($impossible -or (-not $dateValid -and -not ($dateMissing -and $record.Incomplete)) -or (-not $hardwareValid -and -not ($hardwareMissing -and $record.Incomplete))) {Add-DocDiagnostic 'judgement-fields' $file ($heading.Line+1) $heading.Title 'Date and applicable hardware must each be independently recorded.'}
+                    elseif ($record.Incomplete) {Add-DocDiagnostic 'incomplete-record' $file $heading.Line $heading.Title 'Incomplete historical record; this is not trusted acceptance.' 'warning'}
+                }
+            }
+        }
+        $group=$null; $topicCounts=@{}
+        $links=@($index.Links | Where-Object {$_.Line -gt $start -and $_.Line -lt $end})
+        $lastLine=$start
+        foreach ($link in $links) {
+            # Any intervening section heading starts a new group, even without a link.
+            if (@($index.Headings | Where-Object {$_.Line -gt $lastLine -and $_.Line -le $link.Line}).Count) {$group=$null}
+            $lastLine=$link.Line
+            $resolved=Resolve-DocLink $indexPath $link
+            if (-not $resolved.Valid -or $resolved.External) {continue}
+            if ($resolved.Path -notin $topics) {continue}
+            if ($null -eq $resolved.Heading) {
+                $group=$resolved.Path
+                if (-not $topicCounts.ContainsKey($group)) {$topicCounts[$group]=0}; $topicCounts[$group]++
+                $titles=@($notes[$group].Headings | Where-Object Level -eq 1)
+                if ($titles.Count -eq 1 -and $link.Label -cne $titles[0].Title) {Add-DocDiagnostic 'topic-title' $indexFile $link.Line '' 'Topic link label must match its top-level title.'}
+                continue
+            }
+            $key=$resolved.Path.ToLowerInvariant()+'#'+$resolved.Heading.Title
+            if (-not $records.ContainsKey($key)) {Add-DocDiagnostic 'index-entry' $indexFile $link.Line $resolved.Heading.Title 'Target is not a record or indexed design heading.';continue}
+            $record=$records[$key]; $record.Count++
+            if ($group -ne $resolved.Path) {Add-DocDiagnostic 'index-group' $indexFile $link.Line $resolved.Heading.Title 'Entry must appear under a link to its actual topical file.'}
+            if ($link.HasAlias -and $link.Label -cne $resolved.Heading.Title) {Add-DocDiagnostic 'index-entry' $indexFile $link.Line $resolved.Heading.Title 'Indexed title must match the record title.'}
+            if ($corpus -eq 'judgements' -and $null -ne $record.Metadata) {
+                $tail=$index.VisibleLines[$link.Line-1].Substring($link.EndColumn).Trim()
+                $expected='— '+$record.Metadata
+                if (-not ($tail -ceq $expected -or $tail.StartsWith($expected+' — ',[StringComparison]::Ordinal)) -or ($record.Incomplete -and $index.VisibleLines[$link.Line-1] -cnotmatch 'Incomplete historical record')) {Add-DocDiagnostic 'judgement-index' $indexFile $link.Line $resolved.Heading.Title 'Index must copy the complete Judged statement, removing only italics and its final full stop.'}
+            }
+        }
+        foreach ($topic in $topics) {
+            if (-not $topicCounts.ContainsKey($topic) -or $topicCounts[$topic] -ne 1) {Add-DocDiagnostic 'topic-index' $indexFile $start '' "Expected one topic group for $([IO.Path]::GetRelativePath($vault,$topic))."}
+        }
+        foreach ($record in $records.Values) {
+            if ($record.Count -eq 0) {Add-DocDiagnostic 'not-indexed' $record.File $record.Heading.Line $record.Heading.Title 'Real record or design heading has no index entry.'}
+            elseif ($record.Count -gt 1) {Add-DocDiagnostic 'duplicate-index' $indexFile $start $record.Heading.Title 'Record or design heading appears more than once in the index.'}
+        }
+    }
+    return @{Passed=(@($diagnostics | Where-Object Severity -eq 'error').Count -eq 0);Diagnostics=$diagnostics.ToArray()}
+}
+Export-ModuleMember -Function Get-DocumentationTokens,Test-ProjectDocumentation
