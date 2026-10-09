@@ -574,8 +574,8 @@ function Get-ReleaseOverallStatus($State) {
 
 # Completes only the inspected Gradle flag omitted by older planners, preserving every approved field.
 function Update-ReleaseDerivedPlanMetadata($State, $Fresh) {
-    $freshJson=$Fresh | ConvertTo-Json -Depth 30 -Compress
-    $savedJson=$State.plan | ConvertTo-Json -Depth 30 -Compress
+    $freshJson=Get-ReleaseComparablePlanJson ($Fresh | ConvertTo-Json -Depth 30 -Compress)
+    $savedJson=Get-ReleaseComparablePlanJson ($State.plan | ConvertTo-Json -Depth 30 -Compress)
     if ($freshJson -ceq $savedJson) {return $false}
     $comparison=$freshJson | ConvertFrom-Json -AsHashtable
     $completed=$false
@@ -587,7 +587,7 @@ function Update-ReleaseDerivedPlanMetadata($State, $Fresh) {
             }
         }
     }
-    if (-not $completed -or ($comparison | ConvertTo-Json -Depth 30 -Compress) -cne $savedJson) {throw 'Saved release plan differs from the current inspected plan.'}
+    if (-not $completed -or (Get-ReleaseComparablePlanJson ($comparison | ConvertTo-Json -Depth 30 -Compress)) -cne $savedJson) {throw 'Saved release plan differs from the current inspected plan.'}
     $State.plan=$Fresh
     return $true
 }
@@ -774,4 +774,5 @@ function Confirm-ReleaseStoreCompletion([string]$StatePath, [string]$ReceiptPath
 . (Join-Path $PSScriptRoot 'PublicNotes.ps1')
 . (Join-Path $PSScriptRoot 'Doctor.ps1')
 . (Join-Path $PSScriptRoot 'PublicationHold.ps1')
+. (Join-Path $PSScriptRoot 'PlanComparison.ps1')
 Export-ModuleMember -Function Set-ReleaseDestinationHold,Get-ReleaseDoctor,Get-ReleaseConfiguration,Get-ReleasePlan,Get-ReleaseSetup,Set-ReleaseSetup,Invoke-ReleaseInteractiveSetup,Get-ReleaseVersion,Get-ReleaseLiveLedger,Expand-ReleaseDestinations,Export-ReleasePlayChangelogs,Invoke-ReleasePrepare,Invoke-ReleasePublish,Get-ReleaseNotesHash,Confirm-ReleaseStoreCompletion

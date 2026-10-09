@@ -90,3 +90,19 @@ Test 'missing Gradle metadata never permits changes to saved release destination
     Expect-Error {Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)} 'Saved release plan differs'
     Assert ((Get-FileHash $stateFile).Hash -ceq $hash) 'Conflicting saved plan was rewritten or store publication started.'
 }
+
+Test 'publication compares complete plan content independently of JSON object key order' {
+    $repo=New-Fixture 'plan-key-order'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows') (Join-Path $sandbox 'plan-key-order-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $keys=[string[]]@($state.plan.Keys);[Array]::Reverse($keys)
+    $reordered=[ordered]@{};foreach ($key in $keys) {$reordered[$key]=$state.plan[$key]}
+    $state.plan=$reordered;Write-Json $stateFile $state
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+    Assert ($result.destinations['itch-windows'].status -eq 'succeeded') 'Object key order prevented publication of identical content.'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $state.plan.destinations[0].requiredActions=@('Added an unapproved action')
+    Write-Json $stateFile $state
+    Expect-Error {Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler} 'Saved release plan differs'
+}

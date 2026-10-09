@@ -45,6 +45,9 @@ Older prepared plans can acquire the inspected Android Gradle flag only when
 every other saved plan field exactly matches fresh inspection. This compatibility
 step preserves plan identity and approval; it cannot change targets or accept a
 conflicting stored flag.
+Complete plan comparison sorts JSON object keys while retaining every field,
+primitive value and array order, so PowerShell hashtable enumeration does not
+invalidate unchanged plans across processes.
 Completed uploads/submissions are skipped on retry; observed console receipts
 close activation/review/announcement work. Interrupted external
 operations remain uncertain and require explicit reconciliation or retry.
