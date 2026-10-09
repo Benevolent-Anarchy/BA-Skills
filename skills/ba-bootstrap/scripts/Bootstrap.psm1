@@ -17,8 +17,8 @@ function Invoke-CheckedGit($Git,$Repository,$Arguments) {
     if ($result.ExitCode -ne 0) {throw "Git $($Arguments[0]) failed: $($result.Output)"}
     return $result.Output.Trim()
 }
-function Get-BootstrapReport($Identity,$Journal,$Status,$Pending=@(),$Conflicts=@()) {
-    @{status=$Status;identity=$Identity;phases=$(if ($null -ne $Journal) {$Journal.phases} else {@{}});pending=@($Pending);conflicts=@($Conflicts);browserEvidence=$(if ($null -ne $Journal) {$Journal.browserEvidence} else {@{}});journalPath=(Get-BootstrapJournalPath $Identity)}
+function Get-BootstrapReport($Identity,$Journal,$Status,$Pending=@(),$Conflicts=@(),[string]$StateRoot=(Get-BootstrapStateRoot)) {
+    @{status=$Status;identity=$Identity;phases=$(if ($null -ne $Journal) {$Journal.phases} else {@{}});pending=@($Pending);conflicts=@($Conflicts);browserEvidence=$(if ($null -ne $Journal) {$Journal.browserEvidence} else {@{}});journalPath=(Get-BootstrapJournalPath $Identity $StateRoot)}
 }
 function Get-BootstrapStoredIdentity([string]$Name,[string]$Owner='Benevolent-Anarchy',[string]$StateRoot=(Get-BootstrapStateRoot)) {
     $repository=Resolve-BootstrapRepositoryName $Name
@@ -113,7 +113,7 @@ function Get-BootstrapPlan([hashtable]$Identity,[scriptblock]$Request=$script:De
 function Get-BootstrapStatus([hashtable]$Identity,[string]$StateRoot=(Get-BootstrapStateRoot),[scriptblock]$Request=$script:DefaultRequest) {
     try {
         $journal=Read-BootstrapJournal (Get-BootstrapJournalPath $Identity $StateRoot)
-        if ($null -eq $journal) {return Get-BootstrapReport $Identity $null 'not-started'}
+        if ($null -eq $journal) {return Get-BootstrapReport $Identity $null 'not-started' -StateRoot $StateRoot}
         foreach ($kind in @('private','public')) {
             if ($journal.repositories.ContainsKey($kind)) {
                 $name=if ($kind -eq 'private') {$Identity.fullName} else {$Identity.notesFullName}
@@ -132,7 +132,7 @@ function Get-BootstrapStatus([hashtable]$Identity,[string]$StateRoot=(Get-Bootst
         $report=Get-BootstrapReport $Identity $journal $status $pending
         $report.journalPath=Get-BootstrapJournalPath $Identity $StateRoot
         return $report
-    } catch {return Get-BootstrapReport $Identity $null 'blocked' @() @($_.Exception.Message)}
+    } catch {return Get-BootstrapReport $Identity $null 'blocked' @() @($_.Exception.Message) -StateRoot $StateRoot}
 }
 function Invoke-Bootstrap(
     [hashtable]$Identity,[string]$StateRoot=(Get-BootstrapStateRoot),[scriptblock]$Request=$script:DefaultRequest,[scriptblock]$Git=$script:DefaultGit,
@@ -265,7 +265,7 @@ function Invoke-Bootstrap(
         return Get-BootstrapStatus $Identity $StateRoot $Request
     } catch {
         $status=if ($null -ne $journal) {'partial'} else {'blocked'}
-        return Get-BootstrapReport $Identity $journal $status @($_.Exception.Message)
+        return Get-BootstrapReport $Identity $journal $status @($_.Exception.Message) -StateRoot $StateRoot
     } finally {if ($null -ne $lock) {$lock.Dispose()}}
 }
 function Set-BootstrapBrowserEvidence([hashtable]$Identity,[string]$Setting,[hashtable]$Evidence,[string]$StateRoot=(Get-BootstrapStateRoot),[scriptblock]$Request=$script:DefaultRequest) {

@@ -151,3 +151,8 @@ Test 'creation becomes complete only after browser and actual app verification' 
     $after=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
     Assert ($after.status -eq 'complete' -and [IO.File]::ReadAllText("$($id.projectPath)/docs/design/new-topic.md") -ceq '# Later development') 'Completed invocation overwrote later canon.'
 }
+Test 'creation partial reports point at the actual custom-state journal' {
+    $f=New-GitHubFixture -FailPhase publicSettings;$id=New-ApiIdentity 'Reported State'
+    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($report.status -eq 'partial' -and $report.journalPath -eq (Get-BootstrapJournalPath $id $f.stateRoot)) 'Partial result points at a different state root.'
+}

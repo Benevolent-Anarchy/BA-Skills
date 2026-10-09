@@ -27,6 +27,7 @@ function New-GitHubFixture([switch]$ExistingPublic,[string]$FailPhase='') {
         }
         $repo=$fixture.repos[$name]
         if ($route -eq '') {
+            if ($Method -eq 'PATCH' -and $name.EndsWith('-release-notes') -and $Body.ContainsKey('has_downloads') -and $fixture.failPhase -eq 'publicSettings') {return @{StatusCode=503;Data=$null}}
             if ($Method -eq 'PATCH') {foreach ($key in $Body.Keys) {$repo[$key]=$Body[$key]}}
             return @{StatusCode=200;Data=$repo}
         }
