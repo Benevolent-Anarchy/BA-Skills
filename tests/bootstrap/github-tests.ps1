@@ -4,6 +4,31 @@ Import-Module "$skillRoot/scripts/State.psm1" -Force
 if (Test-Path "$skillRoot/scripts/Bootstrap.psm1") {Import-Module "$skillRoot/scripts/Bootstrap.psm1" -Force}
 . "$PSScriptRoot/GitHubFixture.ps1"
 function New-ApiIdentity($Name) {New-BootstrapIdentity -Name $Name -Description 'Private project purpose' -Parent (New-BootstrapFixture 'project-parent')}
+foreach ($case in @(
+    @{name='relative';description='Successor to the [prototype notes](docs/prototype.md).'},
+    @{name='anchor';description='See [the overview](#overview).'}
+)) {
+    Test "review description preflight blocks broken $($case.name) links without creation" {
+        $f=New-GitHubFixture;$id=New-ApiIdentity ('Broken Description '+$case.name);$id.description=$case.description
+        $plan=Get-BootstrapPlan $id $f.request $f.stateRoot $f.git
+        $create=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+        foreach ($report in @($plan,$create)) {
+            Assert ($report.status -eq 'blocked' -and ($report.conflicts -join ' ') -match 'README.md:3: link-target:') 'Broken description did not fail preflight with its documentation diagnostic.'
+        }
+        Assert ($f.repos.Count -eq 0 -and @($f.calls | Where-Object method -ne 'GET').Count -eq 0 -and $f.gitCalls.Count -eq 0) 'Invalid description changed repositories or Git state.'
+        Assert (-not (Test-Path -LiteralPath $id.projectPath) -and @(Get-ChildItem -LiteralPath $f.stateRoot -Force).Count -eq 0) 'Invalid description created project files or a journal/lock.'
+        $id.description='See [the project map](docs/NEXT.md).'
+        Assert ((Get-BootstrapPlan $id $f.request $f.stateRoot $f.git).status -eq 'ready') 'Correcting the description remained blocked by bootstrap state.'
+    }
+}
+Test 'review description preflight preserves valid local and external Markdown links' {
+    $f=New-GitHubFixture;$id=New-ApiIdentity 'Valid Description Links'
+    $id.description='See [the project map](docs/NEXT.md), [this project](#valid-description-links), and [the source](https://example.invalid/missing.md#overview).'
+    Assert ((Get-BootstrapPlan $id $f.request $f.stateRoot $f.git).status -eq 'ready') 'Valid description links were rejected.'
+    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($report.phases.ContainsKey('privateContent') -and $report.phases.privateContent -eq 'verified' -and $f.repos.Count -eq 2) 'Valid linked description could not create its foundation.'
+    Assert ([IO.File]::ReadAllText((Join-Path $id.projectPath 'README.md')).Contains($id.description)) 'Description Markdown was rewritten.'
+}
 function New-UnjournalledCommitFixture($Name) {
     $f=New-GitHubFixture;$id=New-ApiIdentity $Name;$baseGit=$f.git;$interruption=@{pending=$true}
     $git={param($Repository,$Arguments)

@@ -21,6 +21,8 @@ If the initial commit succeeded before its SHA was journalled, preflight can rec
 
 The generated documentation gate checks Markdown links in root-level `.md` entry points as well as the vault notes. Root links resolve from the repository root; topical index and record requirements apply to their existing vault corpora. Broken links report the source file and line.
 
+Preflight renders the foundation, including the supplied description, in a disposable temporary directory and runs that same documentation validator before creating either repository or a journal. The directory is removed after validation. A broken description link reports `blocked`; correct the description and plan/create again. Local links must resolve within the initial foundation, while external links remain allowed.
+
 After bootstrap is complete, use `local-setup -Repository <actual checkout> -RefreshPlugins` for a deliberate plugin update. Creation/resume rejects a refresh request on a completed journal with that concrete instruction; it does not report an ignored update as successful.
 
 ## Public release-notes repository

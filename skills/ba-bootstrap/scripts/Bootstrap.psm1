@@ -5,6 +5,7 @@ Import-Module (Join-Path $PSScriptRoot 'Project.psm1')
 Import-Module (Join-Path $PSScriptRoot 'State.psm1')
 Import-Module (Join-Path $PSScriptRoot 'GitHub.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Obsidian.psm1')
+Import-Module (Join-Path $PSScriptRoot '../assets/project/tools/Documentation.psm1')
 $script:DefaultRequest={param($Method,$Endpoint,$Body) Invoke-GitHubRequest $Method $Endpoint $Body}
 $script:DefaultGit={param($Repository,$Arguments) Invoke-BootstrapGit $Repository $Arguments}
 function Invoke-CheckedApi($Request,$Method,$Endpoint,$Body=$null,$Allowed=@(200,201,204)) {
@@ -103,10 +104,34 @@ function Test-BootstrapLocalState($Identity,$Journal,$Manifest,$Git,$Completed=$
         }
     } elseif ($null -ne $Journal -and $Journal.phases.ContainsKey('privateContent') -and $Journal.phases.privateContent -eq 'verified') {throw 'Recorded private checkout is missing its Git repository.'}
 }
+function Assert-BootstrapFoundation($Manifest) {
+    # Validate the rendered bytes without creating project files or durable state.
+    $temporaryRoot=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath([IO.Path]::GetTempPath()))
+    $sandbox=Join-Path $temporaryRoot ('ba-bootstrap-plan-'+[guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $sandbox | Out-Null
+    try {
+        foreach ($entry in $Manifest) {
+            $target=[IO.Path]::GetFullPath((Join-Path $sandbox $entry.path))
+            if (-not $target.StartsWith($sandbox+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) {throw 'Foundation path escapes its preflight sandbox.'}
+            [IO.Directory]::CreateDirectory((Split-Path $target -Parent)) | Out-Null
+            [IO.File]::WriteAllText($target,$entry.text,[Text.UTF8Encoding]::new($false))
+        }
+        $report=Test-ProjectDocumentation -Repository $sandbox
+        if (-not $report.Passed) {
+            $errors=@($report.Diagnostics | Where-Object Severity -eq 'error' | ForEach-Object {"{0}:{1}: {2}: {3}" -f $_.File,$_.Line,$_.Code,$_.Message})
+            throw "Foundation documentation preflight failed: $($errors -join '; ')"
+        }
+    } finally {
+        $directory=Get-Item -LiteralPath $sandbox -Force
+        if ([IO.Path]::GetDirectoryName($directory.FullName) -ne $temporaryRoot -or $directory.LinkType) {throw 'Preflight cleanup target is outside its temporary directory.'}
+        Remove-Item -LiteralPath $directory.FullName -Recurse -Force
+    }
+}
 function Get-BootstrapPlan([hashtable]$Identity,[scriptblock]$Request=$script:DefaultRequest,[string]$StateRoot=(Get-BootstrapStateRoot),[scriptblock]$Git=$script:DefaultGit) {
     $conflicts=[Collections.Generic.List[string]]::new();$journal=$null;$ownerType=$null
     try {
         $manifest=Get-ProjectManifest $Identity
+        Assert-BootstrapFoundation $manifest
         $journal=Read-BootstrapJournal (Get-BootstrapJournalPath $Identity $StateRoot)
         if ($null -ne $journal -and $journal.inputHash -ne (Get-BootstrapInputHash $Identity)) {throw 'Journal input differs from the requested identity.'}
         if ($null -ne $journal -and -not ($journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified')) {Assert-BootstrapJournal $journal $Identity $manifest}
