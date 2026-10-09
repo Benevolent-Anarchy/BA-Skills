@@ -67,15 +67,26 @@ Each shared preset exports once. It writes into per-user state,
 leaving existing `dist/` exports untouched. It exports no builds for a notes-only
 selection. `-GodotExecutable` can specify an inspected engine when PATH does not
 select the correct one; that machine-specific path is not release.json data.
+Gradle exports append `-Dorg.gradle.daemon=false` to their process's existing
+`GRADLE_OPTS`, then restore the caller's environment. This prevents an idle
+Gradle child from keeping Godot's Windows console wrapper alive after export;
+it changes neither the project's Gradle files nor other export processes.
 It then runs selected itch desktops' standalone functionality checks with specific
 excluded files physically unavailable, restores the common artifacts and checks
 Butler `push --dry-run` output. `selection.<id>.txt` records the preview for review.
 Supply `-ButlerExecutable` if needed. These checks do not upload; an ordinary push
 is live publication and is approval gated. Failed checks prevent publication.
+For Android, both dry-run and publication pass the signed APK itself to Butler.
+The optional `.apk.idsig` sidecar remains in the sealed local artifact; additional
+payload files require explicit distribution support rather than being discarded.
 
 State defaults to `%LOCALAPPDATA%/ba-release/releases/` on Windows and
 `${XDG_STATE_HOME:-~/.local/state}/ba-release/releases/` on Linux. `-StateRoot`
 overrides it but must remain outside the source tree, including linked ancestors.
+A native Windows file-handle lookup resolves Store app filesystem redirection
+and links before returning the state path. Use that returned physical path for
+WSL checks, browser uploads and agents outside the Store app; the logical Local
+AppData path can point somewhere different in those processes.
 A source identity/version
 directory contains `state.json`, `notes.md`, build snapshots and an exclusive
 lock. HEAD, config bytes, version, previous-release commit and sorted selection

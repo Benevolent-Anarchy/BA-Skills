@@ -4,6 +4,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:SteamIgnore = @('steam_api*.dll','libsteam_api.so','libgodotsteam.*','steam_appid.txt')
 Import-Module (Join-Path $PSScriptRoot 'ProcessTools.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'HostPaths.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'StoreAdapters.psm1') -Force
 . (Join-Path $PSScriptRoot 'Configuration.ps1')
 
@@ -148,6 +149,7 @@ function Get-ReleaseConfiguration([string]$Repository, $Configuration = $null) {
             if ($options['version/name'] -isnot [string] -or ($options['version/name'] -ne '' -and $options['version/name'] -cne $version)) { throw 'Android version/name must be empty (Godot fallback) or equal the Godot project version.' }
             if ($options['package/unique_name'] -isnot [string] -or $options['package/unique_name'] -notmatch '^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$') { throw 'Android package/unique_name must be an inspected literal package name.' }
             $record.packageName=$options['package/unique_name']; $record.versionCode=$options['version/code'];$record.format=if ($aab) {'aab'} else {'apk'}
+            $record.useGradle=$options['gradle_build/use_gradle_build']
         }
         $presets.Add($record)
     }
@@ -342,14 +344,15 @@ function Write-ReleaseJson([string]$Path, $Value) {
 
 # Chooses a per-user state directory outside the source repository by default.
 function Get-ReleaseStateRoot([string]$StateRoot) {
-    if ($StateRoot) { return [IO.Path]::GetFullPath($StateRoot) }
-    if ($IsWindows) { return Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'ba-release/releases' }
+    if ($StateRoot) { return Resolve-ReleasePhysicalPath $StateRoot }
+    if ($IsWindows) { return Resolve-ReleasePhysicalPath (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'ba-release/releases') }
     $base = if ($env:XDG_STATE_HOME) {$env:XDG_STATE_HOME} else {Join-Path ([Environment]::GetFolderPath('UserProfile')) '.local/state'}
     return Join-Path $base 'ba-release/releases'
 }
 
 # Resolves linked ancestors even when the final staging directory does not exist yet.
 function Resolve-ReleasePhysicalPath([string]$Path) {
+    if ($IsWindows) {return Resolve-ReleaseWindowsPath $Path}
     $physical=[IO.Path]::GetFullPath($Path)
     $seen=[Collections.Generic.HashSet[string]]::new($(if ($IsWindows) {[StringComparer]::OrdinalIgnoreCase} else {[StringComparer]::Ordinal}))
     for ($iteration=0;$iteration -lt 64;$iteration++) {
@@ -444,6 +447,10 @@ function Invoke-ReleasePrepare([string]$Repository, [string[]]$Destination, [str
             if ($state.plan.planId -cne $plan.planId) { throw 'This version already has a different release plan. Resume that snapshot; do not bump the version just to retry.' }
             if ($state.status -in @('prepared','published','submitted','needs-store-action','partial-failure','publication-failed','needs-reconciliation')) {
                 Assert-ReleaseArtifacts $statePath $state
+                if ($state.status -eq 'prepared') {
+                    try {Invoke-ReleaseDistributionChecks $settings $state $statePath $ButlerExecutable {Write-ReleaseJson $stateFile $state}}
+                    catch {$state.status='preparation-failed';Write-ReleaseJson $stateFile $state}
+                }
                 return @{status=$state.status; statePath=$statePath; planId=$plan.planId}
             }
         } else {
@@ -482,7 +489,12 @@ function Invoke-ReleasePrepare([string]$Repository, [string[]]$Destination, [str
             $state.exports[$preset.name] = [ordered]@{status='in-progress'; error=$null}
             Write-ReleaseJson $stateFile $state
             try {
-                $export = Invoke-ReleaseTool $engine @('--headless','--path',$settings.projectPath,'--export-release',$preset.name,$output) $settings.repository
+                $exportEnvironment=@{}
+                if ($preset.platform -eq 'Android' -and $preset.useGradle) {
+                    # A persistent child daemon keeps the Windows console wrapper alive.
+                    $exportEnvironment.GRADLE_OPTS=($env:GRADLE_OPTS+' -Dorg.gradle.daemon=false').Trim()
+                }
+                $export = Invoke-ReleaseTool $engine @('--headless','--path',$settings.projectPath,'--export-release',$preset.name,$output) $settings.repository -Environment $exportEnvironment
                 if ($export.exitCode -ne 0 -or -not (Test-Path -LiteralPath $output -PathType Leaf)) { throw "Export failed (exit $($export.exitCode)); expected export file is missing or incomplete." }
                 $artifact = Get-ReleaseArtifact $statePath $directory $preset.name $plan.head
                 $state.artifacts = @($state.artifacts | Where-Object {$_.preset -cne $preset.name}) + @($artifact)
@@ -629,7 +641,11 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                     $artifacts = @($state.artifacts | Where-Object {$_.preset -ceq $destination.preset})
                     if ($artifacts.Count -ne 1) { throw 'Prepared artifact not uniquely found.' }
                     $directory = Resolve-ReleasePath $StatePath $artifacts[0].directory -MustExist
-                    $arguments = @('push',$directory,$destination.target,'--userversion',$state.plan.version)
+                    $preset=@($state.plan.exports | Where-Object {$_.name -ceq $destination.preset})[0]
+                    $inputPath=Get-ReleaseButlerInput $directory $preset $destination
+                    if ($preset.platform -eq 'Android' -and (-not $state.checks[$destination.id].Contains('input') -or
+                        $state.checks[$destination.id].input -cne [IO.Path]::GetRelativePath($StatePath,$inputPath).Replace('\','/'))) {throw 'Resume prepare to verify the signed APK input before publication.'}
+                    $arguments = @('push',$inputPath,$destination.target,'--userversion',$state.plan.version)
                     foreach ($pattern in $destination.ignore) { $arguments += @('--ignore',$pattern) }
                     $upload = Invoke-ReleaseTool $ButlerExecutable $arguments $StatePath
                     if ($upload.exitCode -ne 0) { throw "Butler upload failed (exit $($upload.exitCode))." }

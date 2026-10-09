@@ -8,6 +8,18 @@ function Test-ReleaseIgnoredFile([string]$Name, [string[]]$Patterns) {
     return $false
 }
 
+# A signed Android APK is the store payload; its optional v4 sidecar stays local.
+function Get-ReleaseButlerInput([string]$Directory, $Preset, $Destination) {
+    if ($Preset.platform -ne 'Android') {return $Directory}
+    $apk=Join-Path $Directory $Preset.filename
+    if (-not (Test-Path -LiteralPath $apk -PathType Leaf)) {throw 'Prepared signed APK is missing.'}
+    $unexpected=@(Get-ChildItem -LiteralPath $Directory -Recurse -File | Where-Object {
+        $_.FullName -cne $apk -and $_.FullName -cne ($apk+'.idsig') -and -not (Test-ReleaseIgnoredFile $_.Name $Destination.ignore)
+    })
+    if ($unexpected.Count) {throw 'Additional Android payload files need an explicitly supported distribution configuration.'}
+    return $apk
+}
+
 # Checks the approved common artifact in place, restoring withheld files before any publication.
 function Invoke-ReleaseDistributionChecks($Settings, $State, [string]$StatePath, [string]$ButlerExecutable, [scriptblock]$Save) {
     if (-not $State.Contains('checks')) {$State.checks=[ordered]@{}}
@@ -17,11 +29,19 @@ function Invoke-ReleaseDistributionChecks($Settings, $State, [string]$StatePath,
         $preset=@($Settings.presets | Where-Object {$_.name -ceq $destination.preset})[0]
         if (-not $State.checks.Contains($destination.id)) {$State.checks[$destination.id]=@{standalone='pending';dryRun='pending';error=$null}}
         $record=$State.checks[$destination.id]
-        if ($record.standalone -eq 'succeeded' -and $record.dryRun -eq 'succeeded') {continue}
+        $inputPath=if ($preset.platform -eq 'Android') {Join-Path $directory $preset.filename} else {$directory}
+        $inputRelative=[IO.Path]::GetRelativePath($StatePath,$inputPath).Replace('\','/')
+        if ($record.standalone -in @('succeeded','not-applicable') -and $record.dryRun -eq 'succeeded' -and
+            ($preset.platform -ne 'Android' -or ($record.Contains('input') -and $record.input -ceq $inputRelative))) {continue}
         $files=@(Get-ChildItem -LiteralPath $directory -Recurse -File)
         $excluded=@($files | Where-Object {Test-ReleaseIgnoredFile $_.Name $destination.ignore})
         $included=@($files | Where-Object {-not (Test-ReleaseIgnoredFile $_.Name $destination.ignore)})
         try {
+            $inputPath=Get-ReleaseButlerInput $directory $preset $destination
+            if ($preset.platform -eq 'Android') {
+                $included=@($files | Where-Object {$_.FullName -ceq $inputPath})
+                $excluded=@($files | Where-Object {$_.FullName -cne $inputPath})
+            }
             if ($preset.platform -ne 'Android' -and $record.standalone -ne 'succeeded') {
                 $check=@($Settings.config.standalone | Where-Object {$_.preset -ceq $destination.preset})[0]
                 $hold=Join-Path $StatePath ('standalone-withheld/'+[guid]::NewGuid().ToString('N'))
@@ -45,7 +65,7 @@ function Invoke-ReleaseDistributionChecks($Settings, $State, [string]$StatePath,
                 }
                 Assert-ReleaseArtifacts $StatePath $State
             } elseif ($preset.platform -eq 'Android') {$record.standalone='not-applicable'}
-            $arguments=@('push',$directory,$destination.target,'--dry-run','--userversion',$State.plan.version)
+            $arguments=@('push',$inputPath,$destination.target,'--dry-run','--userversion',$State.plan.version)
             foreach ($pattern in $destination.ignore) {$arguments+=@('--ignore',$pattern)}
             $preview=Invoke-ReleaseTool $ButlerExecutable $arguments $StatePath
             if ($preview.exitCode -ne 0) {throw 'Butler dry-run failed.'}
@@ -59,6 +79,7 @@ function Invoke-ReleaseDistributionChecks($Settings, $State, [string]$StatePath,
                 if ($text -notmatch ('(?m)(?:^|\s)'+[regex]::Escape($relative)+'\s*$')) {throw 'Butler dry-run did not list every approved artifact file.'}
             }
             $record.dryRun='succeeded';$record.error=$null
+            $record.input=$inputRelative
             $record.included=@($included | ForEach-Object {[IO.Path]::GetRelativePath($directory,$_.FullName).Replace('\','/')})
             $record.excluded=@($excluded | ForEach-Object {[IO.Path]::GetRelativePath($directory,$_.FullName).Replace('\','/')})
             $record.previewSha256=Get-ReleaseTextHash $text

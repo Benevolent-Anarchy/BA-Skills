@@ -197,6 +197,7 @@ $output = $Rest[$index+2]
 if ($env:BA_FIXTURE_EXPORT_LOG) {Add-Content $env:BA_FIXTURE_EXPORT_LOG $Rest[$index+1]}
 New-Item -ItemType Directory (Split-Path $output -Parent) -Force | Out-Null
 'exported game' | Set-Content -LiteralPath $output
+if ($output.EndsWith('.apk')) { 'optional signature fixture' | Set-Content -LiteralPath ($output+'.idsig'); exit 0 }
 'steam fixture' | Set-Content (Join-Path (Split-Path $output -Parent) 'steam_api64.dll')
 'sidecar' | Set-Content -LiteralPath ($output + '.pck')
 exit 0
@@ -207,6 +208,7 @@ param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Rest)
 if ($Rest -notcontains '--ignore' -or $Rest -notcontains '--userversion') { exit 9 }
 if ($Rest -contains '--dry-run') {
     if ($env:BA_FIXTURE_BAD_SELECTION) {'steam_api64.dll';exit 0}
+    if (Test-Path -LiteralPath $Rest[1] -PathType Leaf) {[IO.Path]::GetFileName($Rest[1]);exit 0}
     Get-ChildItem $Rest[1] -Recurse -File | Where-Object {$_.Name -notlike 'steam_api*.dll'} | ForEach-Object {[IO.Path]::GetRelativePath($Rest[1],$_.FullName).Replace('\','/')}
     exit 0
 }
@@ -1036,6 +1038,8 @@ Test 'version operations are explicit and holding Play leaves Android counters u
 }
 . (Join-Path $PSScriptRoot 'configuration-tests.ps1')
 . (Join-Path $PSScriptRoot 'doctor-tests.ps1')
+. (Join-Path $PSScriptRoot 'play-auth-tests.ps1')
+. (Join-Path $PSScriptRoot 'host-runtime-tests.ps1')
 Write-Output "Results: $script:Passed passed; $script:Failed failed. Fixture directory: $sandbox"
 if ($script:Passed + $script:Failed -eq 0) {throw 'No tests matched Filter.'}
 if ($script:Failed -gt 0) { exit 1 }

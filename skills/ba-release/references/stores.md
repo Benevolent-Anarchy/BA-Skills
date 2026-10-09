@@ -95,6 +95,9 @@ from an authorized Android Publisher OAuth account. Never commit or copy tokens,
 service-account JSON, keystores, signing passwords or credential-bearing logs.
 The adapter calls only `androidpublisher.googleapis.com` over HTTPS and stores
 sanitized operation status, edit ID, bundle hash/code and track metadata.
+For an approved keyless CLI login, use the tested helper in
+[Google Play authentication](google-play-auth.md). Its token stays in the calling
+process; each later publication/resume obtains a fresh token.
 
 Confirm the app already exists in Play Console, and no other edit for this
 account is being worked on: [creating an edit invalidates its previous open

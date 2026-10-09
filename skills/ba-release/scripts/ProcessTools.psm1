@@ -2,15 +2,26 @@
 #requires -Version 7.2
 Set-StrictMode -Version Latest
 
-function Invoke-ReleaseTool([string]$Executable, [string[]]$Arguments, [string]$Directory) {
+function Invoke-ReleaseTool([string]$Executable, [string[]]$Arguments, [string]$Directory, [hashtable]$Environment=@{}) {
     $PSNativeCommandUseErrorActionPreference = $false
+    $priorEnvironment=@{}
     Push-Location -LiteralPath $Directory
     try {
+        foreach ($key in $Environment.Keys) {
+            $priorEnvironment[$key]=[Environment]::GetEnvironmentVariable($key,'Process')
+            [Environment]::SetEnvironmentVariable($key,$Environment[$key],'Process')
+        }
         if ($Executable.EndsWith('.ps1',[StringComparison]::OrdinalIgnoreCase)) {
             $lines = & (Join-Path $PSHOME $(if ($IsWindows) {'pwsh.exe'} else {'pwsh'})) -NoProfile -File $Executable @Arguments 2>&1
         } else { $lines = & $Executable @Arguments 2>&1 }
         return @{exitCode=$LASTEXITCODE; text=($lines -join "`n")}
-    } finally { Pop-Location }
+    } finally {
+        foreach ($key in $priorEnvironment.Keys) {
+            if ($null -eq $priorEnvironment[$key]) {Remove-Item -LiteralPath ('Env:'+$key) -ErrorAction SilentlyContinue}
+            else {[Environment]::SetEnvironmentVariable($key,$priorEnvironment[$key],'Process')}
+        }
+        Pop-Location
+    }
 }
 # Bounds harmless version probes; never passes credentials or interprets shell commands.
 function Invoke-ReleaseProbe([string]$Executable, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds=15) {

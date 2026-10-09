@@ -18,6 +18,12 @@ probes, exact release templates and private Android signing presence. It perform
 no exports, network/authentication operations or source writes; present credentials
 and signing inputs remain distinct from verified access/signatures.
 
+The optional Google Play auth helper uses an existing per-user CLI login and
+service-account impersonation with the Android Publisher scope. It verifies the
+active identity, keeps credential caches outside Git, sanitizes provider errors,
+and restores the calling environment after the requested action. It does not
+create accounts, grant permissions or authorize release publication.
+
 Setup inspects the game and asks missing facts, applying only explicit validated
 answers with an optimistic configuration hash. Plan emits JSON without writes,
 verification, exports or network calls. It separates missing settings from source
@@ -26,6 +32,10 @@ identify the plan. Prepare reserves chosen semantic-version settings and selecte
 Android preset counter changes independently once, requires their local source
 commit, runs the complete game gate, and exports shared artifacts once. Standalone checks physically
 withhold specific Steam files and verify Butler dry-run selections.
+Windows state paths resolve Store app redirection through a native file handle,
+making the returned path usable in WSL and external upload tools. Gradle exports
+disable persistent daemons only in their own process environment and restore
+existing or absent caller variables afterward.
 Publish verifies the snapshot and exact plan/notes approval, then journals each
 destination separately, including Steam build IDs and Play edit/bundle progress.
 Completed uploads/submissions are skipped on retry; observed console receipts
