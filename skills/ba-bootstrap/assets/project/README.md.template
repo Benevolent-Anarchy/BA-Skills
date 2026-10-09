@@ -1,0 +1,15 @@
+# {{PROJECT_TITLE}}
+
+{{DESCRIPTION}}
+
+Start with [the project map](docs/NEXT.md). [Design](docs/DESIGN.md), [decisions](docs/DECISIONS.md) and [human judgements](docs/JUDGEMENTS.md) form the permanent canon. Unfinished work and questions belong in [GitHub Issues]({{ISSUES_URL}}).
+
+[AGENTS.md](AGENTS.md) defines the shared working process for every agent.
+
+Before opening a PR, run the complete gate from PowerShell 7.2 or newer:
+
+```powershell
+pwsh -NoProfile -File tools/verify.ps1
+```
+
+The initial gate validates documentation. Add project tests to the same gate as implementation develops. Local Obsidian settings and plugins live in the ignored `docs/.obsidian/`; apply the shared `ba-bootstrap` skill's local-setup mode after a fresh clone.

@@ -1,15 +1,21 @@
 # BA-Skills
-BA's shared agent skills and deterministic tooling for Codex and Claude Code.
+BA's shared agent skills and deterministic tooling. The same canonical skill folders can be used by Codex, Claude Code and other agents.
 
-The canonical release skill is [skills/ba-release/SKILL.md](skills/ba-release/SKILL.md).
-Use PowerShell 7.3 or newer for release operations and tests; installation also
-supports PowerShell 7.2:
+The [bootstrap skill](skills/ba-bootstrap/SKILL.md) creates a private project, its public release-notes companion, topical documentation, agent rules and an ignored local Obsidian vault. Existing clones can receive the same vault setup without creating repositories. This first version provides the shared foundation; engine presets follow separately.
+
+The [release skill](skills/ba-release/SKILL.md) prepares and publishes Godot releases.
+Use PowerShell 7.3 or newer for release operations and repository verification;
+installation also supports PowerShell 7.2:
 
 ```powershell
 pwsh -NoProfile -File ./install.ps1 -IncludeWsl
+pwsh -NoProfile -File ./install.ps1 -Skill ba-bootstrap
+pwsh -NoProfile -File ./install.ps1 -Skill ba-release -CheckOnly
 pwsh -NoProfile -File ./skills/ba-release/scripts/verify-discovery.ps1
-pwsh -NoProfile -File ./tests/run-tests.ps1
+pwsh -NoProfile -File ./tools/verify.ps1
 ```
+
+The root installer defaults to both skills and preflights all selected aliases before creating any. Bootstrap requests both native `.agents` and `.claude` aliases even without their command-line executables; release keeps its existing executable-based discovery. Each points to one canonical source; unrelated skills and conflicting files are preserved. Permanent installation should use this canonical checkout after integration, not an unmerged worktree.
 
 Game settings live in that game's root release.json. See the skill's concise
 [configuration](skills/ba-release/references/configuration.md),
