@@ -10,6 +10,8 @@ are passed after the script path. Comma-separated destination IDs work with
 -Mode prepare -Repository <game-root> -Destination itch-windows,notes -VersionChange patch
 -Mode extend -StatePath <prepared-state-directory> -Destination google-play
 -Mode status -StatePath <prepared-state-directory>
+-Mode hold -StatePath <prepared-state-directory> -Destination google-play -HoldReason "Waiting for existing review to clear."
+-Mode unhold -StatePath <prepared-state-directory> -Destination google-play -PlayTrackReviewed
 -Mode publish -StatePath <prepared-state-directory> -ApprovedPlanId <displayed-id> -ApprovedNotesSha256 <displayed-notes-hash>
 -Mode confirm -StatePath <prepared-state-directory> -ReceiptPath <observed-store-receipt.json>
 ```
@@ -41,6 +43,55 @@ username cannot prove validity, store access or cached SteamCMD authentication.
 SDK/JDK and signing presence cannot prove compatibility or a valid signature.
 The complete project gate, real exports and store preflights still supply those
 checks. Doctor makes no remote calls, login attempts, exports or source/state writes.
+
+## Prepared destination holds
+
+Use `hold` with explicit prepared destination IDs and `-HoldReason`. The reason
+is single-line public availability text of 1 to 1000 characters; credentials,
+control characters and private discussion do not belong there. The script rejects
+credential-like values before journal writes and checks older reasons again before
+publication. Holds survive ordinary
+publish, retry and preparation. They preserve the sealed plan, notes, artifacts,
+version and counter reservations. Held stores receive no credential checks or
+API calls. Other approved destinations proceed independently.
+
+Use `unhold` only after verifying the user's release condition has been met or
+receiving explicit authorization to proceed. For Play, first inspect the current
+live track and review active releases, rollout and `retainVersionCodes` with the
+user. Pass `-PlayTrackReviewed` only after that review; unhold refuses Play without
+it and records the acknowledgement. If the reviewed retention or release settings
+need to change, stop and obtain a revised approved plan through the release workflow.
+Do not edit the journal to bypass approval. An older unhold that still needs Play
+publication must repeat `unhold -PlayTrackReviewed` before publishing. Already
+submitted or completed Play destinations remain skipped on independent retries.
+If an older unhold already attempted Play publication, the same acknowledgement
+command records the review while preserving its failed, interrupted or uncertain
+status, attempts and remote evidence. It performs no store calls and does not
+authorize a retry; reconcile that attempt through the ordinary recovery workflow.
+
+Unhold returns that destination to pending; overall `prepared` means at least
+one selected destination is ready to resume, with other destinations retaining
+their own statuses. Failures or interrupted operations take precedence; an
+`in-progress`/`uncertain` destination keeps the overall `needs-reconciliation`
+status. The next publish reuses the approved release and skips
+completed stores. Neither hold command contacts stores. A definitive `failed`
+destination can be held only after confirming there was no store-side effect and
+its remote record contains only local `sourceCommit`/`notesHashes` bookkeeping.
+Notes waiting for shipment can also be held. Store identifiers, phases, live or
+ambiguous evidence, unknown remote fields, and `uncertain`/`in-progress` operations
+require reconciliation. Attempts and recorded provenance are preserved. `on-hold` reports
+remaining intentional holds once other selected operations have completed;
+failures and outstanding console actions retain their own statuses.
+
+Holding notes defers their publication. Their selected repository still receives
+the read-only visibility, write-permission and canonical-content preflight before
+any store upload. A failed preflight preserves the hold, records the failure and
+blocks store publication; retry checks it again.
+
+Release execution and tests require PowerShell 7.3 or newer so deserialized journal
+objects preserve key order, retaining existing artifact approval hashes. See
+[Microsoft's JSON ordering documentation](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/convertfrom-json#-ashashtable).
+The installer itself remains compatible with PowerShell 7.2.
 
 ## Local preparation
 
@@ -158,6 +209,7 @@ separate staging folder for inspection; only successful manifests can publish.
 | --- | --- |
 | `not-selected` | No operation requested for this destination. |
 | `pending` | Prepared, awaiting approved publication. |
+| `held` | Prepared but explicitly withheld; no store or credential operations occur until unheld. |
 | `in-progress` | Journal saved before invoking the external command. |
 | `succeeded` | External tool returned success, or existing public notes matched. |
 | `awaiting-store-action` | Store upload completed; activation/announcement or draft publication still needs console work. |
@@ -177,7 +229,7 @@ configured page labels can still need an Edit game action. It does not establish
 untested runtime behavior. Steam/Play uploads remain separate from observed live
 activation/review completion.
 
-Overall status is `prepared`, `preparation-failed`, `published`, `submitted`,
+Overall status is `prepared`, `preparation-failed`, `published`, `on-hold`, `submitted`,
 `needs-store-action`, `partial-failure`, `publication-failed`, or
 `needs-reconciliation`, or `awaiting-release`. Report the
 individual destinations and errors alongside that status. Never convert a

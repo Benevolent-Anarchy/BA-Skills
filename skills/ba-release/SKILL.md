@@ -7,7 +7,7 @@ description: Set up, plan, prepare, publish or resume Benevolent Anarchy Godot r
 
 Use the scripts beside this file as the implementation of release operations.
 Resolve `scripts/` relative to this SKILL.md's directory, including when installed
-through a link. Run with PowerShell 7.2 or newer (`pwsh`). The workflow is the same
+through a link. Run with PowerShell 7.3 or newer (`pwsh`). The workflow is the same
 in any agent; do not substitute model-generated shell operations for the scripts.
 
 ## Setup and plan
@@ -80,7 +80,18 @@ These bind a persisted approval to the prepared artifacts as well.
 
 Resume the existing state directory after a failure; never bump the version as
 part of a retry. Report each destination separately. Keep successful operations
-complete while retrying failed operations. An interrupted upload remains
+complete while retrying failed operations. Hold prepared destinations that must
+not publish yet with `hold` and a single-line public reason without credentials
+or private discussion. Before unholding Play, re-read its live track and review
+active releases, rollout and `retainVersionCodes` with the user; an earlier
+approval does not cover a track that changed during the hold. Use `unhold` only
+when the user's condition is satisfied or they explicitly authorize resuming,
+and pass `-PlayTrackReviewed` for Play only after that fresh review. Ordinary publish
+and retries retain holds and skip those stores completely. Source, notes,
+artifacts and plan identity stay unchanged. A failed destination can be held
+after confirming it has no remote progress; started or uncertain store operations
+require reconciliation. Selected public notes still receive their read-only
+preflight while held, before any store publication. An interrupted upload remains
 `uncertain`; inspect its remote result and obtain explicit authorization before
 using `-RetryUncertain`. An expired/invalidated Play edit needs separate explicit
 authorization for `-ReplacePlayEdit` after inspecting the remote outcome and

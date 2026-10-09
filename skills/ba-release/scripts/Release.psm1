@@ -1,5 +1,5 @@
 # Owns deterministic release validation, read-only plans, local preparation and journaled publication.
-#requires -Version 7.2
+#requires -Version 7.3
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:SteamIgnore = @('steam_api*.dll','libsteam_api.so','libgodotsteam.*','steam_appid.txt')
@@ -43,6 +43,16 @@ function Resolve-ReleasePath([string]$Root, [string]$Relative, [switch]$MustExis
     return $path
 }
 
+# Screens release text for credential-like values without echoing the input.
+function Assert-ReleaseCredentialFreeText([string]$Text) {
+    $patterns=@(
+        '(?i)((?<![\w./-])--?(password|token|api.?key|secret|identity)\b|https?://[^/\s]+@|(?<![A-Za-z0-9])(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9]{12,}|Bearer\s+\S+)'
+        '(?i)(?<![\w./-])[\w.-]*(?:password|passwd|pwd|token|api.?key|secret|credential)[\w.-]*[\x22\x27]?\s*[:=]\s*\S+'
+        '(?i)Authorization[\x22\x27]?\s*[:=]\s*[\x22\x27]?\s*Basic\s+\S+'
+    )
+    foreach ($pattern in $patterns) {if ($Text -match $pattern) {throw 'Credential-like values are forbidden in release data.'}}
+}
+
 # Rejects credential-bearing configuration and duplicate JSON keys before interpreting settings.
 function Assert-ReleaseJson([System.Text.Json.JsonElement]$Element) {
     if ($Element.ValueKind -eq [System.Text.Json.JsonValueKind]::Object) {
@@ -55,8 +65,7 @@ function Assert-ReleaseJson([System.Text.Json.JsonElement]$Element) {
     } elseif ($Element.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
         foreach ($child in $Element.EnumerateArray()) { Assert-ReleaseJson $child }
     } elseif ($Element.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
-        $value = $Element.GetString()
-        if ($value -match '(?i)(--?(password|token|api.?key|secret|identity)|https?://[^/\s]+@|(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9]{12,}|Bearer\s+\S+)') { throw 'Credential-like values are forbidden in release configuration.' }
+        Assert-ReleaseCredentialFreeText $Element.GetString()
     }
 }
 
@@ -304,7 +313,7 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
         $record.changes=@();$record.changedFiles=@()
         if ($null -eq $record.previousCommit) {$record.status='blocked';$blockers.Add("$($record.id): Confirm its last live source commit/ref for catch-up notes.");continue}
         $log=Read-ReleaseGit $Repository @('log','--no-merges','--reverse','--format=%H%x1f%s',"$($record.previousCommit)..$head")
-        $record.changes=@(foreach ($line in $log.Split("`n")) {if ($line) {$parts=$line.Split([char]31,2);@{commit=$parts[0];subject=$parts[1]}}})
+        $record.changes=@(foreach ($line in $log.Split("`n")) {if ($line) {$parts=$line.Split([char]31,2);[ordered]@{commit=$parts[0];subject=$parts[1]}}})
         $record.changedFiles=@((Read-ReleaseGit $Repository @('diff','--name-only',$record.previousCommit,$head,'--')).Split("`n") | Where-Object {$_})
     }
     $needed = @(@(foreach ($target in $destinations) {
@@ -445,7 +454,7 @@ function Invoke-ReleasePrepare([string]$Repository, [string[]]$Destination, [str
         if (Test-Path -LiteralPath $stateFile) {
             $state = [IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable
             if ($state.plan.planId -cne $plan.planId) { throw 'This version already has a different release plan. Resume that snapshot; do not bump the version just to retry.' }
-            if ($state.status -in @('prepared','published','submitted','needs-store-action','partial-failure','publication-failed','needs-reconciliation')) {
+            if ($state.status -in @('prepared','published','submitted','needs-store-action','partial-failure','publication-failed','needs-reconciliation','on-hold','awaiting-release')) {
                 Assert-ReleaseArtifacts $statePath $state
                 if ($state.status -eq 'prepared') {
                     try {Invoke-ReleaseDistributionChecks $settings $state $statePath $ButlerExecutable {Write-ReleaseJson $stateFile $state}}
@@ -559,16 +568,40 @@ function Get-ReleaseNotesHash([string]$StatePath, $Plan) {
 # Summarizes progress without conflating uploaded/submitted artifacts with verified store publication.
 function Get-ReleaseOverallStatus($State) {
     $statuses=@($State.plan.selectedDestinations | ForEach-Object {$State.destinations[$_].status})
-    if ($statuses -contains 'uncertain') {return 'needs-reconciliation'}
+    if ($statuses -contains 'uncertain' -or $statuses -contains 'in-progress') {return 'needs-reconciliation'}
     $complete=@($statuses | Where-Object {$_ -in @('succeeded','submitted','awaiting-store-action')})
-    if (@($statuses | Where-Object {$_ -notin @('succeeded','submitted','awaiting-store-action','awaiting-release')}).Count -eq 0) {
+    $failed=@($State.plan.selectedDestinations | Where-Object {$State.destinations[$_].status -eq 'failed' -or ($State.destinations[$_].Contains('preflightStatus') -and $State.destinations[$_].preflightStatus -eq 'failed')})
+    if ($failed.Count) {return $(if ($complete.Count) {'partial-failure'} else {'publication-failed'})}
+    if ($statuses -contains 'pending') {return 'prepared'}
+    if (@($statuses | Where-Object {$_ -notin @('succeeded','submitted','awaiting-store-action','awaiting-release','held')}).Count -eq 0) {
         if ($statuses -contains 'awaiting-store-action') {return 'needs-store-action'}
         if ($statuses -contains 'submitted') {return 'submitted'}
         if ($statuses -contains 'awaiting-release') {return 'awaiting-release'}
+        if ($statuses -contains 'held') {return 'on-hold'}
         return 'published'
     }
     if ($complete.Count) {return 'partial-failure'}
     return 'publication-failed'
+}
+
+# Completes only the inspected Gradle flag omitted by older planners, preserving every approved field.
+function Update-ReleaseDerivedPlanMetadata($State, $Fresh) {
+    $freshJson=Get-ReleaseComparablePlanJson ($Fresh | ConvertTo-Json -Depth 30 -Compress)
+    $savedJson=Get-ReleaseComparablePlanJson ($State.plan | ConvertTo-Json -Depth 30 -Compress)
+    if ($freshJson -ceq $savedJson) {return $false}
+    $comparison=$freshJson | ConvertFrom-Json -AsHashtable
+    $completed=$false
+    foreach ($collection in @('exports','requiredExports')) {
+        foreach ($preset in $comparison[$collection]) {
+            $saved=@($State.plan[$collection] | Where-Object {$_.name -ceq $preset.name})
+            if ($saved.Count -eq 1 -and $preset.platform -eq 'Android' -and $preset.Contains('useGradle') -and -not $saved[0].Contains('useGradle')) {
+                $preset.Remove('useGradle');$completed=$true
+            }
+        }
+    }
+    if (-not $completed -or (Get-ReleaseComparablePlanJson ($comparison | ConvertTo-Json -Depth 30 -Compress)) -cne $savedJson) {throw 'Saved release plan differs from the current inspected plan.'}
+    $State.plan=$Fresh
+    return $true
 }
 
 # Publishes only approved snapshot destinations and retains successes through partial failures and retries.
@@ -581,8 +614,13 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
         if ($state.schemaVersion -ne 1 -or $state.status -in @('preparing','preparation-failed') -or $state.verification -ne 'succeeded') { throw 'Release has not been prepared successfully.' }
         $fresh = Get-ReleasePlan $state.plan.repository $state.plan.selectedDestinations $state.plan.baselines
         if (-not $fresh.ready -or $fresh.planId -cne $state.plan.planId) { throw 'Source or release configuration changed after preparation.' }
+        foreach ($destination in $state.plan.destinations) {
+            $record=$state.destinations[$destination.id]
+            if ($record.status -eq 'held') {Assert-ReleaseHoldReason $record.hold.reason}
+            if ($destination.selected -and $destination.type -eq 'google-play' -and $record.status -notin @('held','succeeded','submitted','awaiting-store-action') -and $record.Contains('hold') -and $record.hold.Contains('releasedAt') -and -not $record.hold.Contains('playTrackReviewedAt')) {throw 'Google Play released from hold requires a fresh track review through unhold -PlayTrackReviewed.'}
+        }
         # Also bind the complete displayed plan, so a journal edit cannot change upload targets.
-        if (($fresh | ConvertTo-Json -Depth 30 -Compress) -cne ($state.plan | ConvertTo-Json -Depth 30 -Compress)) { throw 'Saved release plan differs from the current inspected plan.' }
+        Update-ReleaseDerivedPlanMetadata $state $fresh | Out-Null
         Assert-ReleaseArtifacts $StatePath $state
         $notesPath = Join-Path $StatePath 'notes.md'
         $notes = [IO.File]::ReadAllText($notesPath)
@@ -601,10 +639,16 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
         if (-not $state.approval -or $state.approval.planId -cne $state.plan.planId -or $state.approval.notesSha256 -cne $notesHash -or $state.approval.artifactsSha256 -cne $artifactHash) { throw 'Publication requires approval of the exact release plan, notes and artifacts.' }
         $notesDestination=@($state.plan.destinations | Where-Object {$_.selected -and $_.type -eq 'notes'})
         if ($notesDestination.Count) {
-            try {Assert-ReleaseNotesDestination $state.plan $notes $StatePath $GhExecutable}
+            $notesRecord=$state.destinations[$notesDestination[0].id]
+            try {
+                Assert-ReleaseNotesDestination $state.plan $notes $StatePath $GhExecutable
+                if ($notesRecord.Contains('preflightStatus') -and $notesRecord.preflightStatus -eq 'failed') {$notesRecord.error=$null}
+                $notesRecord.preflightStatus='succeeded'
+            }
             catch {
-                $state.destinations[$notesDestination[0].id].status='failed'
-                $state.destinations[$notesDestination[0].id].error='Public notes preflight failed; check public visibility, write permissions, approved availability link and conflicting notes before any store publication.'
+                if ($notesRecord.status -ne 'held') {$notesRecord.status='failed'}
+                $notesRecord.preflightStatus='failed'
+                $notesRecord.error='Public notes preflight failed; check public visibility, write permissions, approved availability link and conflicting notes before any store publication.'
                 $state.status=Get-ReleaseOverallStatus $state;Write-ReleaseJson $stateFile $state
                 return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}
             }
@@ -612,6 +656,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
         foreach ($destination in @($state.plan.destinations | Sort-Object { $_.type -eq 'notes' })) {
             if (-not $destination.selected) { continue }
             $record = $state.destinations[$destination.id]
+            if ($record.status -eq 'held') {continue}
             if ($destination.type -eq 'notes') {
                 if (-not (Test-ReleaseShipped $state $StatePath)) {$record.status='awaiting-release';$record.error=$null;Write-ReleaseJson $stateFile $state;continue}
                 if ($record.status -eq 'succeeded') {
@@ -647,7 +692,11 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                         $state.checks[$destination.id].input -cne [IO.Path]::GetRelativePath($StatePath,$inputPath).Replace('\','/'))) {throw 'Resume prepare to verify the signed APK input before publication.'}
                     $arguments = @('push',$inputPath,$destination.target,'--userversion',$state.plan.version)
                     foreach ($pattern in $destination.ignore) { $arguments += @('--ignore',$pattern) }
-                    $upload = Invoke-ReleaseTool $ButlerExecutable $arguments $StatePath
+                    Push-Location -LiteralPath $StatePath
+                    try {$pushExecutable=Find-ReleaseDoctorTool $ButlerExecutable} finally {Pop-Location}
+                    if (-not $pushExecutable) {throw 'Butler executable is unavailable before upload.'}
+                    $record.remote.phase='pushing';Write-ReleaseJson $stateFile $state
+                    $upload = Invoke-ReleaseTool $pushExecutable $arguments $StatePath
                     if ($upload.exitCode -ne 0) { throw "Butler upload failed (exit $($upload.exitCode))." }
                     $record.remote.phase='upload-complete';$record.remote.live=$true;$record.remote.target=$destination.target;$record.remote.sourceCommit=$artifacts[0]['sourceCommit']
                     if ($destination.Contains('displayName')) {$outcome='awaiting-store-action';$record.remote.displayNameRequired=$destination.displayName}
@@ -751,4 +800,6 @@ function Confirm-ReleaseStoreCompletion([string]$StatePath, [string]$ReceiptPath
 . (Join-Path $PSScriptRoot 'ReleaseRecord.ps1')
 . (Join-Path $PSScriptRoot 'PublicNotes.ps1')
 . (Join-Path $PSScriptRoot 'Doctor.ps1')
-Export-ModuleMember -Function Get-ReleaseDoctor,Get-ReleaseConfiguration,Get-ReleasePlan,Get-ReleaseSetup,Set-ReleaseSetup,Invoke-ReleaseInteractiveSetup,Get-ReleaseVersion,Get-ReleaseLiveLedger,Expand-ReleaseDestinations,Export-ReleasePlayChangelogs,Invoke-ReleasePrepare,Invoke-ReleasePublish,Get-ReleaseNotesHash,Confirm-ReleaseStoreCompletion
+. (Join-Path $PSScriptRoot 'PublicationHold.ps1')
+. (Join-Path $PSScriptRoot 'PlanComparison.ps1')
+Export-ModuleMember -Function Set-ReleaseDestinationHold,Get-ReleaseDoctor,Get-ReleaseConfiguration,Get-ReleasePlan,Get-ReleaseSetup,Set-ReleaseSetup,Invoke-ReleaseInteractiveSetup,Get-ReleaseVersion,Get-ReleaseLiveLedger,Expand-ReleaseDestinations,Export-ReleasePlayChangelogs,Invoke-ReleasePrepare,Invoke-ReleasePublish,Get-ReleaseNotesHash,Confirm-ReleaseStoreCompletion

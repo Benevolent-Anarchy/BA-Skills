@@ -4,7 +4,8 @@ BA's shared agent skills and deterministic tooling. The same canonical skill fol
 The [bootstrap skill](skills/ba-bootstrap/SKILL.md) creates a private project, its public release-notes companion, topical documentation, agent rules and an ignored local Obsidian vault. Existing clones can receive the same vault setup without creating repositories. This first version provides the shared foundation; engine presets follow separately.
 
 The [release skill](skills/ba-release/SKILL.md) prepares and publishes Godot releases.
-Install selected user-level links from PowerShell 7.2 or newer:
+Use PowerShell 7.3 or newer for release operations and repository verification;
+installation also supports PowerShell 7.2:
 
 ```powershell
 pwsh -NoProfile -File ./install.ps1 -IncludeWsl

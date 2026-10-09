@@ -57,6 +57,7 @@ function Publish-ReleaseAvailability($State, [string]$StatePath, [string]$GhExec
         if ($destination.type -eq 'notes') {continue}
         $record=$State.destinations[$destination.id]
         $destinations[$destination.id]=[ordered]@{type=$destination.type;selected=$destination.selected;status=$record.status;live=($record.remote.Contains('live') -and $record.remote.live -eq $true)}
+        if ($record.status -eq 'held') {Assert-ReleaseHoldReason $record.hold.reason;$destinations[$destination.id].holdReason=$record.hold.reason}
         if ($record.remote.Contains('buildId')) {$destinations[$destination.id].buildId=$record.remote.buildId}
         if ($destination.Contains('versionCode')) {$destinations[$destination.id].versionCode=$destination.versionCode}
     }

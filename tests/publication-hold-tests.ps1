@@ -1,0 +1,169 @@
+# Verifies prepared-store holds survive retries without contacting held stores or rebuilding.
+
+# Reorders nested JSON objects while keeping each array and primitive value intact.
+function Reverse-TestJsonKeys($Value) {
+    if ($Value -is [Collections.IDictionary]) {
+        $keys=[string[]]@($Value.Keys);[Array]::Reverse($keys)
+        $result=[ordered]@{};foreach ($key in $keys) {$result[$key]=Reverse-TestJsonKeys $Value[$key]}
+        return $result
+    }
+    if ($Value -is [array]) {return ,@($Value | ForEach-Object {Reverse-TestJsonKeys $_})}
+    return $Value
+}
+
+Test 'publication hold survives preparation resume without an installed engine' {
+    $repo=New-StoreFixture 'hold-prepare-resume'
+    $root=Join-Path $sandbox 'hold-prepare-resume-state'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','google-play') $root $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    Set-ReleaseDestinationHold $prepared.statePath @('google-play') 'Review pending.' | Out-Null
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+    Assert ($result.status -eq 'on-hold') 'Fixture did not reach a partially shipped release on hold.'
+    $before=(Get-FileHash $stateFile).Hash
+    $resumed=Invoke-ReleasePrepare $repo @('itch-windows','google-play') $root (Join-Path $sandbox 'uninstalled-godot.exe')
+    Assert ($resumed.status -eq 'on-hold' -and (Get-FileHash $stateFile).Hash -ceq $before) 'Preparation resume changed publication progress or required another export.'
+}
+
+Test 'publication hold preserves notes preflight failure before any upload attempt' {
+    $repo=New-StoreFixture 'hold-after-preflight'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','google-play','notes') (Join-Path $sandbox 'hold-after-preflight-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'hold-after-preflight-note.md';$env:BA_FIXTURE_NO_PUSH='1'
+    try {
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+        Assert ($result.status -eq 'publication-failed' -and $result.destinations.notes.attempts -eq 0) 'Fixture did not fail notes preflight before publication.'
+        $held=Set-ReleaseDestinationHold $prepared.statePath @('google-play') 'Review pending.'
+        Assert ($held.status -eq 'publication-failed' -and $held.destinations.notes.status -eq 'failed' -and $held.destinations['itch-windows'].attempts -eq 0) 'Hold concealed a failed prerequisite or started store publication.'
+        $released=Set-ReleaseDestinationHold $prepared.statePath @('google-play') -Release -PlayTrackReviewed
+        Assert ($released.status -eq 'publication-failed') 'Unhold concealed the failed notes preflight.'
+    } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE;Remove-Item Env:BA_FIXTURE_NO_PUSH}
+}
+
+Test 'publication hold recovery preserves notes awaiting a shipped destination' {
+    $repo=New-StoreFixture 'awaiting-release-resume'
+    $root=Join-Path $sandbox 'awaiting-release-resume-state'
+    $prepared=Invoke-ReleasePrepare $repo @('notes') $root
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'awaiting-release-resume-note.md'
+    try {
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+        Assert ($result.status -eq 'awaiting-release') 'Fixture did not defer public notes until a store ships.'
+        $before=(Get-FileHash $stateFile).Hash
+        $resumed=Invoke-ReleasePrepare $repo @('notes') $root
+        Assert ($resumed.status -eq 'awaiting-release' -and (Get-FileHash $stateFile).Hash -ceq $before) 'Preparation resume rewrote the awaiting-release journal.'
+    } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE}
+}
+
+Test 'publication hold leaves prepared Play untouched across publication and retries' {
+    $repo=New-StoreFixture 'prepared-play-hold'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','steam','google-play','notes') (Join-Path $sandbox 'prepared-play-hold-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $before=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $manifest=$before.artifacts | ConvertTo-Json -Depth 20 -Compress
+    $hash=Get-ReleaseNotesHash $prepared.statePath $before.plan
+    Set-ReleaseDestinationHold -StatePath $prepared.statePath -Destination @('google-play') -Reason 'Existing review must clear before submission.' | Out-Null
+    $held=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    Assert ($held.destinations['google-play'].status -eq 'held' -and $held.plan.planId -eq $before.plan.planId) 'Hold changed the approved plan or was not persisted.'
+    $holdTime=$held.destinations['google-play'].hold.heldAt
+    Set-ReleaseDestinationHold -StatePath $prepared.statePath -Destination @('google-play') -Reason 'Existing review must clear before submission.' | Out-Null
+    Assert ((Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable).destinations['google-play'].hold.heldAt -eq $holdTime) 'Idempotent hold replaced its original timestamp.'
+    $api=New-PlayServer
+    $env:BA_STEAM_USERNAME='fixture';$env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'held-note.md'
+    try {
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam -GhExecutable $gh -PlayTransport $api.handler -ApprovedPlanId $before.plan.planId -ApprovedNotesSha256 $hash
+        Assert ($result.destinations['itch-windows'].status -eq 'succeeded' -and $result.destinations.steam.status -eq 'awaiting-store-action' -and $result.destinations.notes.status -eq 'succeeded') 'Hold stopped approved independent destinations.'
+        $again=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam -GhExecutable $gh -PlayTransport $api.handler -RetryUncertain
+        Assert ($api.server.calls.Count -eq 0 -and $again.destinations['google-play'].status -eq 'held' -and $again.destinations['google-play'].attempts -eq 0 -and $again.destinations['google-play'].remote.Count -eq 0) 'Publication or retry contacted held Play.'
+        Assert ($again.destinations.steam.attempts -eq 1 -and $again.destinations['itch-windows'].attempts -eq 1) 'Retry repeated completed store uploads.'
+        $availability=Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw | ConvertFrom-Json -AsHashtable
+        Assert ($availability.destinations['google-play'].status -eq 'held' -and -not $availability.destinations['google-play'].live -and $availability.destinations['google-play'].holdReason -eq 'Existing review must clear before submission.') 'Public availability lost the hold or claimed Play live.'
+        $released=Set-ReleaseDestinationHold -StatePath $prepared.statePath -Destination @('google-play') -Release -PlayTrackReviewed
+        Assert ($released.status -eq 'prepared') 'Unhold reported a publication failure before the remaining destination was attempted.'
+        $resumed=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam -GhExecutable $gh -PlayTransport $api.handler
+        Assert ($resumed.destinations['google-play'].status -eq 'submitted' -and $api.server.uploads -eq 1 -and $resumed.destinations.steam.attempts -eq 1) 'Explicit unhold did not reuse the same release and completed destinations.'
+        $after=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+        Assert (($after.artifacts | ConvertTo-Json -Depth 20 -Compress) -ceq $manifest -and (Get-ReleaseNotesHash $prepared.statePath $after.plan) -ceq $hash -and (Get-ReleaseConfiguration $repo).presets[2].versionCode -eq 12) 'Hold/resume changed artifacts, notes or Android code.'
+    } finally {Remove-Item Env:BA_STEAM_USERNAME;Remove-Item Env:BA_FIXTURE_NOTE_STORE}
+}
+
+Test 'publication hold validates all destinations before journal writes and refuses started operations' {
+    $repo=New-StoreFixture 'hold-validation'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','google-play') (Join-Path $sandbox 'hold-validation-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json';$hash=(Get-FileHash $stateFile).Hash
+    Expect-Error {Set-ReleaseDestinationHold $prepared.statePath @('google-play','steam') 'Wait for review.'} 'selected'
+    Expect-Error {Set-ReleaseDestinationHold $prepared.statePath @() 'Wait for review.'} 'destination'
+    Expect-Error {Set-ReleaseDestinationHold $prepared.statePath @('google-play') ''} 'reason'
+    Assert ((Get-FileHash $stateFile).Hash -eq $hash) 'Rejected hold changed the journal.'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $api=New-PlayServer
+    $afterEditFailure={param($request)
+        if ($request.method -eq 'GET' -and $request.uri -match '/edits/edit-\d+$') {throw 'Fixture edit inspection failed after creation.'}
+        & $api.handler $request
+    }.GetNewClosure()
+    Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan) -PlayTransport $afterEditFailure | Out-Null
+    $hash=(Get-FileHash $stateFile).Hash
+    Expect-Error {Set-ReleaseDestinationHold $prepared.statePath @('google-play') 'Wait for review.'} 'started'
+    Expect-Error {Set-ReleaseDestinationHold $prepared.statePath @('itch-windows') 'Wait for review.'} 'started'
+    Assert ((Get-FileHash $stateFile).Hash -eq $hash) 'Hold rewrote a started store operation.'
+}
+
+Test 'publication hold is reported independently from failures and store actions' {
+    $state=@{plan=@{selectedDestinations=@('itch','play')};destinations=@{itch=@{status='succeeded'};play=@{status='held'}}}
+    Assert ((& (Get-Module Release) {param($value) Get-ReleaseOverallStatus $value} $state) -eq 'on-hold') 'Held destination was treated as failure or complete publication.'
+    $state.destinations.itch.status='failed'
+    Assert ((& (Get-Module Release) {param($value) Get-ReleaseOverallStatus $value} $state) -eq 'publication-failed') 'Hold concealed an actual failure.'
+    $state.destinations.itch.status='awaiting-store-action'
+    Assert ((& (Get-Module Release) {param($value) Get-ReleaseOverallStatus $value} $state) -eq 'needs-store-action') 'Hold concealed pending store action.'
+}
+
+Test 'publication accepts only missing inspected Gradle metadata in an older sealed plan' {
+    $repo=New-StoreFixture 'older-plan-metadata'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','google-play') (Join-Path $sandbox 'older-plan-metadata-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($collection in @('exports','requiredExports')) {
+        foreach ($preset in $state.plan[$collection]) {if ($preset.Contains('useGradle')) {$preset.Remove('useGradle')}}
+    }
+    Write-Json $stateFile $state
+    Set-ReleaseDestinationHold $prepared.statePath @('google-play') 'Review pending.' | Out-Null
+    $hash=Get-ReleaseNotesHash $prepared.statePath $state.plan
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 $hash -PlayTransport {throw 'Held Play must remain untouched.'}
+    Assert ($result.destinations['itch-windows'].status -eq 'succeeded' -and $result.destinations['google-play'].status -eq 'held') 'Older derived metadata prevented independent publication.'
+    $after=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    Assert ($after.plan.planId -ceq $state.plan.planId -and $after.approval.notesSha256 -ceq $hash -and $after.plan.exports[2].useGradle -eq $true) 'Metadata completion changed identity/approval or invented the Gradle setting.'
+    $after.plan.exports[2].useGradle=$false
+    Write-Json $stateFile $after
+    Expect-Error {Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler} 'Saved release plan differs'
+}
+
+Test 'missing Gradle metadata never permits changes to saved release destinations' {
+    $repo=New-StoreFixture 'older-plan-conflict'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','google-play') (Join-Path $sandbox 'older-plan-conflict-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($collection in @('exports','requiredExports')) {
+        foreach ($preset in $state.plan[$collection]) {if ($preset.Contains('useGradle')) {$preset.Remove('useGradle')}}
+    }
+    $state.plan.destinations[0].target='other/game:windows'
+    Write-Json $stateFile $state
+    $hash=(Get-FileHash $stateFile).Hash
+    Expect-Error {Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)} 'Saved release plan differs'
+    Assert ((Get-FileHash $stateFile).Hash -ceq $hash) 'Conflicting saved plan was rewritten or store publication started.'
+}
+
+Test 'publication compares complete plan content independently of JSON object key order' {
+    $repo=New-StoreFixture 'plan-key-order'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows') (Join-Path $sandbox 'plan-key-order-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $state.plan=Reverse-TestJsonKeys $state.plan;Write-Json $stateFile $state
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+    Assert ($result.destinations['itch-windows'].status -eq 'succeeded') 'Object key order prevented publication of identical content.'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $state.plan.destinations[0].requiredActions=@('Added an unapproved action')
+    Write-Json $stateFile $state
+    Expect-Error {Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler} 'Saved release plan differs'
+}
