@@ -1,0 +1,117 @@
+[
+  {
+    "color": "d73a4a",
+    "description": "Something isn't working",
+    "name": "bug"
+  },
+  {
+    "color": "0075ca",
+    "description": "Improvements or additions to documentation",
+    "name": "documentation"
+  },
+  {
+    "color": "cfd3d7",
+    "description": "This issue or pull request already exists",
+    "name": "duplicate"
+  },
+  {
+    "color": "a2eeef",
+    "description": "New feature or request",
+    "name": "enhancement"
+  },
+  {
+    "color": "7057ff",
+    "description": "Good for newcomers",
+    "name": "good first issue"
+  },
+  {
+    "color": "008672",
+    "description": "Extra attention is needed",
+    "name": "help wanted"
+  },
+  {
+    "color": "e4e669",
+    "description": "This doesn't seem right",
+    "name": "invalid"
+  },
+  {
+    "color": "d876e3",
+    "description": "Further information is requested",
+    "name": "question"
+  },
+  {
+    "color": "ffffff",
+    "description": "This will not be worked on",
+    "name": "wontfix"
+  },
+  {
+    "color": "0e8a16",
+    "description": "Work to build",
+    "name": "build"
+  },
+  {
+    "color": "5319e7",
+    "description": "A design to settle; closes when its decision or DESIGN.md are written",
+    "name": "design"
+  },
+  {
+    "color": "fbca04",
+    "description": "Needs a person to play or handle the game; closes when its judgement is recorded",
+    "name": "judge in play"
+  },
+  {
+    "color": "bfd4f2",
+    "description": "Writing, art, audio or other content",
+    "name": "content"
+  },
+  {
+    "color": "ededed",
+    "description": "Upkeep with no change to the game",
+    "name": "housekeeping"
+  },
+  {
+    "color": "1d76db",
+    "description": "Accessibility",
+    "name": "accessibility"
+  },
+  {
+    "color": "c5def5",
+    "description": "Needs a device or display not at hand",
+    "name": "needs hardware"
+  },
+  {
+    "color": "d4c5f9",
+    "description": "Needs players who are told nothing",
+    "name": "needs players"
+  },
+  {
+    "color": "e99695",
+    "description": "Raised in review, to do after the PR",
+    "name": "review follow-up"
+  },
+  {
+    "color": "006b75",
+    "description": "Track: game systems and rules not yet scheduled",
+    "name": "systems"
+  },
+  {
+    "color": "c2e0c6",
+    "description": "Track: visual production",
+    "name": "visual"
+  },
+  {
+    "color": "f9d0c4",
+    "description": "Track: game and content design",
+    "name": "game design"
+  },
+  {
+    "color": "fef2c0",
+    "description": "Track: asset, audio and content production",
+    "name": "production"
+  },
+  {
+    "color": "e4e669",
+    "description": "Track: explicitly non-blocking for the systems milestones",
+    "name": "non-blocking"
+  }
+]

@@ -1,0 +1,9 @@
+# {{PROJECT_TITLE}} — Project map
+
+- [README](../README.md) identifies the project and how to run verification.
+- [[DESIGN]], [[DECISIONS]] and [[JUDGEMENTS]] route the permanent canon.
+- [GitHub Issues]({{ISSUES_URL}}) hold unfinished work, questions and discussions.
+- [AGENTS.md](../AGENTS.md) defines the shared working process.
+- [tools/verify.ps1](../tools/verify.ps1) is the complete gate required before opening a PR.
+
+Update this map only when orientation changes. Session endings do not require entries or PRs. Add implementation pointers as they exist; keep task queues and session history out of this file.

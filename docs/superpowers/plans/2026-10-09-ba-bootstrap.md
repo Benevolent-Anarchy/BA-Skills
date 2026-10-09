@@ -10,7 +10,7 @@
 
 **Spec:** [Approved design](../specs/2026-10-09-ba-bootstrap-design.md). Read it with this plan; it defines the 17 agent rules, record content and all public/private boundaries.
 
-**Status:** Proposed implementation plan for review. No implementation or live project creation is authorized by writing this file. Cicely approved the written design on 2026-10-09; plan review and execution-method selection are the next checkpoint.
+**Status:** Approved by Cicely on 2026-10-09 for native execution, with a fresh final review. The disposable live trial is included; merge remains under Cicely's control.
 
 ## Global Constraints
 
