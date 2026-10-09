@@ -1,5 +1,63 @@
 # Reproduces PR 6 review findings using disposable journals and local store boundaries.
 
+Test 'PR rereview credential words in itch identifiers remain valid structured data' {
+    foreach ($slug in @('secret-agent','the-secret-agent','token-runner','password-puzzle','credential-quest','api-key-mystery')) {
+        $json=@{target="example/${slug}:windows";evidenceUrl="https://example.itch.io/$slug"} | ConvertTo-Json -Compress
+        & (Get-Module Release) {param($text)
+            $document=[System.Text.Json.JsonDocument]::Parse($text)
+            try {Assert-ReleaseJson $document.RootElement} finally {$document.Dispose()}
+        } $json
+    }
+}
+
+Test 'PR rereview itch games with credential words can configure publish and confirm their labels' {
+    foreach ($slug in @('secret-agent','the-secret-agent')) {
+        $repo=New-Fixture "review-receipt-$slug"
+        Change-Config $repo {param($c) $c.distributions.itch.game="example/$slug";$c.distributions.itch.displayNameTemplate='{title} {version} ({os})'}
+        Get-ReleaseConfiguration $repo | Out-Null
+        Invoke-FixtureGit $repo @('add','release.json') | Out-Null
+        Invoke-FixtureGit $repo @('commit','--quiet','-m','Configure the inspected itch game') | Out-Null
+        $prepared=Invoke-ReleasePrepare $repo @('itch-windows') (Join-Path $sandbox "review-receipt-$slug-state") $engine
+        $stateFile=Join-Path $prepared.statePath 'state.json';$state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+        $notesHash=Get-ReleaseNotesHash $prepared.statePath $state.plan
+        $uploaded=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 $notesHash
+        Assert ($uploaded.destinations['itch-windows'].status -eq 'awaiting-store-action') 'Fixture did not wait for an itch display label.'
+        $destination=@($state.plan.destinations | Where-Object id -EQ 'itch-windows')[0]
+        $receiptPath=Join-Path $prepared.statePath 'itch-receipt.json'
+        Write-Json $receiptPath @{destination='itch-windows';planId=$state.plan.planId;notesSha256=$notesHash;observedAt=[DateTimeOffset]::UtcNow.ToString('o');live=$true;target=$destination.target;displayName=$destination.displayName;evidenceUrl="https://example.itch.io/$slug"}
+        $confirmed=Confirm-ReleaseStoreCompletion $prepared.statePath $receiptPath
+        Assert ($confirmed.status -eq 'published' -and $confirmed.destinations['itch-windows'].status -eq 'succeeded') 'A credential word in the game slug blocked its observed receipt.'
+        $before=(Get-FileHash $stateFile).Hash
+        Confirm-ReleaseStoreCompletion $prepared.statePath $receiptPath | Out-Null
+        Assert ((Get-FileHash $stateFile).Hash -ceq $before) 'Repeating the same receipt rewrote completion.'
+    }
+}
+
+Test 'PR rereview a started Butler push persists progress before failure and cannot be hidden by a hold' {
+    $repo=New-Fixture 'review-started-butler'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-linux') (Join-Path $sandbox 'review-started-butler-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json';$state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $push=Join-Path $sandbox 'review-failed-push.ps1';$observation=Join-Path $sandbox 'review-push-observation.json'
+    @'
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Rest)
+$state=Get-Content -LiteralPath $env:BA_FIXTURE_PUSH_JOURNAL -Raw | ConvertFrom-Json -AsHashtable
+$record=$state.destinations['itch-linux']
+[ordered]@{status=$record.status;phase=$record.remote['phase'];attempts=$record.attempts} | ConvertTo-Json | Set-Content -LiteralPath $env:BA_FIXTURE_PUSH_OBSERVATION
+exit 7
+'@ | Set-Content -LiteralPath $push
+    $priorJournal=$env:BA_FIXTURE_PUSH_JOURNAL;$priorObservation=$env:BA_FIXTURE_PUSH_OBSERVATION
+    $env:BA_FIXTURE_PUSH_JOURNAL=$stateFile;$env:BA_FIXTURE_PUSH_OBSERVATION=$observation
+    try {
+        $failed=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $push -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+        $observed=Get-Content -LiteralPath $observation -Raw | ConvertFrom-Json -AsHashtable
+        Assert ($observed.phase -eq 'pushing' -and $observed.status -eq 'in-progress' -and $observed.attempts -eq 1) 'Butler started before its progress was journaled.'
+        Assert ($failed.destinations['itch-linux'].status -eq 'failed' -and $failed.destinations['itch-linux'].remote.phase -eq 'pushing') 'Failed push lost the evidence that it started.'
+        $before=(Get-FileHash $stateFile).Hash
+        Expect-Error {Set-ReleaseDestinationHold $prepared.statePath @('itch-linux') 'Wait for access repair.'} 'started|reconcil'
+        Assert ((Get-FileHash $stateFile).Hash -ceq $before) 'Hold hid a Butler push that needs reconciliation.'
+    } finally {$env:BA_FIXTURE_PUSH_JOURNAL=$priorJournal;$env:BA_FIXTURE_PUSH_OBSERVATION=$priorObservation}
+}
+
 Test 'PR review credential assignments and Basic authorization cannot become public hold text' {
     foreach ($reason in @('password=hunter2','BA_GOOGLE_PLAY_ACCESS_TOKEN=ya29.fixtureaccesstoken','Authorization: Basic Zml4dHVyZTpmaXh0dXJl','{"Authorization": "Basic Zml4dHVyZTpmaXh0dXJl"}','api_key: fixture-key','secret = fixture-secret')) {
         Expect-Error {& (Get-Module Release) {param($text) Assert-ReleaseHoldReason $text} $reason} 'Credential-like'

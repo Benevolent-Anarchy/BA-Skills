@@ -46,8 +46,8 @@ function Resolve-ReleasePath([string]$Root, [string]$Relative, [switch]$MustExis
 # Screens release text for credential-like values without echoing the input.
 function Assert-ReleaseCredentialFreeText([string]$Text) {
     $patterns=@(
-        '(?i)(--?(password|token|api.?key|secret|identity)|https?://[^/\s]+@|(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9]{12,}|Bearer\s+\S+)'
-        '(?i)(?<![\w.-])[\w.-]*(?:password|passwd|pwd|token|api.?key|secret|credential)[\w.-]*[\x22\x27]?\s*[:=]\s*\S+'
+        '(?i)((?<![\w./-])--?(password|token|api.?key|secret|identity)\b|https?://[^/\s]+@|(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9]{12,}|Bearer\s+\S+)'
+        '(?i)(?<![\w./-])[\w.-]*(?:password|passwd|pwd|token|api.?key|secret|credential)[\w.-]*[\x22\x27]?\s*[:=]\s*\S+'
         '(?i)Authorization[\x22\x27]?\s*[:=]\s*[\x22\x27]?\s*Basic\s+\S+'
     )
     foreach ($pattern in $patterns) {if ($Text -match $pattern) {throw 'Credential-like values are forbidden in release data.'}}
@@ -692,7 +692,11 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                         $state.checks[$destination.id].input -cne [IO.Path]::GetRelativePath($StatePath,$inputPath).Replace('\','/'))) {throw 'Resume prepare to verify the signed APK input before publication.'}
                     $arguments = @('push',$inputPath,$destination.target,'--userversion',$state.plan.version)
                     foreach ($pattern in $destination.ignore) { $arguments += @('--ignore',$pattern) }
-                    $upload = Invoke-ReleaseTool $ButlerExecutable $arguments $StatePath
+                    Push-Location -LiteralPath $StatePath
+                    try {$pushExecutable=Find-ReleaseDoctorTool $ButlerExecutable} finally {Pop-Location}
+                    if (-not $pushExecutable) {throw 'Butler executable is unavailable before upload.'}
+                    $record.remote.phase='pushing';Write-ReleaseJson $stateFile $state
+                    $upload = Invoke-ReleaseTool $pushExecutable $arguments $StatePath
                     if ($upload.exitCode -ne 0) { throw "Butler upload failed (exit $($upload.exitCode))." }
                     $record.remote.phase='upload-complete';$record.remote.live=$true;$record.remote.target=$destination.target;$record.remote.sourceCommit=$artifacts[0]['sourceCommit']
                     if ($destination.Contains('displayName')) {$outcome='awaiting-store-action';$record.remote.displayNameRequired=$destination.displayName}
