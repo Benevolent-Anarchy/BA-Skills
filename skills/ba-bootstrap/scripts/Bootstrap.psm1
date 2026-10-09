@@ -20,6 +20,10 @@ function Invoke-CheckedGit($Git,$Repository,$Arguments) {
 function Get-BootstrapReport($Identity,$Journal,$Status,$Pending=@(),$Conflicts=@(),[string]$StateRoot=(Get-BootstrapStateRoot)) {
     @{status=$Status;identity=$Identity;phases=$(if ($null -ne $Journal) {$Journal.phases} else {@{}});pending=@($Pending);conflicts=@($Conflicts);browserEvidence=$(if ($null -ne $Journal) {$Journal.browserEvidence} else {@{}});obsidian=$(if ($null -ne $Journal -and $Journal.ContainsKey('obsidian')) {$Journal.obsidian} else {@{}});journalPath=(Get-BootstrapJournalPath $Identity $StateRoot)}
 }
+function Get-CreationFailureMessage($Kind,$Failure) {
+    $details=if (@($Failure.errors).Count) {' Errors: '+($Failure.errors | ConvertTo-Json -Depth 12 -Compress)} else {''}
+    "GitHub $Kind repository creation failed (HTTP $($Failure.statusCode)): $($Failure.message)$details Repair the reported condition, then explicitly resume using the stored inputs."
+}
 function Get-BootstrapStoredIdentity([string]$Name,[string]$Owner='Benevolent-Anarchy',[string]$StateRoot=(Get-BootstrapStateRoot)) {
     $repository=Resolve-BootstrapRepositoryName $Name
     $journal=Read-BootstrapJournal (Get-BootstrapJournalPath @{owner=$Owner;repository=$repository} $StateRoot)
@@ -99,11 +103,11 @@ function Get-BootstrapPlan([hashtable]$Identity,[scriptblock]$Request=$script:De
             $response=Invoke-CheckedApi $Request GET "/repos/$name" $null @(200,404)
             if ($response.StatusCode -eq 200) {
                 if ($null -eq $journal -or -not $journal.repositories.ContainsKey($kind)) {
-                    if ($null -ne $journal -and $journal.phases.ContainsKey($kind+'Repository')) {$conflicts.Add("identity-unconfirmed: $name exists with ID $($response.Data.id), without a durably recorded returned ID.")}
+                    if ($null -ne $journal -and $journal.phases.ContainsKey($kind+'Repository') -and $journal.phases[$kind+'Repository'] -eq 'creating') {$conflicts.Add("identity-unconfirmed: $name exists with ID $($response.Data.id), without a durably recorded returned ID.")}
                     else {$conflicts.Add("Repository name already exists: $name")}
                 } elseif ($journal.repositories[$kind] -ne $response.Data.id -or $response.Data.full_name -ine $name -or $response.Data.private -ne ($kind -eq 'private')) {$conflicts.Add("Recorded repository identity/visibility differs: $name")}
             } elseif ($null -ne $journal -and $journal.repositories.ContainsKey($kind)) {$conflicts.Add("Recorded repository is missing or inaccessible: $name")}
-            elseif ($null -ne $journal -and $journal.phases.ContainsKey($kind+'Repository')) {$conflicts.Add("identity-unconfirmed: prior creation of $name has an unresolved outcome; do not retry automatically.")}
+            elseif ($null -ne $journal -and $journal.phases.ContainsKey($kind+'Repository') -and $journal.phases[$kind+'Repository'] -eq 'creating') {$conflicts.Add("identity-unconfirmed: prior creation of $name has an unresolved outcome; do not retry automatically.")}
         } catch {$conflicts.Add($_.Exception.Message)}
     }
     $report=Get-BootstrapReport $Identity $journal $(if ($conflicts.Count) {'blocked'} else {'ready'}) @() $conflicts.ToArray()
@@ -130,7 +134,18 @@ function Get-BootstrapStatus([hashtable]$Identity,[string]$StateRoot=(Get-Bootst
         if (-not ($journal.phases.ContainsKey('pullRequests') -and $journal.phases.pullRequests -eq 'verified')) {$pending+="Disable Pull requests and verify in https://github.com/$($Identity.notesFullName)/settings"}
         if (-not ($journal.phases.ContainsKey('obsidian') -and $journal.phases.obsidian -eq 'verified')) {$pending+='Obsidian installation and first-use enablement verification'}
         $status=if ($journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified') {'complete'} else {'partial'}
-        $report=Get-BootstrapReport $Identity $journal $status $pending
+        $conflicts=@()
+        foreach ($kind in @('private','public')) {
+            if ($journal.repositories.ContainsKey($kind) -or -not $journal.phases.ContainsKey($kind+'Repository')) {continue}
+            if ($journal.phases[$kind+'Repository'] -eq 'failed') {
+                $pending+=Get-CreationFailureMessage $kind $journal.creationFailures[$kind]
+                $status='blocked'
+            } elseif ($journal.phases[$kind+'Repository'] -eq 'creating') {
+                $conflicts+="identity-unconfirmed: prior $kind repository creation has an unresolved outcome; do not retry automatically."
+            }
+        }
+        if ($conflicts.Count) {$status='identity-unconfirmed'}
+        $report=Get-BootstrapReport $Identity $journal $status $pending $conflicts
         $report.journalPath=Get-BootstrapJournalPath $Identity $StateRoot
         return $report
     } catch {return Get-BootstrapReport $Identity $null 'blocked' @() @($_.Exception.Message) -StateRoot $StateRoot}
@@ -166,8 +181,26 @@ function Invoke-Bootstrap(
             if ($kind -eq 'private') {$body.description=$Identity.description} else {$body.has_projects=$false;$body.has_wiki=$false}
             Save-Phase ($kind+'Repository') 'creating'
             $endpoint=if ($plan.ownerType -eq 'Organization') {"/orgs/$($Identity.owner)/repos"} else {'/user/repos'}
-            $response=& $Request POST $endpoint $body
-            if ($response.StatusCode -ne 201 -or $null -eq $response.Data -or -not $response.Data.id) {
+            try {$response=& $Request POST $endpoint $body} catch {
+                $message=$_.Exception.Message
+                $report=Get-BootstrapPlan $Identity $Request $StateRoot $Git
+                $report.status='identity-unconfirmed';$report.pending+=$message;return $report
+            }
+            $statusCode=if ($null -ne $response) {[int]$response.StatusCode} else {0}
+            # A definite client rejection has no created identity. A timeout can still
+            # follow a server-side creation, so keep HTTP 408 quarantined with lost/5xx results.
+            if ($statusCode -ge 400 -and $statusCode -lt 500 -and $statusCode -ne 408) {
+                $failure=@{statusCode=$statusCode;message='GitHub rejected the request.';errors=@()}
+                if ($null -ne $response.Data) {
+                    if ($response.Data.ContainsKey('message')) {$failure.message=$response.Data.message}
+                    if ($response.Data.ContainsKey('errors')) {$failure.errors=@($response.Data.errors)}
+                }
+                if (-not $journal.ContainsKey('creationFailures')) {$journal.creationFailures=@{}}
+                $journal.creationFailures[$kind]=$failure
+                Save-Phase ($kind+'Repository') 'failed'
+                return Get-BootstrapReport $Identity $journal 'blocked' @(Get-CreationFailureMessage $kind $failure) -StateRoot $StateRoot
+            }
+            if ($statusCode -ne 201 -or $null -eq $response.Data -or -not $response.Data.id) {
                 # Never bind a GET observation to an invocation whose create result was lost.
                 $report=Get-BootstrapPlan $Identity $Request $StateRoot $Git
                 $report.status='identity-unconfirmed';return $report
@@ -175,6 +208,7 @@ function Invoke-Bootstrap(
             $fullName=if ($kind -eq 'private') {$Identity.fullName} else {$Identity.notesFullName}
             if ($response.Data.full_name -ine $fullName -or $response.Data.private -ne ($kind -eq 'private')) {throw 'Created repository response has unexpected identity or visibility.'}
             $journal.repositories[$kind]=$response.Data.id
+            if ($journal.ContainsKey('creationFailures')) {$journal.creationFailures.Remove($kind)}
             Save-Phase ($kind+'Repository')
         }
         if (-not ($journal.phases.ContainsKey('privateContent') -and $journal.phases.privateContent -eq 'verified')) {
@@ -186,7 +220,7 @@ function Invoke-Bootstrap(
             $gate=& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $Identity.projectPath 'tools/verify.ps1') 2>&1
             if ($LASTEXITCODE -ne 0) {throw "Initial documentation gate failed: $gate"}
             if (-not $journal.refs.ContainsKey('privateMain')) {
-                Invoke-CheckedGit $Git $Identity.projectPath (@('add','--')+@($manifest.path)) | Out-Null
+                Invoke-CheckedGit $Git $Identity.projectPath (@('add','-f','--')+@($manifest.path)) | Out-Null
                 Invoke-CheckedGit $Git $Identity.projectPath @('commit','-m','Initial project foundation') | Out-Null
                 $journal.refs.privateMain=Invoke-CheckedGit $Git $Identity.projectPath @('rev-parse','HEAD')
                 Write-BootstrapJournal $path $journal $lock

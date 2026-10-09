@@ -71,6 +71,16 @@ Test 'gate resolves implicit Markdown names with dots while preserving explicit 
     Replace-DocumentationFixture $repo 'docs/NEXT.md' 'Version 1.0#Details' 'Version 1.0#Missing'
     Assert-DocumentationFailure $repo 'link-target'
 }
+Test 'review documentation links require portable file and directory casing' {
+    foreach ($pair in @(@{good='[Design](DESIGN.md)';bad='[Design](design.md)'},@{good='[Readme](../README.md)';bad='[Readme](../readme.MD)'},@{good='[Topic](design/interface.md)';bad='[Topic](Design/interface.md)'},@{good='[[design/interface]]';bad='[[design/Interface]]'})) {
+        $repo=New-PopulatedDocumentationFixture 'case-sensitive links'
+        Add-Content -LiteralPath "$repo/docs/NEXT.md" -Value $pair.good
+        Assert ((Test-ProjectDocumentation -Repository $repo).Passed) 'Correctly cased link failed.'
+        Replace-DocumentationFixture $repo 'docs/NEXT.md' $pair.good $pair.bad
+        $report=Test-ProjectDocumentation -Repository $repo
+        Assert (-not $report.Passed -and @($report.Diagnostics | Where-Object {$_.Code -eq 'link-target' -and $_.File -eq 'docs/NEXT.md' -and $_.Line -gt 0}).Count -gt 0) 'A nonportable link passed or lost its source location.'
+    }
+}
 Test 'gate requires actual indexes and directories' {
     foreach ($target in @('docs/DESIGN.md','docs/DECISIONS.md','docs/JUDGEMENTS.md','docs/design','docs/decisions','docs/judgements')) {
         $repo=New-PopulatedDocumentationFixture 'missing'

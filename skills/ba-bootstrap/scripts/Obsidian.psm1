@@ -66,8 +66,36 @@ function Get-ObsidianJournalPath([hashtable]$Identity,[string]$StateRoot=(Get-Bo
     [IO.Path]::GetFullPath((Join-Path $StateRoot ('vaults/'+$key+'.json')))
 }
 function Get-ObsidianAppVersion {
-    $executable=Join-Path $env:LOCALAPPDATA 'Programs/Obsidian/Obsidian.exe'
-    if (Test-Path -LiteralPath $executable) {return (Get-Item -LiteralPath $executable).VersionInfo.ProductVersion}
+    # The executable's ProductVersion identifies the installer, not auto-updated app code.
+    if (-not $env:APPDATA) {return $null}
+    $cache=Join-Path $env:APPDATA 'obsidian'
+    try {
+        $registry=Join-Path $cache 'obsidian.json'
+        if ($env:LOCALAPPDATA -and (Test-Path -LiteralPath $registry)) {
+            $cli=Join-Path $env:LOCALAPPDATA 'Programs/Obsidian/Obsidian.com'
+            $settings=ConvertFrom-BootstrapJson ([IO.File]::ReadAllText($registry))
+            # Query only a running, CLI-enabled app; a version probe must not launch it.
+            if ($settings.ContainsKey('cli') -and $settings.cli -and (Test-Path -LiteralPath $cli) -and @(Get-Process -Name Obsidian -ErrorAction SilentlyContinue).Count) {
+                $output=& $cli version 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    foreach ($line in $output) {
+                        if ([string]$line -match '^\s*(?:Obsidian\s+v?)?(\d+\.\d+\.\d+(?:\.\d+)?)(?:\s|$)') {return $Matches[1]}
+                    }
+                }
+            }
+        }
+    } catch {# Fall back to the downloaded application cache if CLI readback is unavailable.
+    }
+    try {
+        if (Test-Path -LiteralPath $cache -PathType Container) {
+            $versions=@(foreach ($file in Get-ChildItem -LiteralPath $cache -File -Filter 'obsidian-*.asar') {
+                $version=$null
+                if ($file.Name -match '^obsidian-(\d+\.\d+\.\d+(?:\.\d+)?)\.asar$' -and [version]::TryParse($Matches[1],[ref]$version)) {$version}
+            })
+            if ($versions.Count) {return ($versions | Sort-Object -Descending | Select-Object -First 1).ToString()}
+        }
+    } catch {# An uncertain version leaves compatibility pending; do not use installer metadata.
+    }
     return $null
 }
 function Test-ObsidianAppPlugins($Identity,$Plugins) {
@@ -245,11 +273,11 @@ function Install-ProjectObsidian(
         $nickname=Join-Path $local 'plugins/vault-nickname/data-shared.json';Assert-ObsidianOwnedPath $Identity.vaultPath $nickname
         if (-not (Test-Path -LiteralPath $nickname)) {[IO.File]::WriteAllText($nickname,(@{nickname=$Identity.title} | ConvertTo-Json),[Text.UTF8Encoding]::new($false))}
         $result.installedVerified=$true
-        if (-not $AppVersion) {$result.pending+='Obsidian is unavailable: verify plugin minimum-app compatibility after installing it.'}
+        if (-not $AppVersion) {$result.pending+='Obsidian application version is unknown: verify plugin minimum-app compatibility with the running app, then rerun local setup.'}
         $app=& $AppCheck $Identity $result.plugins
-        $result.enabledVerified=[bool]$app.verified
+        $result.enabledVerified=[bool]$app.verified -and [bool]$AppVersion
         if (-not $app.verified) {$result.pending+=$app.pending}
-        $journal.phases.files='verified';$journal.phases.app=if ($app.verified) {'verified'} else {'pending'};Save-Vault
+        $journal.phases.files='verified';$journal.phases.app=if ($result.enabledVerified) {'verified'} else {'pending'};Save-Vault
     } catch {$result.pending+=($_.Exception.Message);$result.installedVerified=$false}
     finally {if ($null -ne $lock) {$lock.Dispose()}}
     return $result

@@ -15,6 +15,8 @@ Creation journals live under `%LOCALAPPDATA%/BA-Skills/ba-bootstrap/state/`; vau
 
 `plan` and `status` inspect without creating state, repositories, checkouts or plugins. `resume` restores the original inputs. A recorded-ID retry reuses both repositories; lost push/README responses are checked by ref/content readback. A completed invocation preserves later project development. Do not force-push, stage unrelated files, replace differing README content, or delete partial results as cleanup.
 
+A definitive repository-create rejection (HTTP 4xx except timeout 408) is recorded as `failed`, with GitHub's status, message and error details. Correct the reported policy/access/validation condition, then explicitly resume with the stored inputs. Preflight must still find the rejected name absent; an existing repository is a collision, never adopted. Transport loss, timeout, server failure or a malformed success leaves `creating` unresolved and requires identity recovery instead of another POST.
+
 After bootstrap is complete, use `local-setup -Repository <actual checkout> -RefreshPlugins` for a deliberate plugin update. Creation/resume rejects a refresh request on a completed journal with that concrete instruction; it does not report an ignored update as successful.
 
 ## Public release-notes repository
@@ -45,6 +47,12 @@ The existing `ba-release` tooling derives this companion from the private reposi
 The curated IDs are `dataview`, `mermaid-popup` (Diagram Popup), `vault-inspector` and `vault-nickname`. Resolve their repositories from the official community registry. Choose the newest published non-draft, non-prerelease release with consistent required assets and manifest ID/tag/version. Report every skipped inconsistent release and reason. A network failure is unresolved transport, not a reason to downgrade. Dataview's 0.5.70 release was found to contain a 0.5.68 manifest; the approved fallback reports that skip and selects a consistent release.
 
 Verify minimum-app compatibility, `manifest.json`, `main.js` and an optional published stylesheet. Installation stages outside active plugin directories; refresh retains preferences and backups and restores prior binaries if promotion fails. An interrupted refresh retries its recorded releases. Ordinary setup preserves extra plugins, existing settings, nickname customisation and workspace/history. `.obsidian` must be ignored and untracked in the actual checkout.
+
+Compatibility uses the running app's official CLI version when available, otherwise the newest numerically valid `obsidian-<version>.asar` in the application cache. The executable's product version is the installer version and cannot establish app compatibility. If neither source is available, installation may proceed but compatibility/app verification stays pending.
+
+New vaults use **Files and links → New link format → Absolute path in vault** and **Automatically update internal links** so editor-created wikilinks match the gate's vault-root paths. Use exact file and directory casing; the gate rejects links that only work through Windows' case-insensitive lookup. Existing vaults retain their preferences: set these two options manually if needed and update old shortest-path links to explicit vault-root paths.
+
+Dataview's normal queries remain available; DataviewJS and inline DataviewJS start disabled. Canon does not require JavaScript execution from notes. Enable either setting only as a deliberate project-specific choice. Existing clones retain their Dataview settings; disable both JavaScript options manually if adopting these defaults.
 
 Installed files and configured IDs are separate from loaded plugins. When the official CLI is registered/enabled and the exact vault is registered, the helper addresses its ID, enables the plugins and reads back loaded IDs/versions. Never use the foreground vault as a substitute. Without that app access, report the exact first-use step: open this project's `docs` as a vault, enable Community plugins and all four plugins, then rerun local setup/resume for supported readback. Do not edit the global vault registry to simulate registration.
 

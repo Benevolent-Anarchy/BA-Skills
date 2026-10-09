@@ -1,6 +1,28 @@
 Import-Module "$skillRoot/scripts/State.psm1" -Force
 if (Test-Path "$skillRoot/scripts/Obsidian.psm1") {Import-Module "$skillRoot/scripts/Obsidian.psm1" -Force}
 . "$PSScriptRoot/ObsidianFixture.ps1"
+Test 'review Obsidian compatibility uses the updated application cache version' {
+    $f=New-ObsidianFixture 'updated application';$appData=New-BootstrapFixture 'app-cache';$localData=New-BootstrapFixture 'installer'
+    foreach ($name in @('obsidian-1.14.9.asar','obsidian-1.14.10.asar','obsidian-not-a-version.asar','obsidian-99.0.0.asar.tmp')) {Write-FixtureText "$appData/obsidian/$name" 'Fixture cache'}
+    foreach ($url in @($f.assets.Keys | Where-Object {$_ -like '*/manifest.json'})) {$f.assets[$url]=$f.assets[$url].Replace('1.0.0','1.14.2')}
+    $savedApp=$env:APPDATA;$savedLocal=$env:LOCALAPPDATA
+    try {
+        $env:APPDATA=$appData;$env:LOCALAPPDATA=$localData
+        $f.appVersion=& (Get-Module Obsidian) {Get-ObsidianAppVersion}
+        Assert ($f.appVersion -eq '1.14.10') 'Updated application version was not read and sorted numerically.'
+        $result=Invoke-ObsidianFixture $f
+        Assert $result.installedVerified ('Updated app was rejected: '+($result.pending -join ' '))
+        $requests=$f.calls.Count
+        $repeat=Invoke-ObsidianFixture $f
+        Assert ($repeat.installedVerified -and $f.calls.Count -eq $requests) 'Ordinary setup rejected already installed compatible plugins.'
+    } finally {$env:APPDATA=$savedApp;$env:LOCALAPPDATA=$savedLocal}
+}
+Test 'review an unknown Obsidian version leaves compatibility pending' {
+    $f=New-ObsidianFixture 'unknown application'
+    $result=Install-ProjectObsidian -Identity $f.identity -PresetRoot $presetRoot -StateRoot $f.stateRoot -Request $f.request -Download $f.download -AppVersion '' -Promote $f.promote -AppCheck {param($Identity,$Plugins) @{verified=$true;pending=$null}}
+    Assert ($result.installedVerified -and -not $result.enabledVerified -and ($result.pending -join ' ') -match 'version.*unknown|cannot determine.*version') 'Unknown compatibility was claimed verified or described as an incompatible/missing installation.'
+    Assert ((Read-BootstrapJournal $result.journalPath).phases.app -eq 'pending') 'Unknown compatibility completed the vault journal.'
+}
 Test 'obsidian decodes binary JSON download responses' {
     $module=Get-Module Obsidian
     & $module {function script:Invoke-WebRequest {param($Uri) @{Content=[Text.Encoding]::UTF8.GetBytes('{"id":"dataview","version":"9.1.0"}')}}}

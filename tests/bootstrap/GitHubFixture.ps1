@@ -6,6 +6,8 @@ function New-GitHubFixture([switch]$ExistingPublic,[string]$FailPhase='') {
     $fixture.privateTreeExtras=@()
     $fixture.omitDownloads=$false
     $fixture.supportsPullRequests=$false
+    $fixture.createFailureStatus=$null
+    $fixture.createFailureKind='private'
     $fixture.obsidianSetup={param($Identity,$StateRoot,$Refresh) @{installedVerified=$true;enabledVerified=$fixture.appEnabled;plugins=@();pending=@('Fixture app enablement pending');journalPath='fixture'}}.GetNewClosure()
     $fixture.request={param($Method,$Endpoint,$Body)
         $fixture.calls.Add(@{method=$Method;endpoint=$Endpoint;body=$Body;isRepositoryCreate=($Method -eq 'POST' -and $Endpoint -match '^/(orgs/[^/]+|user)/repos$')})
@@ -13,6 +15,9 @@ function New-GitHubFixture([switch]$ExistingPublic,[string]$FailPhase='') {
         if ($Endpoint -match '^/users/') {return @{StatusCode=$fixture.ownerStatus;Data=@{type='Organization';login='Benevolent-Anarchy'}}}
         if ($Endpoint -match '^/user/memberships/orgs/') {return @{StatusCode=200;Data=@{state='active';role=$fixture.orgRole}}}
         if ($Method -eq 'POST' -and $Endpoint -match '^/(orgs/[^/]+|user)/repos$') {
+            if ($null -ne $fixture.createFailureStatus -and $Body.private -eq ($fixture.createFailureKind -eq 'private')) {
+                return @{StatusCode=$fixture.createFailureStatus;Data=@{message='Repository creation rejected by policy.';errors=@(@{resource='Repository';field='name';code='invalid'})}}
+            }
             $name='Benevolent-Anarchy/'+$Body.name
             $fixture.nextId++
             $repo=@{id=$fixture.nextId;full_name=$name;private=$Body.private;description=$null;default_branch=$fixture.initialBranch;has_issues=$Body.has_issues;has_wiki=$true;has_projects=$true;has_discussions=$true;has_downloads=$true;allow_auto_merge=$true;archived=$false;has_pages=$false;permissions=@{push=$true;admin=$true};actions=@{enabled=$true};labels=@{};readme=$null;tree=@()}

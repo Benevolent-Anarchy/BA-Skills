@@ -174,7 +174,20 @@ function Test-ProjectDocumentation([string]$Repository) {
             }
             $cursor=Split-Path $cursor -Parent
         }
-        if (-not (Test-Path -LiteralPath $path)) { return @{External=$false;Valid=$false;Reason='Target file or directory is missing.'} }
+        # Windows existence checks ignore case. Check each repository-relative entry
+        # against its actual name so a passing link also works on GitHub and Linux.
+        $cursor=$root
+        foreach ($segment in [IO.Path]::GetRelativePath($root,$path).Split([IO.Path]::DirectorySeparatorChar) | Where-Object {$_}) {
+            if (-not (Test-Path -LiteralPath $cursor -PathType Container)) {return @{External=$false;Valid=$false;Reason='Target file or directory is missing.'}}
+            $entries=@(Get-ChildItem -LiteralPath $cursor -Force)
+            $exact=@($entries | Where-Object {[string]::Equals($_.Name,$segment,[StringComparison]::Ordinal)})
+            if ($exact.Count -ne 1) {
+                $differentCase=@($entries | Where-Object {[string]::Equals($_.Name,$segment,[StringComparison]::OrdinalIgnoreCase)})
+                $reason=if ($differentCase.Count) {"Target path casing differs: '$segment' should be '$($differentCase[0].Name)'."} else {'Target file or directory is missing.'}
+                return @{External=$false;Valid=$false;Reason=$reason}
+            }
+            $cursor=$exact[0].FullName
+        }
         $heading=$null
         if ($fragment) {
             if ([IO.Path]::GetExtension($path) -ne '.md' -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return @{External=$false;Valid=$false;Reason='A heading needs a Markdown file.'} }

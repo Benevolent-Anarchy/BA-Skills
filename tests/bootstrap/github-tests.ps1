@@ -4,6 +4,64 @@ Import-Module "$skillRoot/scripts/State.psm1" -Force
 if (Test-Path "$skillRoot/scripts/Bootstrap.psm1") {Import-Module "$skillRoot/scripts/Bootstrap.psm1" -Force}
 . "$PSScriptRoot/GitHubFixture.ps1"
 function New-ApiIdentity($Name) {New-BootstrapIdentity -Name $Name -Description 'Private project purpose' -Parent (New-BootstrapFixture 'project-parent')}
+Test 'review rejected creation reports the error and resumes after correction' {
+    foreach ($case in @(@{kind='private';status=422},@{kind='public';status=403})) {
+        $f=New-GitHubFixture;$id=New-ApiIdentity ('Rejected '+$case.kind)
+        $f.createFailureKind=$case.kind;$f.createFailureStatus=$case.status
+        $first=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+        Assert ($first.status -eq 'blocked' -and ($first.pending -join ' ') -match "HTTP $($case.status).*rejected by policy") 'Definitive rejection was hidden or quarantined as an unknown creation.'
+        $path=Get-BootstrapJournalPath $id $f.stateRoot;$journal=Read-BootstrapJournal $path
+        Assert ($journal.phases[$case.kind+'Repository'] -eq 'failed' -and $journal.creationFailures[$case.kind].errors[0].field -eq 'name') 'Rejected create error details were not retained.'
+        $ids=$journal.repositories.Clone();$hash=(Get-FileHash $path).Hash;$offset=$f.calls.Count
+        $status=Get-BootstrapStatus $id $f.stateRoot $f.request
+        Assert ($status.status -eq 'blocked' -and ($status.pending -join ' ') -match 'rejected by policy') 'Status lost the actionable rejection.'
+        Assert ((Get-FileHash $path).Hash -eq $hash -and @($f.calls | Select-Object -Skip $offset | Where-Object method -ne 'GET').Count -eq 0) 'Status changed state.'
+        $f.createFailureStatus=$null
+        $second=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+        Assert ($second.phases.privateContent -eq 'verified' -and $second.phases.publicContent -eq 'verified' -and $f.repos.Count -eq 2) 'Explicit retry could not finish repository foundations.'
+        foreach ($kind in $ids.Keys) {Assert ($f.repos[$id.fullName].id -eq $ids[$kind]) 'Retry replaced the already journalled private repository.'}
+        Assert (@($f.calls | Where-Object isRepositoryCreate).Count -eq 3) 'Retry duplicated successful creation or retried without a new invocation.'
+        Assert (-not (Read-BootstrapJournal $path).creationFailures.ContainsKey($case.kind)) 'Successful retry retained a stale creation failure.'
+    }
+}
+Test 'review rejected creation never adopts a newly colliding repository' {
+    $f=New-GitHubFixture;$id=New-ApiIdentity 'Rejected Collision';$f.createFailureKind='public';$f.createFailureStatus=422
+    Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup | Out-Null
+    $f.createFailureStatus=$null;$f.existingPublic=$true;$before=$f.calls.Count
+    $result=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($result.status -eq 'blocked' -and ($result.conflicts -join ' ') -match 'name already exists') 'A rejected create granted ownership of a later name collision.'
+    Assert (@($f.calls | Select-Object -Skip $before | Where-Object method -ne 'GET').Count -eq 0) 'Collision caused a mutation.'
+}
+Test 'review uncertain creation remains quarantined in status and retries' {
+    foreach ($code in @(0,408,503)) {
+        $f=New-GitHubFixture;$id=New-ApiIdentity ('Uncertain '+$code);$f.createFailureStatus=$code
+        $first=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+        Assert ($first.status -eq 'identity-unconfirmed') "Ambiguous HTTP $code was marked safe to retry."
+        $f.createFailureStatus=$null
+        Assert ((Get-BootstrapStatus $id $f.stateRoot $f.request).status -eq 'identity-unconfirmed') 'Status hid an unresolved creation.'
+        Assert ((Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup).status -eq 'identity-unconfirmed') 'Unresolved creation was retried.'
+        Assert (@($f.calls | Where-Object isRepositoryCreate).Count -eq 1) 'Ambiguous create repeated.'
+    }
+}
+Test 'review global Git excludes cannot omit foundation files or stage unrelated files' {
+    $f=New-GitHubFixture;$id=New-ApiIdentity 'Global Excludes';$configRoot=New-BootstrapFixture 'global-config'
+    Write-FixtureText "$configRoot/ignore" "CLAUDE.md`nAGENTS.md`n*.env`n"
+    $ignorePath="$configRoot/ignore".Replace('\','/')
+    Write-FixtureText "$configRoot/gitconfig" "[core]`n    excludesFile = $ignorePath`n[user]`n    name = Fixture`n    email = fixture@example.invalid`n"
+    $saved=$env:GIT_CONFIG_GLOBAL;$baseGit=$f.git
+    $git={param($Repository,$Arguments)
+        if ($Arguments[0] -eq 'add') {Write-FixtureText "$Repository/unrelated.env" 'Keep untracked'}
+        & $baseGit $Repository $Arguments
+    }.GetNewClosure()
+    try {
+        $env:GIT_CONFIG_GLOBAL="$configRoot/gitconfig"
+        $report=Invoke-Bootstrap $id $f.stateRoot $f.request $git $f.obsidianSetup
+        Assert ($report.phases.ContainsKey('privateContent') -and $report.phases.privateContent -eq 'verified') 'Global excludes blocked the private foundation.'
+        $tracked=Invoke-FixtureGit $id.projectPath @('ls-files')
+        Assert (($tracked -split "`n") -contains 'CLAUDE.md' -and ($tracked -split "`n") -contains 'AGENTS.md') 'Required agent entry points were omitted.'
+        Assert ($tracked -notmatch 'unrelated.env' -and (Test-Path "$($id.projectPath)/unrelated.env")) 'Force staging included unrelated ignored content.'
+    } finally {$env:GIT_CONFIG_GLOBAL=$saved}
+}
 Test 'creation disables pull requests through supported API readback and status detects reactivation' {
     $f=New-GitHubFixture;$id=New-ApiIdentity 'API Pull Requests';$f.supportsPullRequests=$true
     $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
