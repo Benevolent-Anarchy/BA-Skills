@@ -200,3 +200,16 @@ Test 'creation partial reports point at the actual custom-state journal' {
     $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
     Assert ($report.status -eq 'partial' -and $report.journalPath -eq (Get-BootstrapJournalPath $id $f.stateRoot)) 'Partial result points at a different state root.'
 }
+Test 'completed bootstrap directs explicit refresh to local setup without claiming success' {
+    $f=New-GitHubFixture;$f.supportsPullRequests=$true;$f.appEnabled=$true
+    $id=New-ApiIdentity 'Completed Refresh'
+    Assert ((Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup).status -eq 'complete') 'Fixture did not complete.'
+    $journalPath=Get-BootstrapJournalPath $id $f.stateRoot
+    $before=[IO.File]::ReadAllText($journalPath)
+    $mutations=@($f.calls | Where-Object method -ne 'GET').Count
+    $f.obsidianSetup={throw 'Completed bootstrap must direct plugin work to local-setup.'}
+    $report=Invoke-Bootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup -RefreshPlugins
+    Assert ($report.status -eq 'blocked' -and ($report.pending -join ' ') -match 'local-setup.+RefreshPlugins') 'Refresh was ignored or has no actionable local-setup instruction.'
+    Assert ([IO.File]::ReadAllText($journalPath) -ceq $before) 'Completed journal changed.'
+    Assert (@($f.calls | Where-Object method -ne 'GET').Count -eq $mutations) 'Completed refresh mutated a repository.'
+}

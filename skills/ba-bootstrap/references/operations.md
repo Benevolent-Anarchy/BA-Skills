@@ -15,6 +15,8 @@ Creation journals live under `%LOCALAPPDATA%/BA-Skills/ba-bootstrap/state/`; vau
 
 `plan` and `status` inspect without creating state, repositories, checkouts or plugins. `resume` restores the original inputs. A recorded-ID retry reuses both repositories; lost push/README responses are checked by ref/content readback. A completed invocation preserves later project development. Do not force-push, stage unrelated files, replace differing README content, or delete partial results as cleanup.
 
+After bootstrap is complete, use `local-setup -Repository <actual checkout> -RefreshPlugins` for a deliberate plugin update. Creation/resume rejects a refresh request on a completed journal with that concrete instruction; it does not report an ignored update as successful.
+
 ## Public release-notes repository
 
 The public companion contains only its initial README, has `main`, remains writable by its owner and is never archived. Issues, wiki, projects, discussions, auto-merge and Actions are disabled through supported APIs and read back. Pages must be absent. The current update API and repository readback omit the legacy `has_downloads` field; its omission is not an enabled contribution feature. Private description/canon never belongs here.

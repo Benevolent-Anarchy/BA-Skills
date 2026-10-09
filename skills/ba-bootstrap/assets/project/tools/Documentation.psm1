@@ -158,10 +158,14 @@ function Test-ProjectDocumentation([string]$Repository) {
         $base=if ($Link.Kind -eq 'wiki') {$vault} elseif ($file.StartsWith('/')) {$root} else {Split-Path $Source -Parent}
         if ($file -eq '') {$path=$Source}
         else {
-            if ($Link.Kind -eq 'wiki' -and [IO.Path]::GetExtension($file) -eq '') {$file+='.md'}
             $path=[IO.Path]::GetFullPath((Join-Path $base $file.TrimStart('/')))
         }
         if (-not $path.StartsWith($root+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { return @{External=$false;Valid=$false;Reason='Target leaves the repository.'} }
+        if ($Link.Kind -eq 'wiki' -and $file -ne '' -and [IO.Path]::GetExtension($file) -ne '.md') {
+            # Dots can belong to a note's basename. Keep an existing explicit attachment;
+            # otherwise resolve the implicit Markdown suffix, including dotted note names.
+            if ([IO.Path]::GetExtension($file) -eq '' -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {$path+='.md'}
+        }
         # Never traverse a linked directory or file while validating repository content.
         $cursor=$path
         while ($cursor -ne $root) {

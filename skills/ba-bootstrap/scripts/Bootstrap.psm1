@@ -150,7 +150,14 @@ function Invoke-Bootstrap(
         $manifest=Get-ProjectManifest $Identity
         $journal=Read-BootstrapJournal $path
         if ($null -eq $journal) {$journal=New-BootstrapJournal $Identity $manifest;Write-BootstrapJournal $path $journal $lock}
-        if ($journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified') {return Get-BootstrapStatus $Identity $StateRoot $Request}
+        if ($journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified') {
+            $report=Get-BootstrapStatus $Identity $StateRoot $Request
+            if ($RefreshPlugins) {
+                $report.status='blocked'
+                $report.pending+="Completed bootstrap preserves project development. Run local-setup with -Repository '$($Identity.projectPath)' -RefreshPlugins to update this vault."
+            }
+            return $report
+        }
         function Save-Phase($Name,$Status='verified') {$journal.phases[$Name]=$Status;Write-BootstrapJournal $path $journal $lock}
         foreach ($kind in @('private','public')) {
             if ($journal.repositories.ContainsKey($kind)) {continue}

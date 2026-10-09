@@ -59,6 +59,18 @@ Test 'gate accepts empty foundation and populated canon' {
     $report=Test-ProjectDocumentation -Repository (New-PopulatedDocumentationFixture 'valid')
     Assert $report.Passed ($report.Diagnostics | ConvertTo-Json -Compress)
 }
+Test 'gate resolves implicit Markdown names with dots while preserving explicit attachments' {
+    $repo=New-PopulatedDocumentationFixture 'dotted names'
+    Move-Item -LiteralPath "$repo/docs/design/interface.md" -Destination "$repo/docs/design/version 1.0.md"
+    Replace-DocumentationFixture $repo 'docs/DESIGN.md' 'design/interface' 'design/version 1.0'
+    Write-FixtureText "$repo/docs/Version 1.0.md" "# Version 1.0`n`n## Details`nDocumented.`n"
+    Write-FixtureText "$repo/docs/picture.png" 'An explicit attachment target'
+    Add-Content -LiteralPath "$repo/docs/NEXT.md" -Value '[[Version 1.0]] [[Version 1.0#Details]] ![[picture.png]]'
+    $report=Test-ProjectDocumentation -Repository $repo
+    Assert $report.Passed ($report.Diagnostics | ConvertTo-Json -Depth 6 -Compress)
+    Replace-DocumentationFixture $repo 'docs/NEXT.md' 'Version 1.0#Details' 'Version 1.0#Missing'
+    Assert-DocumentationFailure $repo 'link-target'
+}
 Test 'gate requires actual indexes and directories' {
     foreach ($target in @('docs/DESIGN.md','docs/DECISIONS.md','docs/JUDGEMENTS.md','docs/design','docs/decisions','docs/judgements')) {
         $repo=New-PopulatedDocumentationFixture 'missing'
