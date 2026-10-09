@@ -3,6 +3,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'Project.psm1')
 Import-Module (Join-Path $PSScriptRoot 'State.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Dependencies.psm1')
+Import-Module (Join-Path $PSScriptRoot '../assets/project/tools/Verification.psm1')
 
 function Get-BootstrapPreparedManifest([string]$Repository,[string[]]$Paths) {
     $Repository=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Repository))
@@ -79,4 +81,77 @@ function Save-BootstrapPreparedProject([hashtable]$Journal,[string]$JournalPath,
         Write-BootstrapJournal $JournalPath $Journal $Lock
     } finally {if ($null -ne $owned) {$owned.Dispose()}}
 }
-Export-ModuleMember -Function Get-BootstrapPreparedManifest,Read-BootstrapPreparedProject,Save-BootstrapPreparedProject
+function Get-BootstrapPreparationSource([hashtable]$Journal,[string]$StateRoot) {
+    $root=[IO.Path]::GetFullPath($StateRoot)
+    $source=Join-Path $root "preparing/$($Journal.invocationId)/source"
+    Assert-BootstrapOwnedPath $root $source
+    return $source
+}
+function Assert-BootstrapPreparedBytes([string]$Source,[object[]]$Manifest) {
+    $actual=@(Get-BootstrapPreparedManifest $Source @($Manifest.path))
+    if ((Get-BootstrapTemplateVersion $actual) -cne (Get-BootstrapTemplateVersion $Manifest)) {throw 'Prepared source bytes differ from the retained manifest.'}
+}
+function Get-BootstrapPublicationSource([hashtable]$Journal,[string]$StateRoot) {
+    $snapshot=Join-Path ([IO.Path]::GetFullPath($StateRoot)) $Journal.preparation.snapshot
+    Assert-BootstrapOwnedPath ([IO.Path]::GetFullPath($StateRoot)) $snapshot
+    if ($Journal.preparation.phase -ceq 'snapshotting' -and -not (Test-Path (Split-Path $snapshot -Parent)) -and $Journal.preparation.checkpoints.ContainsKey('source-ready')) {
+        $source=Get-BootstrapPreparationSource $Journal $StateRoot
+        $ready=$Journal.preparation.checkpoints['source-ready'].manifest
+        if ((Get-BootstrapTemplateVersion $ready) -cne $Journal.preparation.manifestHash -or (Get-BootstrapTemplateVersion $Journal.manifest) -cne $Journal.preparation.manifestHash) {throw 'Unpublished source receipt differs from the frozen manifest.'}
+        Assert-BootstrapPreparedBytes $source $ready
+        return @{sourcePath=$source;manifest=@(Get-BootstrapPreparedManifest $source @($ready.path));selection=$Journal.presetSelection;resolution=$Journal.resolution}
+    }
+    return Read-BootstrapPreparedProject $Journal $StateRoot
+}
+function Initialize-BootstrapPreparation {
+    param([hashtable]$Identity,[hashtable]$Selection,[hashtable]$Journal,[string]$StateRoot,[scriptblock]$Checkpoint,
+        [scriptblock]$MetadataRequest={param($uri) Invoke-BootstrapMetadataRequest $uri},
+        [scriptblock]$Download={param($uri,$path) Invoke-WebRequest -Uri $uri -OutFile $path | Out-Null},
+        [scriptblock]$Process={param($exe,$arguments,$cwd,$environment) Invoke-VerificationProcess $exe $arguments $cwd $environment})
+    $source=Get-BootstrapPreparationSource $Journal $StateRoot
+    $checkpoints=$Journal.preparation.checkpoints
+    if ($checkpoints.ContainsKey('source-ready')) {
+        $manifest=@(Get-BootstrapPreparedManifest $source @($checkpoints['source-ready'].manifest.path))
+        Assert-BootstrapPreparedBytes $source $checkpoints['source-ready'].manifest
+        return @{sourcePath=$source;manifest=$manifest;receipts=$checkpoints['source-ready'].receipts}
+    }
+    if ($null -eq $Journal.resolution) {
+        $Journal.resolution=Get-BootstrapDependencyResolution $Selection $MetadataRequest
+        & $Checkpoint 'resolution' @{resolvedAt=$Journal.resolution.resolvedAt} | Out-Null
+    }
+    if (-not $checkpoints.ContainsKey('foundation')) {
+        $manifest=@(Get-ProjectManifest $Identity)
+        Write-BootstrapManifest $source $manifest | Out-Null
+        & $Checkpoint 'foundation' @{manifest=@($manifest | ForEach-Object {@{path=$_.path;sha256=$_.sha256}})} | Out-Null
+    } else {
+        $foundation=@($checkpoints.foundation.manifest)
+        if ($checkpoints.ContainsKey('overlay') -or $checkpoints.ContainsKey('godot-source')) {$foundation=@($foundation | Where-Object {$_.path -notin @('.gitignore','tools/verify.json')})}
+        Assert-BootstrapPreparedBytes $source $foundation
+    }
+    $engine=switch ($Selection.name) {
+        foundation {@{trackedPaths=@($checkpoints.foundation.manifest.path);receipts=@()}}
+        godot {
+            Import-Module (Join-Path $PSScriptRoot 'GodotPreset.psm1')
+            Initialize-GodotPreset $Identity $Selection $Journal.resolution $source $Download $Process -Checkpoints $checkpoints -Checkpoint $Checkpoint
+        }
+        tauri {
+            Import-Module (Join-Path $PSScriptRoot 'TauriPreset.psm1')
+            Initialize-TauriPreset $Identity $Selection $Journal.resolution $source $Process $Download -Checkpoints $checkpoints -Checkpoint $Checkpoint
+        }
+    }
+    $manifest=@(Get-BootstrapPreparedManifest $source @($engine.trackedPaths))
+    & $Checkpoint 'source-ready' @{manifest=@($manifest | ForEach-Object {@{path=$_.path;sha256=$_.sha256}});receipts=$engine.receipts} | Out-Null
+    return @{sourcePath=$source;manifest=$manifest;receipts=$engine.receipts}
+}
+function Install-BootstrapLockedDependencies([string]$Repository,[hashtable]$Selection,[scriptblock]$Process={param($exe,$arguments,$cwd,$environment) Invoke-VerificationProcess $exe $arguments $cwd $environment}) {
+    if ($Selection.name -cne 'tauri') {return}
+    Import-Module (Join-Path $Repository 'tools/TauriVerification.psm1') -Force
+    $npm=Get-TauriNpm;$environment=Get-TauriProcessEnvironment $Repository
+    $result=& $Process $npm.exe ($npm.prefix+@('ci','--no-audit','--no-fund')) $Repository $environment
+    if ($result.ExitCode -ne 0) {throw "Checkout locked dependency installation failed: $($result.Output)"}
+}
+function Invoke-BootstrapProjectGate([string]$Repository,[scriptblock]$Process={param($exe,$arguments,$cwd,$environment) Invoke-VerificationProcess $exe $arguments $cwd $environment}) {
+    $module=Import-Module (Join-Path $Repository 'tools/Verification.psm1') -Force -PassThru
+    & $module.ExportedCommands['Invoke-ProjectVerification'] $Repository $Process
+}
+Export-ModuleMember -Function Get-BootstrapPreparedManifest,Read-BootstrapPreparedProject,Save-BootstrapPreparedProject,Get-BootstrapPreparationSource,Get-BootstrapPublicationSource,Assert-BootstrapPreparedBytes,Initialize-BootstrapPreparation,Install-BootstrapLockedDependencies,Invoke-BootstrapProjectGate

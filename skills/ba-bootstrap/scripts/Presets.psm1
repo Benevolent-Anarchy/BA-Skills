@@ -38,7 +38,7 @@ function Resolve-BootstrapPreset([hashtable]$Identity,[string]$Preset='godot',[s
 function Assert-BootstrapPresetOverride([hashtable]$Stored,[Collections.IDictionary]$BoundParameters) {
     $keys=@{Preset='name';Renderer='renderer';AppIdentifier='appIdentifier'}
     foreach ($key in $keys.Keys) {
-        if (-not $BoundParameters.Contains($key)) {continue}
+        if ($key -notin @($BoundParameters.Keys)) {continue}
         $actual=[string]$BoundParameters[$key];$expected=[string]$Stored[$keys[$key]]
         if ($key -ne 'AppIdentifier') {$actual=$actual.ToLowerInvariant();$expected=$expected.ToLowerInvariant()}
         if (-not $actual -or $actual -cne $expected) {throw "Preset option conflicts with stored $key. Resume with the recorded selection."}

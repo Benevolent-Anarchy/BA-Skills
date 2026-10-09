@@ -1,6 +1,7 @@
-function New-GitHubFixture([switch]$ExistingPublic,[string]$FailPhase='') {
+function New-GitHubFixture([switch]$ExistingPublic,[string]$FailPhase='',[string]$Owner='Benevolent-Anarchy') {
     $fixture=@{stateRoot=(New-BootstrapFixture 'api-state');bareRoot=(New-BootstrapFixture 'bare');repos=@{};calls=[Collections.Generic.List[object]]::new();gitCalls=[Collections.Generic.List[object]]::new();failPhase=$FailPhase;lostCreate=$false;lostPush=$false;lostContents=$false;initialBranch='master';nextId=100;authStatus=200;ownerStatus=200;user='cicely-f';orgRole='admin';existingPublic=$ExistingPublic.IsPresent}
     $fixture.appEnabled=$false
+    $fixture.owner=$Owner
     $fixture.emptyRefStatus=404
     $fixture.emptyRefMessage='Git Repository is empty.'
     $fixture.privateTreeExtras=@()
@@ -12,13 +13,13 @@ function New-GitHubFixture([switch]$ExistingPublic,[string]$FailPhase='') {
     $fixture.request={param($Method,$Endpoint,$Body)
         $fixture.calls.Add(@{method=$Method;endpoint=$Endpoint;body=$Body;isRepositoryCreate=($Method -eq 'POST' -and $Endpoint -match '^/(orgs/[^/]+|user)/repos$')})
         if ($Endpoint -eq '/user') {return @{StatusCode=$fixture.authStatus;Data=@{login=$fixture.user}}}
-        if ($Endpoint -match '^/users/') {return @{StatusCode=$fixture.ownerStatus;Data=@{type='Organization';login='Benevolent-Anarchy'}}}
+        if ($Endpoint -match '^/users/') {return @{StatusCode=$fixture.ownerStatus;Data=@{type=$(if($fixture.owner -eq $fixture.user){'User'}else{'Organization'});login=$fixture.owner}}}
         if ($Endpoint -match '^/user/memberships/orgs/') {return @{StatusCode=200;Data=@{state='active';role=$fixture.orgRole}}}
         if ($Method -eq 'POST' -and $Endpoint -match '^/(orgs/[^/]+|user)/repos$') {
             if ($null -ne $fixture.createFailureStatus -and $Body.private -eq ($fixture.createFailureKind -eq 'private')) {
                 return @{StatusCode=$fixture.createFailureStatus;Data=@{message='Repository creation rejected by policy.';errors=@(@{resource='Repository';field='name';code='invalid'})}}
             }
-            $name='Benevolent-Anarchy/'+$Body.name
+            $name=$fixture.owner+'/'+$Body.name
             $fixture.nextId++
             $repo=@{id=$fixture.nextId;full_name=$name;private=$Body.private;description=$null;default_branch=$fixture.initialBranch;has_issues=$Body.has_issues;has_wiki=$true;has_projects=$true;has_discussions=$true;has_downloads=$true;allow_auto_merge=$true;archived=$false;has_pages=$false;permissions=@{push=$true;admin=$true};actions=@{enabled=$true};labels=@{};readme=$null;tree=@()}
             if ($fixture.supportsPullRequests) {$repo.has_pull_requests=$true}

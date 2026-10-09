@@ -1,5 +1,9 @@
 if (Test-Path "$skillRoot/scripts/Presets.psm1") {Import-Module "$skillRoot/scripts/Presets.psm1" -Force}
 . "$PSScriptRoot/PresetFixture.ps1"
+Test 'preset override detection accepts the actual CLI bound-parameter dictionary' {
+    function Invoke-BoundPresetProbe([string]$Preset) {Assert-BootstrapPresetOverride @{name='foundation';renderer=$null;appIdentifier=$null} $PSBoundParameters}
+    Invoke-BoundPresetProbe -Preset foundation
+}
 Test 'preset defaults to Godot and validates engine-specific options' {
     $id=New-BootstrapIdentity -Name 'Foo Bar Baz' -Description 'Purpose' -Parent $sandbox
     $default=Resolve-BootstrapPreset $id

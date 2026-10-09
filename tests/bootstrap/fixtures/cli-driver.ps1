@@ -63,13 +63,17 @@ $missing=Invoke-Cli @{Mode='create';Name='Missing Description'}
 Assert ($missing.code -eq 1 -and $missing.report.status -eq 'missing-input' -and $global:BoundaryCalls.Count -eq 0) 'Missing input contacted a service.'
 $parent=Join-Path $sandbox 'first parent with spaces'
 New-Item -ItemType Directory -Path $parent | Out-Null
-$parameters=@{Name='CLI Literal Project';Description='Literal $5, `ticks`, and $(never execute).';Parent=$parent}
+$parameters=@{Name='CLI Literal Project';Description='Literal $5, `ticks`, and $(never execute).';Parent=$parent;Preset='foundation'}
 $plan=Invoke-Cli ($parameters+@{Mode='plan'})
 Assert ($plan.code -eq 0 -and $plan.report.status -eq 'ready') 'CLI plan failed.'
 Assert (-not (Test-Path $plan.report.identity.projectPath) -and -not (Test-Path $plan.report.journalPath)) 'Plan wrote checkout/state.'
 Assert (@($global:CliApi.calls | Where-Object method -ne 'GET').Count -eq 0) 'Plan mutated repository.'
 $create=Invoke-Cli ($parameters+@{Mode='create'})
 Assert ($create.code -eq 1 -and $create.report.status -eq 'partial' -and $create.report.phases.privateRepository -eq 'verified') ($create | ConvertTo-Json -Depth 30)
+$before=[IO.File]::ReadAllText($create.report.journalPath);$offset=$global:BoundaryCalls.Count
+$conflicting=Invoke-Cli @{Mode='resume';Name=$parameters.Name;Preset='tauri'}
+Assert ($conflicting.code -eq 1 -and $conflicting.report.status -eq 'blocked' -and ($conflicting.report.conflicts -join ' ') -match 'conflict') 'Conflicting preset accepted by CLI.'
+Assert ($global:BoundaryCalls.Count -eq $offset -and [IO.File]::ReadAllText($create.report.journalPath) -ceq $before) 'Conflicting resume touched a service or journal.'
 $global:CliApi.failPhase=''
 $resume=Invoke-Cli @{Mode='resume';Name=$parameters.Name;Owner='Benevolent-Anarchy'}
 Assert ($resume.code -eq 1 -and $resume.report.status -eq 'partial' -and $resume.report.phases.obsidian -eq 'needs-app') ($resume | ConvertTo-Json -Depth 30)
@@ -88,6 +92,9 @@ $checkoutOutput=& $global:FixtureRealGit -C $clone checkout --quiet main 2>&1
 Assert ($LASTEXITCODE -eq 0) ($checkoutOutput -join "`n")
 & $global:FixtureRealGit -C $clone remote set-url origin "https://github.com/$($id.fullName).git"
 $offset=$global:CliApi.calls.Count
+$engineSetup=Invoke-Cli @{Mode='local-setup';Repository=$clone;Preset='tauri'}
+Assert ($engineSetup.code -eq 1 -and $engineSetup.report.status -eq 'blocked' -and ($engineSetup.report.conflicts -join ' ') -match 'Obsidian only') 'local-setup accepted engine conversion.'
+Assert ($global:CliApi.calls.Count -eq $offset -and -not (Test-Path "$clone/docs/.obsidian")) 'Rejected engine setup changed the clone or contacted GitHub.'
 $local=Invoke-Cli @{Mode='local-setup';Repository=$clone}
 Assert ($local.code -eq 1 -and $local.report.status -eq 'partial' -and $local.report.installedVerified -and -not $local.report.enabledVerified) ($local | ConvertTo-Json -Depth 20)
 Assert (@($global:CliApi.calls | Select-Object -Skip $offset | Where-Object method -ne 'GET').Count -eq 0) 'Clone setup mutated GitHub.'
