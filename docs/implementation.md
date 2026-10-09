@@ -41,6 +41,10 @@ destination separately, including Steam build IDs and Play edit/bundle progress.
 Explicit holds keep prepared destinations out of publication and retries without
 store or credential calls. Their public reasons survive in availability records;
 unhold reuses the approved artifacts and never rebuilds or increments counters.
+Older prepared plans can acquire the inspected Android Gradle flag only when
+every other saved plan field exactly matches fresh inspection. This compatibility
+step preserves plan identity and approval; it cannot change targets or accept a
+conflicting stored flag.
 Completed uploads/submissions are skipped on retry; observed console receipts
 close activation/review/announcement work. Interrupted external
 operations remain uncertain and require explicit reconciliation or retry.

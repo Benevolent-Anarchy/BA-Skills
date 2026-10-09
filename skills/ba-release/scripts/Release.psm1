@@ -572,6 +572,26 @@ function Get-ReleaseOverallStatus($State) {
     return 'publication-failed'
 }
 
+# Completes only the inspected Gradle flag omitted by older planners, preserving every approved field.
+function Update-ReleaseDerivedPlanMetadata($State, $Fresh) {
+    $freshJson=$Fresh | ConvertTo-Json -Depth 30 -Compress
+    $savedJson=$State.plan | ConvertTo-Json -Depth 30 -Compress
+    if ($freshJson -ceq $savedJson) {return $false}
+    $comparison=$freshJson | ConvertFrom-Json -AsHashtable
+    $completed=$false
+    foreach ($collection in @('exports','requiredExports')) {
+        foreach ($preset in $comparison[$collection]) {
+            $saved=@($State.plan[$collection] | Where-Object {$_.name -ceq $preset.name})
+            if ($saved.Count -eq 1 -and $preset.platform -eq 'Android' -and $preset.Contains('useGradle') -and -not $saved[0].Contains('useGradle')) {
+                $preset.Remove('useGradle');$completed=$true
+            }
+        }
+    }
+    if (-not $completed -or ($comparison | ConvertTo-Json -Depth 30 -Compress) -cne $savedJson) {throw 'Saved release plan differs from the current inspected plan.'}
+    $State.plan=$Fresh
+    return $true
+}
+
 # Publishes only approved snapshot destinations and retains successes through partial failures and retries.
 function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [string]$ApprovedNotesSha256, [string]$ButlerExecutable='butler', [string]$GhExecutable='gh', [switch]$RetryUncertain, [string]$SteamCmdExecutable='steamcmd', [scriptblock]$PlayTransport, [switch]$ReplacePlayEdit) {
     $StatePath = (Get-Item -LiteralPath $StatePath).FullName
@@ -583,7 +603,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
         $fresh = Get-ReleasePlan $state.plan.repository $state.plan.selectedDestinations $state.plan.baselines
         if (-not $fresh.ready -or $fresh.planId -cne $state.plan.planId) { throw 'Source or release configuration changed after preparation.' }
         # Also bind the complete displayed plan, so a journal edit cannot change upload targets.
-        if (($fresh | ConvertTo-Json -Depth 30 -Compress) -cne ($state.plan | ConvertTo-Json -Depth 30 -Compress)) { throw 'Saved release plan differs from the current inspected plan.' }
+        if (Update-ReleaseDerivedPlanMetadata $state $fresh) {Write-ReleaseJson $stateFile $state}
         Assert-ReleaseArtifacts $StatePath $state
         $notesPath = Join-Path $StatePath 'notes.md'
         $notes = [IO.File]::ReadAllText($notesPath)

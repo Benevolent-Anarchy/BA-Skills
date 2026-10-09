@@ -55,3 +55,38 @@ Test 'publication hold is reported independently from failures and store actions
     $state.destinations.itch.status='awaiting-store-action'
     Assert ((& (Get-Module Release) {param($value) Get-ReleaseOverallStatus $value} $state) -eq 'needs-store-action') 'Hold concealed pending store action.'
 }
+
+Test 'publication accepts only missing inspected Gradle metadata in an older sealed plan' {
+    $repo=New-StoreFixture 'older-plan-metadata'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','google-play') (Join-Path $sandbox 'older-plan-metadata-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($collection in @('exports','requiredExports')) {
+        foreach ($preset in $state.plan[$collection]) {if ($preset.Contains('useGradle')) {$preset.Remove('useGradle')}}
+    }
+    Write-Json $stateFile $state
+    Set-ReleaseDestinationHold $prepared.statePath @('google-play') 'Review pending.' | Out-Null
+    $hash=Get-ReleaseNotesHash $prepared.statePath $state.plan
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 $hash -PlayTransport {throw 'Held Play must remain untouched.'}
+    Assert ($result.destinations['itch-windows'].status -eq 'succeeded' -and $result.destinations['google-play'].status -eq 'held') 'Older derived metadata prevented independent publication.'
+    $after=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    Assert ($after.plan.planId -ceq $state.plan.planId -and $after.approval.notesSha256 -ceq $hash -and $after.plan.exports[2].useGradle -eq $true) 'Metadata completion changed identity/approval or invented the Gradle setting.'
+    $after.plan.exports[2].useGradle=$false
+    Write-Json $stateFile $after
+    Expect-Error {Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler} 'Saved release plan differs'
+}
+
+Test 'missing Gradle metadata never permits changes to saved release destinations' {
+    $repo=New-StoreFixture 'older-plan-conflict'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','google-play') (Join-Path $sandbox 'older-plan-conflict-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($collection in @('exports','requiredExports')) {
+        foreach ($preset in $state.plan[$collection]) {if ($preset.Contains('useGradle')) {$preset.Remove('useGradle')}}
+    }
+    $state.plan.destinations[0].target='other/game:windows'
+    Write-Json $stateFile $state
+    $hash=(Get-FileHash $stateFile).Hash
+    Expect-Error {Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)} 'Saved release plan differs'
+    Assert ((Get-FileHash $stateFile).Hash -ceq $hash) 'Conflicting saved plan was rewritten or store publication started.'
+}
