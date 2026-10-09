@@ -1,8 +1,8 @@
 # Reproduces PR 6 review findings using disposable journals and local store boundaries.
 
 Test 'PR rereview credential words in itch identifiers remain valid structured data' {
-    foreach ($slug in @('secret-agent','the-secret-agent','token-runner','password-puzzle','credential-quest','api-key-mystery')) {
-        $json=@{target="example/${slug}:windows";evidenceUrl="https://example.itch.io/$slug"} | ConvertTo-Json -Compress
+    foreach ($slug in @('secret-agent','the-secret-agent','token-runner','password-puzzle','credential-quest','api-key-mystery','desk-organization','brisk-adventures2024','laughs_championship')) {
+        $json=@{target="example/${slug}:windows";evidenceUrl="https://example.itch.io/$slug";displayName='Kiosk-Simulator2026 1.2.3 (Windows)'} | ConvertTo-Json -Compress
         & (Get-Module Release) {param($text)
             $document=[System.Text.Json.JsonDocument]::Parse($text)
             try {Assert-ReleaseJson $document.RootElement} finally {$document.Dispose()}
@@ -11,11 +11,13 @@ Test 'PR rereview credential words in itch identifiers remain valid structured d
 }
 
 Test 'PR rereview itch games with credential words can configure publish and confirm their labels' {
-    foreach ($slug in @('secret-agent','the-secret-agent')) {
+    foreach ($slug in @('secret-agent','the-secret-agent','desk-organization','brisk-adventures2024','laughs_championship')) {
         $repo=New-Fixture "review-receipt-$slug"
         Change-Config $repo {param($c) $c.distributions.itch.game="example/$slug";$c.distributions.itch.displayNameTemplate='{title} {version} ({os})'}
+        $projectPath=Join-Path $repo 'project.godot'
+        [IO.File]::WriteAllText($projectPath,[IO.File]::ReadAllText($projectPath).Replace('config/name="Fixture"','config/name="Kiosk-Simulator2026"'),[Text.UTF8Encoding]::new($false))
         Get-ReleaseConfiguration $repo | Out-Null
-        Invoke-FixtureGit $repo @('add','release.json') | Out-Null
+        Invoke-FixtureGit $repo @('add','release.json','project.godot') | Out-Null
         Invoke-FixtureGit $repo @('commit','--quiet','-m','Configure the inspected itch game') | Out-Null
         $prepared=Invoke-ReleasePrepare $repo @('itch-windows') (Join-Path $sandbox "review-receipt-$slug-state") $engine
         $stateFile=Join-Path $prepared.statePath 'state.json';$state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
@@ -23,6 +25,7 @@ Test 'PR rereview itch games with credential words can configure publish and con
         $uploaded=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 $notesHash
         Assert ($uploaded.destinations['itch-windows'].status -eq 'awaiting-store-action') 'Fixture did not wait for an itch display label.'
         $destination=@($state.plan.destinations | Where-Object id -EQ 'itch-windows')[0]
+        Assert ($destination.displayName -ceq 'Kiosk-Simulator2026 1.2.3 (Windows)') 'Receipt fixture did not use the title that resembles an API-key prefix.'
         $receiptPath=Join-Path $prepared.statePath 'itch-receipt.json'
         Write-Json $receiptPath @{destination='itch-windows';planId=$state.plan.planId;notesSha256=$notesHash;observedAt=[DateTimeOffset]::UtcNow.ToString('o');live=$true;target=$destination.target;displayName=$destination.displayName;evidenceUrl="https://example.itch.io/$slug"}
         $confirmed=Confirm-ReleaseStoreCompletion $prepared.statePath $receiptPath
@@ -30,6 +33,20 @@ Test 'PR rereview itch games with credential words can configure publish and con
         $before=(Get-FileHash $stateFile).Hash
         Confirm-ReleaseStoreCompletion $prepared.statePath $receiptPath | Out-Null
         Assert ((Get-FileHash $stateFile).Hash -ceq $before) 'Repeating the same receipt rewrote completion.'
+    }
+}
+
+Test 'PR followup API key prefixes remain rejected at token boundaries' {
+    foreach ($keyPrefix in @('ghp_','gho_','ghu_','ghs_','ghr_','github_pat_','sk-')) {
+        foreach ($separator in @('','value=','value: ',' ','"',"'")) {
+            $text=$separator+$keyPrefix+'ABCDEFGHIJKLMNOPQRSTUVWXYZ012345'
+            Expect-Error {& (Get-Module Release) {param($value) Assert-ReleaseHoldReason $value} $text} 'Credential-like'
+            $json=@{arguments=@($text)} | ConvertTo-Json -Compress
+            Expect-Error {& (Get-Module Release) {param($value)
+                $document=[System.Text.Json.JsonDocument]::Parse($value)
+                try {Assert-ReleaseJson $document.RootElement} finally {$document.Dispose()}
+            } $json} 'Credential-like'
+        }
     }
 }
 
