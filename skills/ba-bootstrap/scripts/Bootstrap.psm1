@@ -43,6 +43,25 @@ function Assert-BootstrapPublicSettings($Identity,$Request) {
     $pages=Invoke-CheckedApi $Request GET "/repos/$($Identity.notesFullName)/pages" $null @(200,404)
     if ($pages.StatusCode -ne 404) {throw 'Public repository has unexpected Pages configuration.'}
 }
+function Assert-BootstrapInitialCommit($Identity,$Manifest,$Git,[string]$Head) {
+    # Inspect the real commit and tree; replacement refs must not supply recovery proof.
+    $commit=Invoke-CheckedGit $Git $Identity.projectPath @('--no-replace-objects','cat-file','-p',$Head)
+    $headers=($commit -split "`n`n",2)[0]
+    if ($headers -notmatch '^tree [0-9a-f]+' -or $headers -match '(?m)^parent ') {throw 'Unrecorded HEAD must be a single root foundation commit.'}
+    $tree=Invoke-CheckedGit $Git $Identity.projectPath @('--no-replace-objects','ls-tree','-r','--full-tree',$Head)
+    $blobs=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    foreach ($line in @($tree -split "`n" | Where-Object {$_})) {
+        if ($line -notmatch '^(?:100644|100755) blob ([0-9a-f]{40}|[0-9a-f]{64})\t(.+)$') {throw 'Unrecorded foundation tree contains an unexpected entry.'}
+        $blobs.Add($Matches[2],$Matches[1])
+    }
+    if ($blobs.Count -ne @($Manifest).Count) {throw 'Unrecorded foundation tree differs from the manifest paths.'}
+    foreach ($entry in $Manifest) {
+        if (-not $blobs.ContainsKey($entry.path)) {throw "Unrecorded foundation tree is missing $($entry.path)."}
+        # Local-state validation already proves these bytes match the SHA-256 manifest.
+        $expected=Invoke-CheckedGit $Git $Identity.projectPath @('hash-object','--no-filters','--',$entry.path)
+        if ($expected -cne $blobs[$entry.path]) {throw "Unrecorded foundation blob differs: $($entry.path)."}
+    }
+}
 function Test-BootstrapLocalState($Identity,$Journal,$Manifest,$Git,$Completed=$false) {
     $path=$Identity.projectPath
     if (-not (Test-Path -LiteralPath $path)) {return}
@@ -77,7 +96,10 @@ function Test-BootstrapLocalState($Identity,$Journal,$Manifest,$Git,$Completed=$
             $staged=Invoke-CheckedGit $Git $path @('diff','--cached','--name-only')
             foreach ($file in @($staged -split "`n" | Where-Object {$_})) {if ($file -notin $Manifest.path) {throw "Unexpected staged file: $file"}}
             $head=& $Git $path @('rev-parse','--verify','HEAD')
-            if ($head.ExitCode -eq 0 -and (-not $Journal.refs.ContainsKey('privateMain') -or $head.Output.Trim() -ne $Journal.refs.privateMain)) {throw 'Unexpected local commit; it is not the recorded initial foundation.'}
+            if ($head.ExitCode -eq 0) {
+                if (-not $Journal.refs.ContainsKey('privateMain')) {Assert-BootstrapInitialCommit $Identity $Manifest $Git $head.Output.Trim()}
+                elseif ($head.Output.Trim() -ne $Journal.refs.privateMain) {throw 'Unexpected local commit; it is not the recorded initial foundation.'}
+            }
         }
     } elseif ($null -ne $Journal -and $Journal.phases.ContainsKey('privateContent') -and $Journal.phases.privateContent -eq 'verified') {throw 'Recorded private checkout is missing its Git repository.'}
 }
@@ -220,9 +242,15 @@ function Invoke-Bootstrap(
             $gate=& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $Identity.projectPath 'tools/verify.ps1') 2>&1
             if ($LASTEXITCODE -ne 0) {throw "Initial documentation gate failed: $gate"}
             if (-not $journal.refs.ContainsKey('privateMain')) {
-                Invoke-CheckedGit $Git $Identity.projectPath (@('add','-f','--')+@($manifest.path)) | Out-Null
-                Invoke-CheckedGit $Git $Identity.projectPath @('commit','-m','Initial project foundation') | Out-Null
-                $journal.refs.privateMain=Invoke-CheckedGit $Git $Identity.projectPath @('rev-parse','HEAD')
+                $head=& $Git $Identity.projectPath @('rev-parse','--verify','HEAD')
+                if ($head.ExitCode -eq 0) {
+                    Assert-BootstrapInitialCommit $Identity $manifest $Git $head.Output.Trim()
+                    $journal.refs.privateMain=$head.Output.Trim()
+                } else {
+                    Invoke-CheckedGit $Git $Identity.projectPath (@('add','-f','--')+@($manifest.path)) | Out-Null
+                    Invoke-CheckedGit $Git $Identity.projectPath @('commit','-m','Initial project foundation') | Out-Null
+                    $journal.refs.privateMain=Invoke-CheckedGit $Git $Identity.projectPath @('rev-parse','HEAD')
+                }
                 Write-BootstrapJournal $path $journal $lock
             }
             $remote=Invoke-CheckedApi $Request GET "/repos/$($Identity.fullName)/git/ref/heads/main" $null @(200,404,409)

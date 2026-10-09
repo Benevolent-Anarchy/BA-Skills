@@ -1,6 +1,60 @@
 Import-Module "$skillRoot/scripts/State.psm1" -Force
 if (Test-Path "$skillRoot/scripts/Obsidian.psm1") {Import-Module "$skillRoot/scripts/Obsidian.psm1" -Force}
 . "$PSScriptRoot/ObsidianFixture.ps1"
+Test 'followup plugin digests refuse changed or truncated staged assets before promotion' {
+    foreach ($damage in @('changed-main','truncated-main','manifest','stylesheet')) {
+        $f=New-ObsidianFixture ('digest '+$damage)
+        if ($damage -eq 'stylesheet') {
+            $url='https://github.com/fixture/dataview/releases/download/9.1.0/styles.css'
+            $f.releases.dataview.assets+=@{name='styles.css';browser_download_url=$url};$f.assets[$url]='body {}'
+        }
+        Set-ObsidianFixtureDigests $f
+        $assetName=if ($damage -eq 'manifest') {'manifest.json'} elseif ($damage -eq 'stylesheet') {'styles.css'} else {'main.js'}
+        $url=@($f.releases.dataview.assets | Where-Object name -eq $assetName)[0].browser_download_url
+        $f.assets[$url]=if ($damage -eq 'truncated-main') {'/'} else {$f.assets[$url]+' '}
+        $result=Invoke-ObsidianFixture $f
+        Assert (-not $result.installedVerified -and ($result.pending -join ' ') -match 'digest.*mismatch|mismatch.*digest') "Damaged $damage asset was accepted or not diagnosed."
+        Assert (-not (Test-Path "$($f.identity.vaultPath)/.obsidian/plugins/dataview/main.js")) 'Damaged staged release reached the active vault.'
+    }
+}
+Test 'followup plugin digest verification is pinned across interrupted refresh' {
+    $f=New-ObsidianFixture 'pinned digest';Set-ObsidianFixtureDigests $f
+    $first=Invoke-ObsidianFixture $f
+    Assert $first.installedVerified 'Initial digest-bearing fixture failed.'
+    $before=Get-FileHash "$($f.identity.vaultPath)/.obsidian/plugins/dataview/main.js"
+    foreach ($release in $f.releases.Values) {
+        $release.tag_name='9.2.0'
+        foreach ($asset in $release.assets) {
+            $old=$asset.browser_download_url;$asset.browser_download_url=$old.Replace('9.1.0','9.2.0')
+            $f.assets[$asset.browser_download_url]=$f.assets[$old].Replace('9.1.0','9.2.0')
+        }
+    }
+    Set-ObsidianFixtureDigests $f;$f.failDownload='mermaid-popup.*main.js'
+    $interrupted=Invoke-ObsidianFixture $f -Refresh
+    Assert (-not $interrupted.installedVerified) 'Refresh fixture was not interrupted.'
+    $journal=Read-BootstrapJournal $interrupted.journalPath
+    Assert ($journal.operation.releases.dataview.ContainsKey('digests')) 'Interrupted release journal did not retain published digests.'
+    $digest=$journal.operation.releases.dataview.digests['main.js']
+    $url=@($f.releases.dataview.assets | Where-Object name -eq 'main.js')[0].browser_download_url
+    $expected=$f.assets[$url];$f.assets[$url]='// replaced after interruption'
+    Set-ObsidianFixtureDigests $f;$f.failDownload='';$requests=$f.calls.Count
+    $bad=Invoke-ObsidianFixture $f
+    Assert (-not $bad.installedVerified -and ($bad.pending -join ' ') -match 'digest.*mismatch') 'Retry accepted a different asset using refreshed rather than pinned metadata.'
+    Assert ($f.calls.Count -eq $requests -and (Get-FileHash $before.Path).Hash -eq $before.Hash) 'Digest failure changed metadata selection or the prior installation.'
+    $f.assets[$url]=$expected
+    $recovered=Invoke-ObsidianFixture $f
+    Assert ($recovered.installedVerified -and $f.calls.Count -eq $requests -and @($recovered.plugins | Where-Object digestVerification -ne 'verified').Count -eq 0) 'Correct pinned assets did not recover with verified digest receipts.'
+    Assert ((Read-BootstrapJournal $recovered.journalPath).plugins.dataview.digests['main.js'] -eq $digest) 'Completed journal lost the pinned digest.'
+    $repeat=Invoke-ObsidianFixture $f
+    Assert ($repeat.installedVerified -and @($repeat.plugins | Where-Object digestVerification -ne 'verified').Count -eq 0 -and $f.calls.Count -eq $requests) 'Ordinary repeat lost integrity verification or fetched another release.'
+}
+Test 'followup digestless plugin releases install with explicit unverified receipts' {
+    $f=New-ObsidianFixture 'legacy digests'
+    foreach ($release in $f.releases.Values) {foreach ($asset in $release.assets) {$asset.digest=$null}}
+    $result=Invoke-ObsidianFixture $f
+    Assert ($result.installedVerified -and $result.plugins.Count -eq 4) 'Legacy digestless assets failed installation.'
+    foreach ($plugin in $result.plugins) {Assert ($plugin.digestVerification -eq 'unverified-by-digest' -and 'main.js' -in $plugin.assetsWithoutDigest) 'Missing digests were silently reported as verified.'}
+}
 Test 'review Obsidian compatibility uses the updated application cache version' {
     $f=New-ObsidianFixture 'updated application';$appData=New-BootstrapFixture 'app-cache';$localData=New-BootstrapFixture 'installer'
     foreach ($name in @('obsidian-1.14.9.asar','obsidian-1.14.10.asar','obsidian-not-a-version.asar','obsidian-99.0.0.asar.tmp')) {Write-FixtureText "$appData/obsidian/$name" 'Fixture cache'}

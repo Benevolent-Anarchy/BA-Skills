@@ -39,3 +39,8 @@ function New-ObsidianFixture([string]$Name) {
 function Invoke-ObsidianFixture($Fixture,[switch]$Refresh) {
     Install-ProjectObsidian -Identity $Fixture.identity -PresetRoot $presetRoot -StateRoot $Fixture.stateRoot -Request $Fixture.request -Download $Fixture.download -AppVersion $Fixture.appVersion -Promote $Fixture.promote -RefreshPlugins:$Refresh
 }
+function Set-ObsidianFixtureDigests($Fixture) {
+    foreach ($release in $Fixture.releases.Values) {
+        foreach ($asset in $release.assets) {$asset.digest='sha256:'+(Get-BootstrapContentHash $Fixture.assets[$asset.browser_download_url])}
+    }
+}

@@ -59,6 +59,30 @@ Test 'gate accepts empty foundation and populated canon' {
     $report=Test-ProjectDocumentation -Repository (New-PopulatedDocumentationFixture 'valid')
     Assert $report.Passed ($report.Diagnostics | ConvertTo-Json -Compress)
 }
+Test 'followup root Markdown links are checked with source diagnostics' {
+    foreach ($file in @('README.md','AGENTS.md','CLAUDE.md','GUIDE.md')) {
+        $repo=New-PopulatedDocumentationFixture 'root links'
+        if ($file -eq 'GUIDE.md') {Write-FixtureText "$repo/$file" "# Guide`n`n## Start`n[Self](#start)`n"}
+        Add-Content -LiteralPath "$repo/$file" -Value '[Design](docs/DESIGN.md#index)'
+        Assert ((Test-ProjectDocumentation -Repository $repo).Passed) 'A valid root link or root self-heading failed.'
+        Add-Content -LiteralPath "$repo/$file" -Value '[Missing](docs/NOPE.md)'
+        $report=Test-ProjectDocumentation -Repository $repo
+        Assert (-not $report.Passed -and @($report.Diagnostics | Where-Object {$_.Code -eq 'link-target' -and $_.File -eq $file -and $_.Line -gt 0}).Count -eq 1) "Broken $file link passed or lost its source location."
+        Replace-DocumentationFixture $repo $file '[Missing](docs/NOPE.md)' '[Decisions](docs/DECISIONS.md)'
+        Assert ((Test-ProjectDocumentation -Repository $repo).Passed) 'Repairing a root link did not restore the gate.'
+    }
+}
+Test 'followup Inspector exports stay ignored and outside the documentation gate' {
+    $repo=New-PopulatedDocumentationFixture 'inspector export'
+    Invoke-FixtureGit $repo @('init','--initial-branch=main') | Out-Null
+    Invoke-FixtureGit $repo @('add','-f','--','.') | Out-Null
+    Invoke-FixtureGit $repo @('commit','-m','Fixture foundation') | Out-Null
+    Write-FixtureText "$repo/docs/Vault Inspector Reports/report.md" "# Vault Inspector Report`n`n### Unresolved [[Missing Note]]`n- **Message:** [Broken](../missing.md)`n"
+    Assert ((Invoke-FixtureGit $repo @('status','--porcelain')) -eq '') 'Inspector export appeared as project work.'
+    Assert ((Test-ProjectDocumentation -Repository $repo).Passed) 'An ignored Inspector export affected canon validation.'
+    Write-FixtureText "$repo/docs/Actual Canon.md" '[Broken](missing.md)'
+    Assert-DocumentationFailure $repo 'link-target'
+}
 Test 'gate resolves implicit Markdown names with dots while preserving explicit attachments' {
     $repo=New-PopulatedDocumentationFixture 'dotted names'
     Move-Item -LiteralPath "$repo/docs/design/interface.md" -Destination "$repo/docs/design/version 1.0.md"

@@ -4,6 +4,52 @@ Import-Module "$skillRoot/scripts/State.psm1" -Force
 if (Test-Path "$skillRoot/scripts/Bootstrap.psm1") {Import-Module "$skillRoot/scripts/Bootstrap.psm1" -Force}
 . "$PSScriptRoot/GitHubFixture.ps1"
 function New-ApiIdentity($Name) {New-BootstrapIdentity -Name $Name -Description 'Private project purpose' -Parent (New-BootstrapFixture 'project-parent')}
+function New-UnjournalledCommitFixture($Name) {
+    $f=New-GitHubFixture;$id=New-ApiIdentity $Name;$baseGit=$f.git;$interruption=@{pending=$true}
+    $git={param($Repository,$Arguments)
+        if ($interruption.pending -and ($Arguments -join ' ') -eq 'rev-parse HEAD') {$interruption.pending=$false;return @{ExitCode=1;Output='Interrupted before recording the initial commit'}}
+        & $baseGit $Repository $Arguments
+    }.GetNewClosure()
+    $first=Invoke-Bootstrap $id $f.stateRoot $f.request $git $f.obsidianSetup
+    Assert ($first.status -eq 'partial' -and -not (Read-BootstrapJournal (Get-BootstrapJournalPath $id $f.stateRoot)).refs.ContainsKey('privateMain')) 'Fixture did not interrupt the commit receipt.'
+    @{api=$f;identity=$id;git=$git}
+}
+Test 'followup unjournalled initial commit resumes once without changing the commit' {
+    $case=New-UnjournalledCommitFixture 'Interrupted Commit';$f=$case.api;$id=$case.identity
+    $head=Invoke-FixtureGit $id.projectPath @('rev-parse','HEAD');$path=Get-BootstrapJournalPath $id $f.stateRoot;$before=(Get-FileHash $path).Hash
+    Assert ((Get-BootstrapPlan $id $f.request $f.stateRoot $case.git).status -eq 'ready') 'An exact initial foundation could not be recovered.'
+    Assert ((Get-FileHash $path).Hash -eq $before) 'Read-only plan journalled recovery.'
+    $second=Invoke-Bootstrap $id $f.stateRoot $f.request $case.git $f.obsidianSetup
+    Assert ($second.phases.ContainsKey('privateContent') -and $second.phases.privateContent -eq 'verified') 'Interrupted commit could not resume.'
+    $journal=Read-BootstrapJournal $path
+    Assert ($journal.refs.privateMain -eq $head -and (Invoke-FixtureGit $id.projectPath @('rev-list','--count','HEAD')) -eq '1') 'Recovery made a second commit or recorded a different head.'
+    Assert ((& git --git-dir=$($f.repos[$id.fullName].bare) rev-parse main) -eq $head) 'Recovery pushed a different commit.'
+    Assert (@($f.gitCalls | Where-Object {$_.arguments[0] -eq 'commit'}).Count -eq 1 -and @($f.calls | Where-Object isRepositoryCreate).Count -eq 2) 'Recovery repeated commit or repository creation.'
+}
+Test 'followup unjournalled recovery refuses altered trees and additional history' {
+    foreach ($change in @('extra','blob','history')) {
+        $case=New-UnjournalledCommitFixture ('Interrupted '+$change);$f=$case.api;$id=$case.identity
+        switch ($change) {
+            extra {
+                Write-FixtureText "$($id.projectPath)/unrelated.txt" 'Unrelated'
+                Invoke-FixtureGit $id.projectPath @('add','unrelated.txt') | Out-Null
+                Invoke-FixtureGit $id.projectPath @('commit','--amend','--no-edit') | Out-Null
+            }
+            blob {
+                $readme=@(Get-ProjectManifest $id | Where-Object path -eq 'README.md')[0].text
+                Write-FixtureText "$($id.projectPath)/README.md" ($readme+'Changed commit content')
+                Invoke-FixtureGit $id.projectPath @('add','README.md') | Out-Null
+                Invoke-FixtureGit $id.projectPath @('commit','--amend','--no-edit') | Out-Null
+                Write-FixtureText "$($id.projectPath)/README.md" $readme
+            }
+            history {Invoke-FixtureGit $id.projectPath @('commit','--allow-empty','-m','Unrelated second commit') | Out-Null}
+        }
+        $before=$f.calls.Count
+        $report=Invoke-Bootstrap $id $f.stateRoot $f.request $case.git $f.obsidianSetup
+        Assert ($report.status -eq 'blocked') "Unexpected $change commit was accepted."
+        Assert (@($f.calls | Select-Object -Skip $before | Where-Object method -ne 'GET').Count -eq 0 -and @($f.gitCalls | Where-Object {$_.arguments[0] -eq 'push'}).Count -eq 0) 'Invalid recovery mutated a remote.'
+    }
+}
 Test 'review rejected creation reports the error and resumes after correction' {
     foreach ($case in @(@{kind='private';status=422},@{kind='public';status=403})) {
         $f=New-GitHubFixture;$id=New-ApiIdentity ('Rejected '+$case.kind)

@@ -24,11 +24,14 @@ function Get-ObsidianPluginRelease([string]$Id,[object[]]$Registry,[scriptblock]
     $skipped=[Collections.Generic.List[object]]::new()
     function Test-ReleaseCandidate($Release) {
         if ($Release.draft -or $Release.prerelease) {return $null}
-        $assets=@{};$reason=$null
+        $assets=@{};$digests=@{};$reason=$null
         foreach ($asset in $Release.assets) {
             if ($asset.name -notin @('manifest.json','main.js','styles.css')) {continue}
             if ($assets.ContainsKey($asset.name) -or -not $asset.browser_download_url.StartsWith("https://github.com/$repo/releases/download/",[StringComparison]::Ordinal)) {$reason='Unexpected asset identity.';break}
             $assets[$asset.name]=$asset.browser_download_url
+            $digest=if ($asset.ContainsKey('digest')) {$asset.digest} else {$null}
+            if ($digest -and $digest -notmatch '^sha256:[0-9a-fA-F]{64}$') {$reason='Unsupported or malformed asset digest.';break}
+            $digests[$asset.name]=$digest
         }
         if (-not $reason -and (-not $assets.ContainsKey('manifest.json') -or -not $assets.ContainsKey('main.js'))) {$reason='Missing manifest.json or main.js.'}
         if (-not $reason) {
@@ -41,7 +44,7 @@ function Get-ObsidianPluginRelease([string]$Id,[object[]]$Registry,[scriptblock]
             }
         }
         if ($reason) {$skipped.Add(@{tag=$Release.tag_name;reason=$reason});return $null}
-        return @{id=$Id;repository=$repo;tag=$Release.tag_name;version=$manifest.version;minAppVersion=$manifest.minAppVersion;assets=$assets;skipped=$skipped.ToArray()}
+        return @{id=$Id;repository=$repo;tag=$Release.tag_name;version=$manifest.version;minAppVersion=$manifest.minAppVersion;assets=$assets;digests=$digests;skipped=$skipped.ToArray()}
     }
     $selected=Test-ReleaseCandidate $response.Data
     if ($null -ne $selected) {return $selected}
@@ -60,6 +63,20 @@ function Get-ObsidianPluginRelease([string]$Id,[object[]]$Registry,[scriptblock]
         if ($null -ne $selected) {return $selected}
     }
     throw "Plugin '$Id' has no published release with consistent required assets and version metadata."
+}
+function Get-ObsidianDigestVerification([hashtable]$Release,[string]$Directory) {
+    $missing=[Collections.Generic.List[string]]::new()
+    foreach ($asset in $Release.assets.Keys) {
+        $file=Join-Path $Directory $asset
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or (Get-Item -LiteralPath $file -Force).LinkType) {throw "Plugin asset '$asset' is missing or linked."}
+        $digest=if ($Release.ContainsKey('digests') -and $Release.digests.ContainsKey($asset)) {$Release.digests[$asset]} else {$null}
+        if (-not $digest) {$missing.Add($asset);continue}
+        if ($digest -notmatch '^sha256:[0-9a-fA-F]{64}$') {throw "Plugin asset '$asset' has an unsupported or malformed digest."}
+        $actual=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        if ($actual -ine $digest.Substring(7)) {throw "Plugin asset '$asset' digest mismatch; preserve the current installation and retry only with the pinned release bytes."}
+    }
+    $status=if (-not $missing.Count) {'verified'} elseif ($missing.Count -eq $Release.assets.Count) {'unverified-by-digest'} else {'partial'}
+    return @{digestVerification=$status;assetsWithoutDigest=@($missing.ToArray() | Sort-Object)}
 }
 function Get-ObsidianJournalPath([hashtable]$Identity,[string]$StateRoot=(Get-BootstrapStateRoot)) {
     $key=Get-BootstrapContentHash ($Identity.fullName.ToLowerInvariant()+'|'+[IO.Path]::GetFullPath($Identity.vaultPath).TrimEnd('\','/').ToLowerInvariant())
@@ -209,7 +226,12 @@ function Install-ProjectObsidian(
                 if ($AppVersion -and [version]$AppVersion -lt [version]$manifest.minAppVersion) {throw "Installed plugin '$id' requires Obsidian $($manifest.minAppVersion)."}
                 $skipped=@()
                 if ($journal.plugins.ContainsKey($id) -and $journal.plugins[$id].ContainsKey('skipped')) {$skipped=$journal.plugins[$id].skipped}
-                $result.plugins+=@{id=$id;version=$manifest.version;filesVerified=$true;skipped=$skipped};continue
+                # Preserve app-managed updates, without reusing digests for a different version.
+                $installed=@{assets=@{'manifest.json'=$null;'main.js'=$null}}
+                if (Test-Path -LiteralPath (Join-Path $active 'styles.css')) {$installed.assets['styles.css']=$null}
+                if ($journal.plugins.ContainsKey($id) -and $journal.plugins[$id].version -ceq $manifest.version) {$installed=$journal.plugins[$id]}
+                $integrity=Get-ObsidianDigestVerification $installed $active
+                $result.plugins+=@{id=$id;version=$manifest.version;filesVerified=$true;skipped=$skipped;digestVerification=$integrity.digestVerification;assetsWithoutDigest=$integrity.assetsWithoutDigest};continue
             }
             if ($interrupted) {$release=$journal.operation.releases[$id]}
             else {
@@ -239,6 +261,7 @@ function Install-ProjectObsidian(
                     foreach ($child in Get-ChildItem -LiteralPath $change.active -Force) {Copy-Item -LiteralPath $child.FullName -Destination $stage -Recurse -Force}
                 }
                 foreach ($asset in $change.release.assets.Keys) {& $Download $change.release.assets[$asset] (Join-Path $stage $asset) | Out-Null}
+                $change.integrity=Get-ObsidianDigestVerification $change.release $stage
                 if (-not $change.release.assets.ContainsKey('styles.css') -and (Test-Path -LiteralPath (Join-Path $stage 'styles.css'))) {Remove-Item -LiteralPath (Join-Path $stage 'styles.css')}
                 $manifest=ConvertFrom-BootstrapJson ([IO.File]::ReadAllText((Join-Path $stage 'manifest.json')))
                 if ($manifest.id -cne $change.id -or $manifest.version -cne $change.release.version -or $manifest.minAppVersion -cne $change.release.minAppVersion -or (Get-Item -LiteralPath (Join-Path $stage 'main.js')).Length -eq 0) {throw "Downloaded plugin '$($change.id)' differs from its verified release."}
@@ -255,7 +278,7 @@ function Install-ProjectObsidian(
                     $journal.operation.promoted+=($change.id);Save-Vault
                     & $Promote (Join-Path $journal.operation.root ('stage/'+$change.id)) $change.active | Out-Null
                     $journal.plugins[$change.id]=$change.release
-                    $result.plugins+=@{id=$change.id;version=$change.release.version;filesVerified=$true;skipped=$change.release.skipped}
+                    $result.plugins+=@{id=$change.id;version=$change.release.version;filesVerified=$true;skipped=$change.release.skipped;digestVerification=$change.integrity.digestVerification;assetsWithoutDigest=$change.integrity.assetsWithoutDigest}
                 }
             } catch {Restore-VaultOperation;throw}
             # Retain backup files locally; journal points at the last complete backup for recovery.

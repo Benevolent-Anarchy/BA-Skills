@@ -23,7 +23,7 @@ pwsh -NoProfile -File scripts/bootstrap.ps1 -Mode local-setup -Repository 'C:\Us
 
 Add `-Parent`/`-Owner` when overridden. `-Interactive` prompts for missing inputs; normal agent use supplies them explicitly. Status/resume restore recorded inputs from name/owner. Local setup uses the clone's actual Git root and private remote identity; it never creates repositories. Add `-RefreshPlugins` for a deliberate update; ordinary repeated setup preserves installed plugins and preferences.
 
-Read the JSON result even after a nonzero exit. Report project URLs, local path, verified work and actionable pending items. `partial` means useful work remains; installed/configured plugin files do not establish that Obsidian loaded them. Report skipped inconsistent plugin releases alongside installed versions.
+Read the JSON result even after a nonzero exit. Report project URLs, local path, verified work and actionable pending items. `partial` means useful work remains; installed/configured plugin files do not establish that Obsidian loaded them. Report installed plugin versions, skipped inconsistent releases, each plugin's digest verification status and any assets without a published digest.
 
 For failures, recovery, public Pull requests settings or app enablement, read [operations.md](references/operations.md). Preserve conflicts and journals; never improvise rollback, overwrite a differing file, delete a repository, or adopt an unconfirmed repository identity.
 

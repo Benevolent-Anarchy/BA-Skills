@@ -209,14 +209,21 @@ function Test-ProjectDocumentation([string]$Repository) {
         try { $items=@(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop) } catch { Add-DocDiagnostic 'unreadable-file' ([IO.Path]::GetRelativePath($root,$dir)) 1 '' $_.Exception.Message; continue }
         foreach ($item in $items) {
             if ($item.Name -eq '.obsidian') {continue}
+            if ($dir -eq $vault -and $item.PSIsContainer -and $item.Name -ceq 'Vault Inspector Reports') {continue}
             if ($item.LinkType) { Add-DocDiagnostic 'linked-path' ([IO.Path]::GetRelativePath($root,$item.FullName)) 1 '' 'Documentation must be readable without following a linked path.'; continue }
             if ($item.PSIsContainer) {$queue.Enqueue($item.FullName)}
             elseif ($item.Extension -eq '.md') {Get-DocNote $item.FullName | Out-Null}
         }
     }
+    # Root entry points use repository-relative Markdown links, without corpus rules.
+    foreach ($item in Get-ChildItem -LiteralPath $root -File -Force -Filter '*.md') {
+        if ($item.LinkType) {Add-DocDiagnostic 'linked-path' $item.Name 1 '' 'Root documentation must be readable without following a linked path.';continue}
+        Get-DocNote $item.FullName | Out-Null
+    }
     foreach ($path in @($notes.Keys)) {
         $relative=[IO.Path]::GetRelativePath($root,$path).Replace('\','/')
         foreach ($link in $notes[$path].Links) {
+            if ((Split-Path $path -Parent) -eq $root -and $link.Kind -eq 'wiki') {continue}
             try {$resolved=Resolve-DocLink $path $link} catch {$resolved=@{Valid=$false;Reason=$_.Exception.Message}}
             if (-not $resolved.Valid) { Add-DocDiagnostic 'link-target' $relative $link.Line '' "$($link.Target): $($resolved.Reason)" }
         }
