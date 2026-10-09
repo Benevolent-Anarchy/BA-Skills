@@ -1,0 +1,37 @@
+# {{PROJECT_TITLE}} — Agent contract
+
+This is the canonical working process for every agent. Read docs/NEXT.md for orientation. The documentation vault is docs/; wikilinks use that root, Markdown links use the note location. No agent-specific workflow or plugin is required.
+
+1. Read `docs/NEXT.md` for orientation at session start and retrieve all open Issues, using pagination rather than accepting a tool's default truncated list. Labels and milestones show the kind of work and planned deliverables; dependencies and sub-issues stay with the Issues.
+
+2. Select work within the human's current direction. Inspect linked Issues and PRs before duplicating work. Record discussion and unresolved questions in Issues rather than creating a second task queue in documentation.
+
+3. Read `docs/DESIGN.md` and the relevant topical notes before changing intended behaviour or structure. Current intended state belongs in design notes; update those notes when it changes.
+
+4. Search the decision and judgement indexes for relevant titles and terms before changing a topic. Read the related records and follow cross-links. Do not load the entire corpus on every session start.
+
+5. Record significant reasoning and rejected alternatives in a topical decision file and index every entry. Preserve superseded entries, mark them in place with forward references, and say what survives.
+
+6. Record verdicts that required a person in topical judgement files. An automated test or an agent's inspection is not evidence that Cicely performed a human check. Capture the actual verdict, date, coverage, applicable hardware and conditions requiring a recheck.
+
+7. If a change calls a judgement into question, mark it provisional in place and create or update an Issue for the investigation. The Issue closes after a new human check is recorded, not merely after its suspected cause is explained.
+
+8. Close an Issue when its resolution is recorded in code, design, a decision or a judgement. A resolving PR uses `Closes #N`; an independently closed Issue points to its durable resolution. A duplicate or declined Issue records why it was closed.
+
+9. Prefix GitHub body text with the author's identity, such as `[Codex]`, `[Claude]`, `[Rool]`, the appropriate local agent name, or `[Cee]`. This covers Issue and PR descriptions, comments, review feedback and replies. Titles do not carry the prefix. Honour the current task's authorization for posting.
+
+10. Keep `NEXT.md` a small map to relevant parts of the project. Update it only when its orientation changes; do not append session history, test totals or an Issue queue. Ending a session alone does not require a documentation change or a PR.
+
+11. Use separate worktrees and small, reviewable changes. Verify repository root, branch, status and relationship to `main` before a new slice and after a reported merge. Use the host application's managed worktree/handoff facilities when it has them; do not leave a chat operating in a stale checkout while treating another path as its new workspace.
+
+12. Preserve existing work. Do not discard, stash or relocate another person's or agent's changes merely to make a workflow convenient.
+
+13. Before opening a PR, make the proposed project state ready for a fresh session to take over once review passes. Finish the implementation, record durable outcomes, link resolved or remaining Issues, and update orientation where needed. Run `tools/verify.ps1` against that finished state and require it to pass before opening the PR; earlier results do not cover subsequent changes. Do not rely on being able to make non-review-related changes after the review process starts.
+
+14. Open completed changes for ordinary PR review; Cicely retains merge control. Include the result, relevant verification and known limitations. `tools/verify.ps1` is the project's single verification gate; extend it as project checks are added rather than substituting a partial check for its complete result.
+
+15. Prefer small changes and clear code, introduce dependencies for a concrete reason, and keep logic deterministic and independently testable where practical. Add comments explaining purpose, contracts and non-obvious choices rather than restating syntax.
+
+16. Verify behaviour changes meaningfully and re-read new claims against the finished project state before calling work ready. Pay particular attention to claims about bounds, uniqueness and constants which later edits can invalidate.
+
+17. Keep temporary execution plans in ignored scratch space or the active conversation. Promote durable conclusions to design notes, decisions or judgements, unfinished work to Issues, and orientation to `NEXT.md`.

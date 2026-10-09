@@ -1,0 +1,16 @@
+# {{PROJECT_TITLE}} — Decisions
+
+This indexes significant reasoning in topical files under `decisions/`, so related choices are encountered together. Current intended behaviour belongs in [[DESIGN]], checks that required a person in [[JUDGEMENTS]], orientation in [[NEXT]], and unresolved matters in [Issues]({{ISSUES_URL}}).
+
+## Authoring a record
+
+Use real dated `## YYYY-MM-DD` groups and a unique `### Decision title` for each entry. Titles are durable citation keys. Record the choice, why it was made, rejected alternatives, evidence and any superseded record. Mark superseded entries in place and link forward; preserve history and say what survives. Update current design in the same change when intended behaviour changes.
+
+Group indexed entries beneath a heading linking their actual topic file. Link every title to its heading and add terms a reader might search for, including terms absent from the title. Cross-link related topics rather than duplicating a record. Wikilinks are relative to the `docs/` vault root; Markdown links are relative to the note. Remove `.gitkeep` when adding the first topic. `tools/verify.ps1` checks the file/title relationship and unique citation keys.
+
+```markdown
+### Interface — [[decisions/interface|Interface]]
+- [[decisions/interface#Keyboard navigation|Keyboard navigation]] — keyboard, focus
+```
+
+## Index

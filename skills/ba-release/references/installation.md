@@ -4,11 +4,14 @@ The repository owns one `skills/ba-release` directory. Do not copy the skill int
 game repositories or maintain agent-specific workflow forks.
 
 ```powershell
-pwsh -NoProfile -File <BA-Skills>/install.ps1 -IncludeWsl -CheckOnly
-pwsh -NoProfile -File <BA-Skills>/install.ps1 -IncludeWsl
-pwsh -NoProfile -File <BA-Skills>/install.ps1 -IncludeWsl -CheckOnly
+pwsh -NoProfile -File <BA-Skills>/install.ps1 -Skill ba-release -IncludeWsl -CheckOnly
+pwsh -NoProfile -File <BA-Skills>/install.ps1 -Skill ba-release -IncludeWsl
+pwsh -NoProfile -File <BA-Skills>/install.ps1 -Skill ba-release -IncludeWsl -CheckOnly
 pwsh -NoProfile -File <BA-Skills>/skills/ba-release/scripts/verify-discovery.ps1
 ```
+
+Select `-Skill ba-release` to install only this skill. Omitting `-Skill` selects
+all repository skills, including ba-bootstrap's two mandatory native aliases.
 
 The installer detects executables on each environment's PATH and preflights all
 selected links before making any. It preserves all other skills and refuses a

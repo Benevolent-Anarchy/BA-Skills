@@ -11,16 +11,16 @@ function Invoke-WslScript([string]$Distribution, [string]$Script, [string[]]$Arg
 }
 
 # Uses each runtime's own home and installed executables; never maps a Windows home to Linux.
-function Get-ReleaseSkillTargets([switch]$IncludeWsl, [string[]]$WslDistribution = @()) {
+function Get-ReleaseSkillTargets([switch]$IncludeWsl, [string[]]$WslDistribution = @(), [ValidatePattern('^[a-z0-9]+(?:-[a-z0-9]+)*$')][string]$SkillName='ba-release', [switch]$IncludeNativeAliases) {
     $targets = [Collections.Generic.List[object]]::new()
     $userDirectory = [Environment]::GetFolderPath('UserProfile')
     if (-not $userDirectory) { throw 'Cannot resolve the current user home.' }
-    if (Get-Command codex -ErrorAction SilentlyContinue) {
-        $targets.Add(@{agent='codex'; platform='local'; path=(Join-Path $userDirectory '.agents/skills/ba-release')})
+    if ($IncludeNativeAliases -or (Get-Command codex -ErrorAction SilentlyContinue)) {
+        $targets.Add(@{agent='codex'; platform='local'; path=(Join-Path $userDirectory ".agents/skills/$SkillName")})
     }
-    if (Get-Command claude -ErrorAction SilentlyContinue) {
+    if ($IncludeNativeAliases -or (Get-Command claude -ErrorAction SilentlyContinue)) {
         $claudeDirectory = if ($env:CLAUDE_CONFIG_DIR) { [IO.Path]::GetFullPath($env:CLAUDE_CONFIG_DIR) } else { Join-Path $userDirectory '.claude' }
-        $targets.Add(@{agent='claude'; platform='local'; path=(Join-Path $claudeDirectory 'skills/ba-release')})
+        $targets.Add(@{agent='claude'; platform='local'; path=(Join-Path $claudeDirectory "skills/$SkillName")})
     }
     if ($IncludeWsl -and $IsWindows -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
         if ($WslDistribution.Count -eq 0) {
@@ -29,11 +29,11 @@ function Get-ReleaseSkillTargets([switch]$IncludeWsl, [string[]]$WslDistribution
             $WslDistribution = @(($listed -join "`n").Replace([string][char]0,'').Split("`n") | ForEach-Object {$_.Trim()} | Where-Object {$_})
         }
         $probe = @'
-if command -v codex >/dev/null 2>&1; then printf 'codex\t%s\n' "$HOME/.agents/skills/ba-release"; fi
-if command -v claude >/dev/null 2>&1; then printf 'claude\t%s\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/ba-release"; fi
+if command -v codex >/dev/null 2>&1; then printf 'codex\t%s\n' "$HOME/.agents/skills/$1"; fi
+if command -v claude >/dev/null 2>&1; then printf 'claude\t%s\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/$1"; fi
 '@
         foreach ($distribution in $WslDistribution) {
-            $result = Invoke-WslScript $distribution $probe
+            $result = Invoke-WslScript $distribution $probe @($SkillName)
             foreach ($line in $result.Split("`n")) {
                 if (-not $line) { continue }
                 $fields = $line.Split("`t")
@@ -46,7 +46,7 @@ if command -v claude >/dev/null 2>&1; then printf 'claude\t%s\n' "${CLAUDE_CONFI
 }
 
 # Preflights the complete target set, then creates only missing links; repeated runs are no-ops.
-function Install-ReleaseSkill([string]$Source, [object[]]$Targets, [switch]$CheckOnly) {
+function Install-ReleaseSkill([string]$Source, [object[]]$Targets, [switch]$CheckOnly, [ValidatePattern('^[a-z0-9]+(?:-[a-z0-9]+)*$')][string]$SkillName='ba-release') {
     $sourceItem = Get-Item -LiteralPath $Source
     if (-not $sourceItem.PSIsContainer -or -not (Test-Path -LiteralPath (Join-Path $Source 'SKILL.md') -PathType Leaf)) { throw 'Canonical SKILL.md is missing.' }
     $canonical = if ($sourceItem.LinkType) { $sourceItem.ResolveLinkTarget($true).FullName } else { $sourceItem.FullName }
@@ -62,7 +62,7 @@ parent=$(dirname -- "$2")
 while [ ! -e "$parent" ] && [ ! -L "$parent" ]; do parent=$(dirname -- "$parent"); done
 if [ ! -d "$parent" ]; then printf 'conflict-parent'; exit 0; fi
 if [ "$3" = codex ]; then
-  legacy=${4:-${CODEX_HOME:-$HOME/.codex}/skills/ba-release}
+  legacy=${4:-${CODEX_HOME:-$HOME/.codex}/skills/$5}
   if [ -e "$legacy" ] || [ -L "$legacy" ]; then
     if [ ! -L "$legacy" ] || [ "$(readlink -f -- "$legacy")" != "$(readlink -f -- "$1")" ]; then printf 'conflict-legacy'; exit 0; fi
   fi
@@ -72,7 +72,7 @@ if [ -e "$2" ] || [ -L "$2" ]; then
 else printf 'missing'; fi
 '@
             $legacyPath = if ($target.Contains('legacyPath')) {$target.legacyPath} else {''}
-            $record.status = Invoke-WslScript $target.distribution $probe @($linuxSource,$target.path,$target.agent,$legacyPath)
+            $record.status = Invoke-WslScript $target.distribution $probe @($linuxSource,$target.path,$target.agent,$legacyPath,$SkillName)
             $record.source = $linuxSource
             if ($record.status -notin @('missing','already-linked')) { throw "Installation conflict at $($target.distribution):$($target.path) ($($record.status)). Nothing was replaced." }
         } elseif ($target.platform -eq 'local') {
@@ -101,7 +101,7 @@ else printf 'missing'; fi
             # Detect conflicting legacy Codex aliases without writing another copy there.
             if ($target.agent -eq 'codex') {
                 $legacyRoot = if ($env:CODEX_HOME) {$env:CODEX_HOME} else {Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex'}
-                $legacyPath = Join-Path $legacyRoot 'skills/ba-release'
+                $legacyPath = if ($target.Contains('legacyPath')) {$target.legacyPath} else {Join-Path $legacyRoot "skills/$SkillName"}
                 $legacy = Get-Item -LiteralPath $legacyPath -Force -ErrorAction SilentlyContinue
                 if ($legacy) {
                     $resolvedLegacy = if ($legacy.LinkType) {$legacy.ResolveLinkTarget($true)} else {$null}
