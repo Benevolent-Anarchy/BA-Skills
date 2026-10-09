@@ -7,3 +7,17 @@ function New-PresetPrerequisiteFixture([string]$Missing='', [string]$GodotVersio
     }.GetNewClosure()
     return $fixture
 }
+function New-PresetMetadataFixture {
+    $fixture=@{fail=$false;calls=[Collections.Generic.List[string]]::new();tauri=@{versions=@(@{num='3.0.0';yanked=$false},@{num='3.1.0-beta.1';yanked=$false},@{num='9.0.0';yanked=$true},@{num='2.99.0';yanked=$false})};npm=@{'dist-tags'=@{latest='4.0.0'};versions=@{'4.0.0'=@{version='4.0.0';dist=@{tarball='https://registry.npmjs.org/create-tauri-app/-/create-tauri-app-4.0.0.tgz';integrity=('sha512-'+[Convert]::ToBase64String([byte[]]::new(64)))}}}}}
+    $fixture.request={param($uri)
+        $fixture.calls.Add($uri)
+        if ($fixture.fail) {throw 'HTTP metadata unavailable'}
+        switch ($uri) {
+            'https://crates.io/api/v1/crates/tauri' {return $fixture.tauri}
+            'https://registry.npmjs.org/create-tauri-app' {return $fixture.npm}
+            'https://api.github.com/repos/bitwes/Gut/git/ref/tags/v9.7.1' {return @{object=@{type='commit';sha=('a'*40)}}}
+            default {throw "Unexpected metadata URI: $uri"}
+        }
+    }.GetNewClosure()
+    return $fixture
+}

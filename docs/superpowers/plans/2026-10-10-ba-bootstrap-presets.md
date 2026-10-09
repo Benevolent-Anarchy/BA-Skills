@@ -258,7 +258,7 @@ This records added fields alongside the existing identity/ref data. Store prepar
 
 **Interfaces:** Produce `Get-BootstrapDependencyResolution` and `Receive-BootstrapArtifact`. Selection is pure metadata inspection; acquisition writes only an explicit owned destination. No GitHub repository mutation or global SDK installation.
 
-- [ ] **Add failing stable-selection cases.** Fixture metadata resembles npm's package record and crates.io's versions response. Use versions from two stable majors plus a newer prerelease/yanked release. Exercise this Tauri-major test, transport errors, inconsistent metadata and published integrity mismatch.
+- [x] **Add failing stable-selection cases.** Fixture metadata resembles npm's package record and crates.io's versions response. Use versions from two stable majors plus a newer prerelease/yanked release. Exercise this Tauri-major test, transport errors, inconsistent metadata and published integrity mismatch.
 
 ```powershell
 Test 'dependency resolution selects a new stable Tauri major without a ceiling' {
@@ -280,8 +280,8 @@ Test 'dependency resolution selects a new stable Tauri major without a ceiling' 
 }
 ```
 
-- [ ] **Run `dependency*` cases and establish the missing-resolver failure.** The simulated versions test policy; it is not evidence that Tauri v3 compiles.
-- [ ] **Implement resolution/acquisition adapters.** Read stable Tauri crate releases from crates.io metadata, excluding yanked/prerelease versions and comparing SemVer numerically. Resolve a stable official `create-tauri-app` npm release independently, retain its exact version/tarball/SRI metadata and record it before execution. Check that the generated/locked project actually resolves the selected Tauri crate. Do not assume CLI/API/generator versions have identical numbers; upstream compatibility and native build decide compatibility. A transport error is a failure, not a reason to try an older major.
+- [x] **Run `dependency*` cases and establish the missing-resolver failure.** The simulated versions test policy; it is not evidence that Tauri v3 compiles.
+- [x] **Implement resolution/acquisition adapters.** Read stable Tauri crate releases from crates.io metadata, excluding yanked/prerelease versions and comparing SemVer numerically. Resolve a stable official `create-tauri-app` npm release independently, retain its exact version/tarball/SRI metadata and record it before execution. Check that the generated/locked project actually resolves the selected Tauri crate. Do not assume CLI/API/generator versions have identical numbers; upstream compatibility and native build decide compatibility. A transport error is a failure, not a reason to try an older major.
 
 ```powershell
 $resolution = @{
@@ -294,8 +294,8 @@ $resolution = @{
 ```
 
 For Godot, the recipe selects released GUT 9.7.1 and checks Godot 4.7 compatibility. Acquire its upstream source archive, preserve licences and retain archive SHA-256 plus any published digest/immutable commit evidence. Validate archive extraction paths and links before extraction; no archive entry may escape staging. Published integrity mismatch fails before inclusion. Missing published proof is reported as such; a locally computed hash proves repeatability, not upstream authorship. npm's normal SRI verification remains enabled for generator/dependencies.
-- [ ] **Test retained evidence and retry identity.** Record an acquired artifact, change fixture metadata/bytes, then replay using the recorded resolution and enforce its digest. Test nested archive paths, traversal, symbolic links, missing licence/plugin files and metadata HTTP failure. Never treat the Godot-compatible pin as the Obsidian plugin policy; their release-selection logic remains separate.
-- [ ] **Run dependency/preparation suites**, then commit: `feat: resolve stable engine dependencies with retained integrity receipts`.
+- [x] **Test retained evidence and retry identity.** Record an acquired artifact, change fixture metadata/bytes, then replay using the recorded resolution and enforce its digest. Test nested archive paths, traversal, symbolic links, missing licence/plugin files and metadata HTTP failure. Never treat the Godot-compatible pin as the Obsidian plugin policy; their release-selection logic remains separate.
+- [x] **Run dependency/preparation suites**, then commit: `feat: resolve stable engine dependencies with retained integrity receipts`.
 
 ## Task 5: Godot source and complete GUT gate
 
