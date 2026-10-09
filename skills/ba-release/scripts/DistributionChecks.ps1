@@ -33,7 +33,7 @@ function Invoke-ReleaseDistributionChecks($Settings, $State, [string]$StatePath,
                         Move-Item -LiteralPath $file.FullName -Destination $target
                         $moves.Add(@{original=$file.FullName;held=$target})
                     }
-                    $arguments=@($check.arguments | ForEach-Object {$_.Replace('{artifact}',$directory).Replace('{platform}',$preset.platform).Replace('{repository}',$Settings.repository)})
+                    $arguments=@($check.arguments | ForEach-Object {$_.Replace('{artifact}',$directory).Replace('{platform}',$preset.platform).Replace('{repository}',$Settings.repository).Replace('{filename}',$preset.filename)})
                     $result=Invoke-ReleaseTool (Resolve-ReleasePath $Settings.repository $check.script -Leaf) $arguments $directory
                     if ($result.exitCode -ne 0) {throw 'Standalone functionality check failed.'}
                     $record.standalone='succeeded'

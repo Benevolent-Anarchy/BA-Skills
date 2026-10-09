@@ -70,15 +70,13 @@ if (-not (Get-ChildItem $ArtifactDirectory -File | Where-Object {($_.Name -like 
 exit 0
 '@ | Set-Content (Join-Path $repo 'tools/standalone.ps1')
     $config = [ordered]@{
-        schemaVersion = 1; project = '.'; previousReleaseRef = 'v1.2.2'
-        exports = @('Windows existing','Linux existing')
-        verification = @{ script = 'tools/verify.ps1'; arguments = @() }
-        standalone=@(@{preset='Windows existing';script='tools/standalone.ps1';arguments=@('{artifact}')},@{preset='Linux existing';script='tools/standalone.ps1';arguments=@('{artifact}')})
-        destinations = @(
-            @{ id='itch-windows'; type='itch'; preset='Windows existing'; target='example/real-game:windows'; ignore=@('steam_api*.dll','libsteam_api.so','libgodotsteam.*','steam_appid.txt') },
-            @{ id='itch-linux'; type='itch'; preset='Linux existing'; target='example/real-game:linux'; ignore=@('steam_api*.dll','libsteam_api.so','libgodotsteam.*','steam_appid.txt') },
-            @{ id='notes'; type='notes' }
-        )
+        schemaVersion=1;project='.';previousRelease='v1.2.2';androidVersionCodePolicy='existing'
+        exports=[ordered]@{windows='Windows existing';linux='Linux existing'}
+        verification=@{gate=@{script='tools/verify.ps1';arguments=@()};standalone=@{exports=@('windows','linux');script='tools/standalone.ps1';arguments=@('{artifact}')}}
+        distributions=[ordered]@{
+            itch=@{game='example/real-game';channels=[ordered]@{windows='windows';linux='linux'};ignore=@('steam_api*.dll','libsteam_api.so','libgodotsteam.*','steam_appid.txt')}
+            notes=$true
+        }
     }
     Write-Json (Join-Path $repo 'release.json') $config
     Invoke-FixtureGit $repo @('add','.') | Out-Null
@@ -149,9 +147,9 @@ Test 'read-only plan uses Godot version, history, explicit selection and derived
 }
 Test 'missing publication facts block planning without inventing values' {
     $repo = New-Fixture 'missing'
-    Change-Config $repo { param($c) $c.previousReleaseRef=$null; $c.destinations[0].target=$null }
+    Change-Config $repo { param($c) $c.previousRelease=$null; $c.distributions.itch.game=$null }
     $plan = Get-ReleasePlan $repo @('itch-windows')
-    Assert (($plan.blockers -join ' ') -match 'previousReleaseRef' -and ($plan.blockers -join ' ') -match 'target') 'Missing facts not reported.'
+    Assert (($plan.blockers -join ' ') -match 'previousRelease' -and ($plan.blockers -join ' ') -match 'target') 'Missing facts not reported.'
     Assert ($plan.changes.Count -eq 0) 'Invented previous release.'
     Expect-Error { Get-ReleasePlan $repo @('made-up') } 'Unknown destination'
 }
@@ -169,10 +167,10 @@ Test 'validation rejects nonexistent presets, escaping paths, unknown settings a
     $repo = New-Fixture 'invalid'
     $original = Get-Content (Join-Path $repo 'release.json') -Raw
     foreach ($case in @(
-        @{change={param($c) $c.exports=@('Invented preset')}; error='preset'},
+        @{change={param($c) $c.exports.windows='Invented preset'}; error='preset'},
         @{change={param($c) $c.project='../outside'}; error='inside'},
         @{change={param($c) $c.token='secret'}; error='credential|Unknown'},
-        @{change={param($c) $c.verification.arguments=@('--password','secret')}; error='credential'},
+        @{change={param($c) $c.verification.gate.arguments=@('--password','secret')}; error='credential'},
         @{change={param($c) $c.schemaVersion=9}; error='schemaVersion'},
         @{change={param($c) $c.version='9.9.9'}; error='Unknown'}
     )) {
@@ -185,7 +183,7 @@ Test 'ref must resolve to an ancestor and empty selection never means all' {
     $repo = New-Fixture 'refs'
     $plan = Get-ReleasePlan $repo @()
     Assert ($plan.selectedDestinations.Count -eq 0 -and ($plan.blockers -join ' ') -match 'Select') 'Empty selection published all.'
-    Change-Config $repo {param($c) $c.previousReleaseRef='missing-ref'}
+    Change-Config $repo {param($c) $c.previousRelease='missing-ref'}
     Expect-Error { Get-ReleasePlan $repo @('notes') } 'ref'
 }
 
@@ -345,7 +343,7 @@ Test 'validation rejects duplicate keys, malformed origin and symlink escape' {
     $outside = Join-Path $sandbox 'outside'; New-Item -ItemType Directory $outside | Out-Null
     Copy-Item -LiteralPath (Join-Path $repo 'tools/verify.ps1') -Destination (Join-Path $outside 'verify.ps1')
     New-Item -ItemType $(if ($IsWindows) {'Junction'} else {'SymbolicLink'}) -Path (Join-Path $repo 'escape') -Target $outside | Out-Null
-    Change-Config $repo {param($c) $c.verification.script='escape/verify.ps1'}
+    Change-Config $repo {param($c) $c.verification.gate.script='escape/verify.ps1'}
     Expect-Error { Get-ReleaseConfiguration $repo } 'inside'
 }
 
@@ -391,11 +389,9 @@ gradle_build/use_gradle_build=true
 gradle_build/export_format=1
 '@ | Add-Content (Join-Path $repo 'export_presets.cfg')
     Change-Config $repo {param($c)
-        $c.exports += 'Android existing AAB'
-        $c.destinations += @(
-            @{id='steam';type='steam';appId=100;branch='default';depots=@(@{id=101;preset='Windows existing';exclude=@('*.pdb')},@{id=102;preset='Linux existing';exclude=@('*.pdb')})},
-            @{id='google-play';type='google-play';preset='Android existing AAB';track='production';releaseStatus='completed';userFraction=$null;language='en-US';retainVersionCodes=@('11')}
-        )
+        $c.exports.aab='Android existing AAB'
+        $c.distributions.steam=@{appId=100;branch='default';exclude=@('*.pdb');depots=[ordered]@{'101'='windows';'102'='linux'}}
+        $c.distributions['google-play']=@{export='aab';track='production';releaseStatus='completed';language='en-US';retainVersionCodes=@('11')}
     }
     Invoke-FixtureGit $repo @('add','release.json','export_presets.cfg') | Out-Null
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Configure inspected store exports') | Out-Null
@@ -416,9 +412,9 @@ gradle_build/use_gradle_build=false
 gradle_build/export_format=0
 '@ | Add-Content (Join-Path $repo 'export_presets.cfg')
     Change-Config $repo {param($c)
-        $c.exports+='Android existing APK'
-        $c.destinations[0].displayNameTemplate='{title} {version} ({os})'
-        $c.destinations+=@{id='itch-android';type='itch';preset='Android existing APK';target='example/real-game:android';ignore=@('steam_api*.dll','libsteam_api.so','libgodotsteam.*','steam_appid.txt');displayNameTemplate='{title} {version} ({os})'}
+        $c.exports.apk='Android existing APK'
+        $c.distributions.itch.channels.windows=@{export='windows';displayNameTemplate='{title} {version} ({os})'}
+        $c.distributions.itch.channels.android=@{export='apk';displayNameTemplate='{title} {version} ({os})'}
         $c.androidVersionCodePolicy='increment-selected'
     }
     Invoke-FixtureGit $repo @('add','.') | Out-Null
@@ -575,12 +571,12 @@ Test 'committed Play edit reconciliation recognizes an identical deployed track 
 }
 Test 'store settings retain unknown facts as blockers and reject incompatible Android/version/rollout data' {
     $repo=New-StoreFixture 'stores-validation'
-    Change-Config $repo {param($c) $c.destinations[3].branch=$null;$c.destinations[4].track=$null;$c.destinations[4].releaseStatus=$null;$c.destinations[4].language=$null;$c.destinations[4].retainVersionCodes=$null}
+    Change-Config $repo {param($c) $c.distributions.steam.branch=$null;$c.distributions['google-play'].track=$null;$c.distributions['google-play'].releaseStatus=$null;$c.distributions['google-play'].language=$null;$c.distributions['google-play'].retainVersionCodes=$null}
     $plan=Get-ReleasePlan $repo @('steam','google-play')
     Assert (-not $plan.ready -and ($plan.blockers -join ' ') -match 'Steam branch' -and ($plan.blockers -join ' ') -match 'retainVersionCodes') 'Missing store facts were guessed.'
-    Change-Config $repo {param($c) $c.destinations[4].releaseStatus='completed';$c.destinations[4].userFraction=0.5}
+    Change-Config $repo {param($c) $c.distributions['google-play'].releaseStatus='completed';$c.distributions['google-play'].userFraction=0.5}
     Expect-Error {Get-ReleaseConfiguration $repo} 'userFraction'
-    Change-Config $repo {param($c) $c.destinations[4].userFraction=$null}
+    Change-Config $repo {param($c) $c.distributions['google-play'].userFraction=$null}
     $presetFile=Join-Path $repo 'export_presets.cfg'
     $text=[IO.File]::ReadAllText($presetFile)
     [IO.File]::WriteAllText($presetFile,$text.Replace('version/name=""','version/name="99.0.0"'))
@@ -642,14 +638,14 @@ Test 'state staging refuses an outside link into the source repository before an
 }
 Test 'setup inspects actual project and asks only missing facts for selected stores without writes' {
     $repo=New-StoreFixture 'setup-report'
-    Change-Config $repo {param($c) $c.previousReleaseRef=$null;$c.destinations[0].target=$null;$c.destinations[3].branch=$null;$c.destinations[4].track=$null}
+    Change-Config $repo {param($c) $c.previousRelease=$null;$c.distributions.itch.game=$null;$c.distributions.steam.branch=$null;$c.distributions['google-play'].track=$null}
     $configPath=Join-Path $repo 'release.json'
     $before=(Get-FileHash $configPath).Hash
     $report=Get-ReleaseSetup $repo @('itch-windows','steam')
     Assert ($report.facts.version -eq '1.2.3' -and $report.facts.presets[2].versionCode -eq 12) 'Setup did not inspect actual Godot facts.'
     $keys=@($report.questions | ForEach-Object {$_.key})
-    Assert ($keys -contains 'previousReleaseRef' -and $keys -contains 'itch-windows.target' -and $keys -contains 'steam.branch') 'Setup omitted required questions.'
-    Assert (-not ($keys -contains 'google-play.track')) 'Holding Google Play still required its track.'
+    Assert ($keys -contains 'previousRelease' -and $keys -contains 'distributions.itch.game' -and $keys -contains 'distributions.steam.branch') 'Setup omitted required questions.'
+    Assert (-not ($keys -contains 'distributions.google-play.track')) 'Holding Google Play still required its track.'
     Assert ($before -eq (Get-FileHash $configPath).Hash) 'Setup inspection changed configuration.'
 }
 Test 'setup creates an inspected configuration and refuses stale, secret or invalid answers' {
@@ -658,13 +654,13 @@ Test 'setup creates an inspected configuration and refuses stale, secret or inva
     $report=Get-ReleaseSetup $repo
     Assert ($report.configSha256 -eq 'missing' -and $report.facts.presets[0].name -eq 'Windows existing') 'Missing-config setup invented presets.'
     $answersPath=Join-Path $sandbox 'setup-answers.json'
-    Write-Json $answersPath @{stores=@('itch','notes');previousReleaseRef='v1.2.2';'itch-windows.target'='example/real-game:windows';'itch-linux.target'='example/real-game:linux'}
+    Write-Json $answersPath @{stores=@('itch','notes');previousRelease='v1.2.2';'distributions.itch.game'='example/real-game';'distributions.itch.channels'=@{windows='windows';linux='linux'}}
     $written=Set-ReleaseSetup -Repository $repo -AnswersPath $answersPath -ExpectedConfigSha256 'missing'
     Assert ($written.written -and (Get-ReleaseConfiguration $repo).config.exports[0] -eq 'Windows existing') 'Setup did not save an inspected valid config.'
     $hash=(Get-FileHash (Join-Path $repo 'release.json')).Hash
     Expect-Error {Set-ReleaseSetup -Repository $repo -AnswersPath $answersPath -ExpectedConfigSha256 'missing'} 'changed|conflict'
-    Write-Json $answersPath @{'itch-windows.target'='made up';'previousReleaseRef'='v1.2.2'}
-    Expect-Error {Set-ReleaseSetup -Repository $repo -AnswersPath $answersPath -ExpectedConfigSha256 $hash.ToLowerInvariant()} 'Butler target'
+    Write-Json $answersPath @{'distributions.itch.game'='made up';'previousRelease'='v1.2.2'}
+    Expect-Error {Set-ReleaseSetup -Repository $repo -AnswersPath $answersPath -ExpectedConfigSha256 $hash.ToLowerInvariant()} 'Butler owner/game'
     Write-Json $answersPath @{token='forbidden'}
     Expect-Error {Set-ReleaseSetup -Repository $repo -AnswersPath $answersPath -ExpectedConfigSha256 $hash.ToLowerInvariant()} 'Credentials'
     Assert ($hash -eq (Get-FileHash (Join-Path $repo 'release.json')).Hash) 'Rejected setup answers changed a file.'
@@ -681,7 +677,7 @@ Test 'setup separates editable source files from missing release information and
 }
 Test 'setup store edits preserve counter policy and deliberately unknown channel baselines' {
     $repo=New-Fixture 'setup-preserve'
-    Change-Config $repo {param($c) $c.androidVersionCodePolicy='existing';$c.destinationBaselines=@{'itch-windows'='v1.2.2';'itch-linux'=$null}}
+    Change-Config $repo {param($c) $c.androidVersionCodePolicy='existing';$c.distributions.itch.channels.linux=@{export='linux';previousRelease=$null}}
     $hash=(Get-FileHash (Join-Path $repo 'release.json')).Hash.ToLowerInvariant()
     $answers=Join-Path $sandbox 'preserve-answers.json';Write-Json $answers @{stores=@('itch','notes')}
     Set-ReleaseSetup $repo $answers $hash | Out-Null
@@ -701,15 +697,15 @@ Test 'setup inspects a nested actual Godot project and leaves ambiguous project 
     Copy-Item -LiteralPath (Join-Path $project 'export_presets.cfg') -Destination $other
     $report=Get-ReleaseSetup $repo
     Assert ($report.questions[0].key -eq 'project' -and $null -eq $report.configuration) 'Ambiguous projects were silently selected.'
-    $answers=Join-Path $sandbox 'nested-answers.json';Write-Json $answers @{project='game';stores=@('itch','notes');previousReleaseRef='v1.2.2'}
+    $answers=Join-Path $sandbox 'nested-answers.json';Write-Json $answers @{project='game';stores=@('itch','notes');previousRelease='v1.2.2'}
     Set-ReleaseSetup $repo $answers 'missing' | Out-Null
     Assert ((Get-ReleaseConfiguration $repo).config.project -eq 'game') 'Setup did not use the explicitly chosen real project.'
 }
-Test 'setup asks for standalone checks when an older configuration has no check entries' {
+Test 'setup asks for standalone checks when configuration has no check entries' {
     $repo=New-Fixture 'setup-missing-checks'
-    Change-Config $repo {param($c) $c.Remove('standalone') | Out-Null}
+    Change-Config $repo {param($c) $c.verification.Remove('standalone') | Out-Null}
     $report=Get-ReleaseSetup $repo @('itch-windows')
-    Assert (@($report.questions | Where-Object {$_.key -eq 'standalone'}).Count -eq 1) 'Missing standalone check was not asked about.'
+    Assert (@($report.questions | Where-Object {$_.key -eq 'verification.standalone'}).Count -eq 1) 'Missing standalone check was not asked about.'
 }
 Test 'interactive setup exposes newly chosen store questions and writes one validated config' {
     $repo=New-StoreFixture 'interactive-setup'
@@ -719,19 +715,19 @@ Test 'interactive setup exposes newly chosen store questions and writes one vali
         $asked.Add($question.key)
         switch ($question.key) {
             'stores' {'steam,google-play,notes'}
-            'previousReleaseRef' {'v1.2.2'}
-            'steam.appId' {'100'}
-            'steam.branch' {'default'}
-            'steam.depots' {'[{"id":101,"preset":"Windows existing","exclude":[]},{"id":102,"preset":"Linux existing","exclude":[]}]'}
-            'google-play.track' {'production'}
-            'google-play.releaseStatus' {'completed'}
-            'google-play.language' {'en-US'}
-            'google-play.retainVersionCodes' {'[]'}
-            default {if ($question.key -like 'baseline.*') {'v1.2.2'} else {''}}
+            'previousRelease' {'v1.2.2'}
+            'distributions.steam.appId' {'100'}
+            'distributions.steam.branch' {'default'}
+            'distributions.steam.depots' {'{"101":"windows","102":"linux"}'}
+            'distributions.google-play.track' {'production'}
+            'distributions.google-play.releaseStatus' {'completed'}
+            'distributions.google-play.language' {'en-US'}
+            'distributions.google-play.retainVersionCodes' {'[]'}
+            default {if ($question.key -like '*.previousRelease') {'v1.2.2'} else {''}}
         }
     }.GetNewClosure()
     $result=Invoke-ReleaseInteractiveSetup $repo @() $prompt
-    Assert ($result.written -and $asked.Contains('steam.appId') -and $asked.Contains('google-play.track') -and -not $asked.Contains('itch-windows.target')) 'Wizard did not adapt to the selected stores.'
+    Assert ($result.written -and $asked.Contains('distributions.steam.appId') -and $asked.Contains('distributions.google-play.track') -and -not $asked.Contains('distributions.itch.game')) 'Wizard did not adapt to the selected stores.'
     Assert ((Get-ReleasePlan $repo @('steam','google-play')).configurationReady) 'Wizard wrote incomplete selected store settings.'
 }
 Test 'itch supports the inspected signed APK and plans its display label without another desktop export' {
@@ -750,14 +746,14 @@ gradle_build/use_gradle_build=false
 gradle_build/export_format=0
 '@ | Add-Content (Join-Path $repo 'export_presets.cfg')
     Change-Config $repo {param($c)
-        $c.exports+='Android existing APK'
-        $c.destinations[0].displayNameTemplate='{title} {version} ({os})'
-        $c.destinations+=@{id='itch-android';type='itch';preset='Android existing APK';target='example/real-game:android';ignore=@('steam_api*.dll','libsteam_api.so','libgodotsteam.*','steam_appid.txt');displayNameTemplate='{title} {version} ({os})'}
+        $c.exports.apk='Android existing APK'
+        $c.distributions.itch.channels.windows=@{export='windows';displayNameTemplate='{title} {version} ({os})'}
+        $c.distributions.itch.channels.android=@{export='apk';displayNameTemplate='{title} {version} ({os})'}
     }
     Invoke-FixtureGit $repo @('add','.') | Out-Null
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Configure signed itch APK') | Out-Null
     $plan=Get-ReleasePlan $repo @('steam','itch-windows','itch-android')
-    Assert ($plan.destinations[0].displayName -eq 'Fixture 1.2.3 (Windows)' -and $plan.destinations[5].displayName -eq 'Fixture 1.2.3 (Android)') 'Itch label did not use Godot title/version and actual platform.'
+    Assert ($plan.destinations[0].displayName -eq 'Fixture 1.2.3 (Windows)' -and @($plan.destinations | Where-Object id -EQ 'itch-android')[0].displayName -eq 'Fixture 1.2.3 (Android)') 'Itch label did not use Godot title/version and actual platform.'
     $prepared=Invoke-ReleasePrepare $repo @('steam','itch-windows','itch-android') (Join-Path $sandbox 'apk-state') $engine
     $state=Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
     Assert ($state.artifacts.Count -eq 3 -and @($state.artifacts | Where-Object {$_.preset -eq 'Windows existing'}).Count -eq 1) 'Desktop exports were repeated per store.'
@@ -766,7 +762,7 @@ gradle_build/export_format=0
     try {$result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 $notesHash}
     finally {Remove-Item Env:BA_STEAM_USERNAME}
     Assert ($result.destinations['itch-windows'].status -eq 'awaiting-store-action' -and $result.destinations['itch-windows'].remote.live) 'Live Butler upload with an outstanding label update was hidden.'
-    Change-Config $repo {param($c) $c.destinations[4].preset='Android existing APK'}
+    Change-Config $repo {param($c) $c.distributions['google-play'].export='apk'}
     Expect-Error {Get-ReleaseConfiguration $repo} 'AAB'
 }
 Test 'standalone checks withhold only excluded files on both desktops and Butler dry-run must agree' {
@@ -808,7 +804,7 @@ Test 'independent stores can catch up later without rebuilding desktops, repeati
 }
 Test 'extension rejects unrelated source changes before reserving an Android counter' {
     $repo=New-StoreFixture 'extension-source-conflict'
-    Change-Config $repo {param($c) $c.androidVersionCodePolicy='increment-once'}
+    Change-Config $repo {param($c) $c.androidVersionCodePolicy='increment-selected'}
     Invoke-FixtureGit $repo @('add','release.json') | Out-Null
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Choose Android counter') | Out-Null
     $prepared=Invoke-ReleasePrepare $repo @('steam') (Join-Path $sandbox 'extension-conflict-state') $engine
@@ -833,7 +829,7 @@ Test 'extension freezes already submitted locale notes while allowing new destin
 }
 Test 'later Play inclusion reserves its counter once and retains accurate desktop artifact provenance' {
     $repo=New-StoreFixture 'later-play-counter'
-    Change-Config $repo {param($c) $c.androidVersionCodePolicy='increment-once'}
+    Change-Config $repo {param($c) $c.androidVersionCodePolicy='increment-selected'}
     Invoke-FixtureGit $repo @('add','release.json') | Out-Null
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Choose Android counter') | Out-Null
     $prepared=Invoke-ReleasePrepare $repo @('steam') (Join-Path $sandbox 'later-play-state') $engine
@@ -851,7 +847,7 @@ Test 'later Play inclusion reserves its counter once and retains accurate deskto
 }
 Test 'uncertain Steam upload retains its artifact source when a later Android counter commit extends the release' {
     $repo=New-StoreFixture 'uncertain-provenance'
-    Change-Config $repo {param($c) $c.androidVersionCodePolicy='increment-once'}
+    Change-Config $repo {param($c) $c.androidVersionCodePolicy='increment-selected'}
     Invoke-FixtureGit $repo @('add','release.json') | Out-Null
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Choose counter') | Out-Null
     $prepared=Invoke-ReleasePrepare $repo @('steam') (Join-Path $sandbox 'uncertain-provenance-state') $engine
@@ -879,7 +875,7 @@ Test 'exported version overrides are inspected and Play changelog filenames use 
     [IO.File]::WriteAllText($presetPath,$presetText)
     Expect-Error {Get-ReleaseConfiguration $repo} 'version metadata|file_version'
     $path=Join-Path $repo 'export_presets.cfg';$text=[IO.File]::ReadAllText($path);[IO.File]::WriteAllText($path,$text.Replace('9.9.9','1.2.3'))
-    Change-Config $repo {param($c) $c.destinations[4].language='en-GB'}
+    Change-Config $repo {param($c) $c.distributions['google-play'].language='en-GB'}
     Invoke-FixtureGit $repo @('add','.') | Out-Null
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Choose actual release metadata') | Out-Null
     $prepared=Invoke-ReleasePrepare $repo @('google-play') (Join-Path $sandbox 'metadata-state') $engine
@@ -911,7 +907,7 @@ Test 'public release notes wait for a live store, check permissions first and re
 }
 Test 'per-channel live baselines retain missed changes in later store note evidence' {
     $repo=New-Fixture 'destination-baselines'
-    Change-Config $repo {param($c) $c.destinationBaselines=@{'itch-windows'='v1.2.2';'itch-linux'=$null}}
+    Change-Config $repo {param($c) $c.distributions.itch.channels.linux=@{export='linux';previousRelease=$null}}
     Invoke-FixtureGit $repo @('add','release.json') | Out-Null
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Confirm destination baseline') | Out-Null
     $plan=Get-ReleasePlan $repo @('itch-windows')
@@ -921,7 +917,7 @@ Test 'per-channel live baselines retain missed changes in later store note evide
 }
 Test 'prepare reads the explicitly selected live ledger before readiness checks and version reservation' {
     $repo=New-StoreFixture 'custom-ledger'
-    Change-Config $repo {param($c) $c.destinationBaselines=@{steam=$null}}
+    Change-Config $repo {param($c) $c.distributions.steam.previousRelease=$null}
     Invoke-FixtureGit $repo @('add','release.json') | Out-Null
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Record unknown baseline') | Out-Null
     $stateRoot=Join-Path $sandbox 'custom-ledger-state'
@@ -945,7 +941,7 @@ Test 'projected patch plan consistently labels the requested version and exclude
     $before=@(Get-ChildItem $repo -Recurse -File -Force | ForEach-Object {"$($_.FullName):$((Get-FileHash $_.FullName).Hash)"})
     $plan=Get-ReleasePlan -Repository $repo -Destination @('steam','itch-windows','itch-android','notes') -VersionChange patch
     Assert ($plan.version -eq '1.2.4' -and $plan.sourceVersion -eq '1.2.3' -and $plan.preview) 'Next-version preview is ambiguous.'
-    Assert ($plan.destinations[0].displayName -eq 'Fixture 1.2.4 (Windows)' -and $plan.destinations[2].path -eq 'releases/1.2.4.md' -and $plan.notesDraft -match '# Fixture 1.2.4' -and $plan.notesDraft -match 'availability/1.2.4.json') 'Projected labels or notes still use the old version.'
+    Assert ($plan.destinations[0].displayName -eq 'Fixture 1.2.4 (Windows)' -and @($plan.destinations | Where-Object id -EQ notes)[0].path -eq 'releases/1.2.4.md' -and $plan.notesDraft -match '# Fixture 1.2.4' -and $plan.notesDraft -match 'availability/1.2.4.json') 'Projected labels or notes still use the old version.'
     Assert ($plan.requiredExports.Count -eq 3 -and @($plan.requiredExports | Where-Object {$_.name -eq 'Android existing AAB'}).Count -eq 0) 'Held Play export appears in the required build list.'
     Assert ($plan.configurationReady -and -not $plan.ready -and ($plan.blockers -join ' ') -match 'source version') 'Projected plan pretends its source already contains the version.'
     $after=@(Get-ChildItem $repo -Recurse -File -Force | ForEach-Object {"$($_.FullName):$((Get-FileHash $_.FullName).Hash)"})
@@ -1004,7 +1000,7 @@ Test 'first preparation reserves each selected Android counter once and leaves u
 }
 Test 'version reservation updates source settings once, commits before export and keeps retries at the reserved code' {
     $repo=New-StoreFixture 'version-reservation'
-    Change-Config $repo {param($c) $c.androidVersionCodePolicy='increment-once'}
+    Change-Config $repo {param($c) $c.androidVersionCodePolicy='increment-selected'}
     Invoke-FixtureGit $repo @('add','release.json') | Out-Null
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Choose Android release policy') | Out-Null
     $stateRoot=Join-Path $sandbox 'version-state'
@@ -1030,7 +1026,7 @@ Test 'version reservation updates source settings once, commits before export an
 }
 Test 'version operations are explicit and holding Play leaves Android counters unchanged' {
     $repo=New-StoreFixture 'version-hold-play'
-    Change-Config $repo {param($c) $c.androidVersionCodePolicy='increment-once'}
+    Change-Config $repo {param($c) $c.androidVersionCodePolicy='increment-selected'}
     Invoke-FixtureGit $repo @('add','release.json') | Out-Null
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Choose counter policy') | Out-Null
     $configHash=(Get-FileHash (Join-Path $repo 'export_presets.cfg')).Hash
@@ -1038,6 +1034,7 @@ Test 'version operations are explicit and holding Play leaves Android counters u
     Assert ($result.status -eq 'prepared' -and $configHash -eq (Get-FileHash (Join-Path $repo 'export_presets.cfg')).Hash) 'Holding Play changed Android settings.'
     Assert ((Get-ReleaseVersion '1.2.3' minor) -eq '1.3.0' -and (Get-ReleaseVersion '1.2.3' major) -eq '2.0.0' -and (Get-ReleaseVersion '1.2.3' current) -eq '1.2.3') 'Semantic version operations are missing.'
 }
+. (Join-Path $PSScriptRoot 'configuration-tests.ps1')
 . (Join-Path $PSScriptRoot 'doctor-tests.ps1')
 Write-Output "Results: $script:Passed passed; $script:Failed failed. Fixture directory: $sandbox"
 if ($script:Passed + $script:Failed -eq 0) {throw 'No tests matched Filter.'}

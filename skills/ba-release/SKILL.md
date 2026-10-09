@@ -19,6 +19,8 @@ in any agent; do not substitute model-generated shell operations for the scripts
    explicit answers using its configuration hash. Read
    [configuration and setup](references/configuration.md). Unknown publication
    facts stay null; do not invent presets, paths, commands, channels or baselines.
+   Use the grouped JSON schema: declare export aliases once, keep shared settings
+   under `distributions.<store>`, and put standalone hooks under `verification`.
    Setup inspection and plan mode remain read-only even with local source edits.
 2. For **each new release**, ask which destinations to include unless the user
    has already selected them. Ask for `patch`, `minor`, `major` or `current`

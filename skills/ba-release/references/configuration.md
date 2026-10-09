@@ -1,9 +1,125 @@
 # Per-game release.json
 
-Place this file at the source Git root. Inspect the game before proposing values.
-Run `pwsh -NoProfile -File <skill>/scripts/release.ps1 -Mode validate -Repository
-<root>`. Validation rejects unknown/duplicate keys and credential-like settings;
-valid configuration may still have planning blockers.
+Keep one human-edited JSON file at the source Git root. Schema version 1 groups
+settings by store and maps short export aliases to exact existing Godot preset
+names. Inspect the actual project before proposing values. Paths and executable
+filenames come from `export_presets.cfg`; they are not repeated in this file.
+PowerShell's built-in JSON support avoids another parser dependency.
+
+Validation rejects unknown/duplicate keys, credential-like settings, escaping
+paths and nonexistent presets. Valid configuration can still have planning
+blockers, including deliberately unknown publication facts.
+
+## Structure
+
+| Field | Meaning |
+| --- | --- |
+| `schemaVersion` | Integer `1`. |
+| `project` | Relative Godot directory inside the source Git root. |
+| `previousRelease` | Confirmed previous published source commit/ref, or `null` until confirmed; must be an ancestor of the selected source. |
+| `exports` | Object mapping lowercase aliases such as `windows`, `linux`, `apk`, `aab` to distinct, exact inspected preset names. |
+| `verification.gate` | `{script, arguments?}`: inspected repository-relative PowerShell script and string arguments, defaulting to `[]`. |
+| `verification.standalone` | Shared `{exports, script, arguments?}` hook, or array of those objects for different scripts. `exports` contains aliases. An unknown script may remain `null`. |
+| `distributions` | Store settings below. Declaring a store makes operations available; nothing is selected automatically. |
+| `androidVersionCodePolicy` | Default `increment-selected`: reserve each selected Android preset's existing code + 1 once. `existing` preserves a separately managed valid scheme. Never derive codes by removing version dots. |
+
+Godot `application/config/version` supplies the human-readable version. Operations
+remain `patch`, `minor`, `major` and `current`; a retry or later destination
+extension reuses the reserved version. Configuration cannot override that source.
+
+Standalone hooks verify the same desktop exports without Steam files; they are
+not a distribution. Arguments support `{artifact}` (directory), `{platform}`
+(Godot platform), `{repository}` and `{filename}` (inspected export filename).
+Scripts withhold Butler-excluded files, exercise the actual export, restore the
+files, verify its hashes and check Butler's dry-run selection. Use meaningful
+Windows and Linux checks; Windows startup alone is insufficient.
+
+## Store settings and overrides
+
+**itch:** `game` is an inspected `owner/game`, or `null`. Define `ignore` and
+optional `displayNameTemplate` once, plus a `channels` object:
+
+```json
+"channels": {
+  "windows": "windows",
+  "linux": "linux",
+  "android": "apk"
+}
+```
+
+Keys are logical channel identifiers; values are export aliases. Destination IDs
+are `itch-windows`, `itch-linux` and `itch-android`. A channel can instead be
+`{export, channel?, ignore?, displayNameTemplate?, previousRelease?}`. Overrides
+replace defaults, including empty arrays and explicit nulls:
+
+```json
+"linux": {
+  "export": "linux",
+  "channel": "linux-beta",
+  "previousRelease": null
+}
+```
+
+Logical identifiers use lowercase letters, numbers and hyphens. Remote channel
+names may also use underscores and dots. Confirm existing channels or explicitly
+approve proposed channels for manual-upload migration. A page URL identifies the
+game, not its channels. Android on itch uses a signed APK.
+
+Butler lists use specific basename patterns with `*` and `?`, without path globs,
+`**` or character classes. Include the Steam exclusions:
+
+```json
+["steam_api*.dll", "libsteam_api.so", "libgodotsteam.*", "steam_appid.txt"]
+```
+
+Patterns become separate `--ignore` arguments. There are no obligatory staging
+copies or separate itch desktop presets; other DLLs remain available. See the
+[Butler manual](https://itch.io/docs/butler/pushing.html#appendix-c-ignoring-files).
+Display templates support `{title}`, `{version}` and `{os}`, for example
+`{title} {version} ({os})`. Butler has no display-name flag: the plan includes a
+separate Edit game page action. Page labels do not control archive filenames.
+
+**Steam:** configure inspected integer `appId`, explicit `branch` (or `null`),
+optional common `exclude` (default `[]`) and a `depots` object. Each numeric depot
+ID maps to a desktop export alias, or `{export, exclude?}` for an override.
+Inspect actual Steamworks build files to map depots to exports. There is one
+`steam` operation per app, retaining its build ID and separate activation and
+public-announcement steps. A build description is internal metadata.
+
+**Google Play:** configure `export` using a signed Gradle AAB alias, `track`,
+`releaseStatus`, `language` and `retainVersionCodes`. Unknown facts may be `null`;
+they block only selected Play releases. Status is `draft`, `completed` or
+`inProgress`. Only `inProgress` uses optional `userFraction`, strictly between
+zero and one. `language` is the project's verified BCP-47 notes locale.
+`retainVersionCodes` is an explicit array of existing code strings; `[]` retains
+none. Inspect the track first because its update replaces releases. Use one
+edit/track per app per plan. Package name and code come from the preset.
+
+**Public notes:** `"notes": true` makes `notes` available for explicit selection.
+Its repository is derived from the configured GitHub origin as
+`<owner>/<source-repo-name>-release-notes`, independently of the checkout folder.
+Exact approved notes go to `releases/<version>.md` on the default branch, with a
+separate availability record. The repository must exist, be public and permit
+writing. Different existing content is not overwritten. Publish notes only after
+a selected storefront is verified live.
+
+## Baselines and source metadata
+
+Each store may override `previousRelease`; an itch channel may override it again.
+Omission inherits the enclosing baseline. Explicit `null` remains unknown and
+never falls back. The live ledger tracks destination/channel history separately
+and supplies subsequent baselines, including stores that skipped versions. Null
+does not mean publish all development history. First-ever releases need a
+reviewed baseline policy.
+
+Paths resolve inside the repository, including link ancestors. Nested Godot
+export paths may use `..` only when they stay inside the Git root. Do not commit
+absolute machine paths or credentials. Windows file/product version overrides
+must be empty or follow the source version (`.0` accepted). Android `version/name`
+must be empty (Godot fallback) or match it. Reservation updates matching explicit
+metadata and selected Android counters once; commit those source settings locally
+before exporting. Scripts do not create source commits, tags or pushes. See
+[execution](execution.md).
 
 ## First-run setup
 
@@ -13,112 +129,22 @@ valid configuration may still have planning blockers.
 -Mode setup -Repository <root> -AnswersPath <answers.json> -ExpectedConfigSha256 <reported-hash>
 ```
 
-Without answers, setup reports actual Godot/Git facts, configuration proposals,
-missing questions and explicit destination choices as JSON. It detects nested
-projects and asks when multiple projects exist. `-Interactive` gathers human
-answers, including questions exposed by choosing a new store. Agents use the
-JSON questions with their user-input tools. No verification, export, bump or
-store call runs. Writes require explicit validated answers and the inspected
-hash; invalid, secret or stale answers leave the file unchanged.
+Setup reports actual Godot/Git facts, a grouped proposal, missing questions and
+explicit destination choices as JSON. It asks when project/preset mappings are
+ambiguous. `-Interactive` gathers human answers; agents use reported questions
+with their input tools. Nothing verifies, exports, bumps or contacts stores.
 
-Answer keys: `stores` (array of `itch`, `steam`, `google-play`, `notes`), `project`,
-`previousReleaseRef`, `baseline.<destination-id>`, `<destination-id>.<field>`,
-`verification.script`, `verification.arguments`, `standalone`, `exports`,
-`destinations`, `androidVersionCodePolicy`. Arrays/objects use JSON, not shell
-commands. Unknown facts may stay null; required IDs/mappings must validate.
-Changing store choices preserves retained destinations' settings and policy.
+Answer keys use public dotted paths: `previousRelease`, `verification.gate.script`,
+`verification.standalone`, `distributions.itch.game`, `distributions.itch.channels`,
+`distributions.steam.depots`, `distributions.google-play.track` or
+`distributions.itch.channels.linux.previousRelease`. Whole `exports` and
+`distributions` objects are accepted. `stores` is an array of `itch`, `steam`,
+`google-play` and/or `notes`. Objects and arrays use JSON, not shell commands.
+Changing stores preserves retained store objects, custom aliases, hooks and policy.
 
-| Field | Meaning |
-| --- | --- |
-| `schemaVersion` | Integer `1`. |
-| `project` | Relative Godot project directory, inside the Git root. |
-| `previousReleaseRef` | Actual previous published release source commit/ref; `null` until confirmed. Must resolve to an ancestor of HEAD. |
-| `exports` | Exact existing Windows/Linux desktop and signed Android APK/AAB preset names. Paths and filenames come from export_presets.cfg. |
-| `verification.script` | Existing, inspected PowerShell verification script, relative to the Git root. |
-| `verification.arguments` | Array of string arguments for that script. No shell command strings or credentials. |
-| `destinations` | Array of entries described below. Nothing is selected by default. |
-| `destinationBaselines` | Destination IDs mapped to last **live** source refs or null. New setups include this map; the live ledger supplies future baselines. Frozen plans retain the initial comparison. Legacy configs fall back to previousReleaseRef, so confirm per-store history when adopting the map. |
-| `androidVersionCodePolicy` | `increment-selected` reserves each selected Android preset's own code + 1 once; held APK/AAB counters remain unchanged. New setup uses this policy. `increment-once` preserves the older Play-only behavior. `existing` preserves a separately managed valid scheme; omission means existing for compatibility. Never derive the counter by removing version dots. |
-| `standalone` | Array of `{preset, script, arguments}` checks for itch desktop exports. A null unknown script blocks its selected desktop. |
-
-Paths resolve within the repository, including link ancestors. Output paths may
-use `..` from a nested Godot project when the result remains inside the Git root.
-Absolute machine paths are not committed. Godot `application/config/version` is
-the version source; release.json cannot override it. Version format is three
-numeric components with an optional prerelease/build suffix.
-
-A Butler entry has `id`, `type: "itch"`, `preset`, `target`, and `ignore`.
-Use an exact `owner/game:channel` target, or `null` until verified. IDs identify
-individual destination/channel operations so one platform's failure cannot hide
-another's success. Presets must also occur in `exports`.
-
-Itch Android uses a signed APK; Play uses a signed Gradle AAB. Optional
-`displayNameTemplate` supports `{title}`, `{version}`, `{os}`, for example
-`{title} {version} ({os})`. The plan includes the approved page label and a
-separate Edit game action. Butler has no display-name flag; page labels do not
-control downloaded archive filenames. A page URL confirms owner/game, not a
-channel; manual-upload migration requires explicit new channel names.
-
-`ignore` contains basename patterns with `*` and `?`; no path globs, `**`, or
-character classes. Each Butler entry must include these Steam exclusions:
-
-```json
-["steam_api*.dll", "libsteam_api.so", "libgodotsteam.*", "steam_appid.txt"]
-```
-
-These are passed as separate Butler `--ignore` arguments; staged and source
-builds retain their files. Check the target build's non-Steam behavior before
-approving it. The [Butler manual](https://itch.io/docs/butler/pushing.html#appendix-c-ignoring-files)
-documents pattern semantics and dry-run inspection.
-
-A public notes entry has only `id` and `type: "notes"`. The script derives
-`<owner>/<source-repo-name>-release-notes` from the credential-free GitHub origin,
-independently of the source checkout's local folder name. Publication creates
-`releases/<Godot-version>.md` through GitHub's contents API in the repository's
-default branch. The repository must already exist and be public. It never
-overwrites different existing content or silently creates a repository.
-
-A Steam entry has `id`, `type: "steam"`, the inspected integer `appId`, `branch`
-(explicit name or `null`), and `depots`. Each depot has inspected integer `id`,
-an existing configured desktop `preset`, and `exclude` basename patterns. Read
-existing Steamworks AppBuild/DepotBuildConfig files to map content roots to the
-game's actual exports; do not commit absolute SDK paths or copy login config.
-There is one Steam destination per app, with all selected depots in one build.
-
-A Google Play entry has `id`, `type: "google-play"`, a configured signed Gradle
-AAB `preset`, `track`, `releaseStatus`, `userFraction`, `language`, and
-`retainVersionCodes`. Unknown publication fields stay `null` and block selected
-plans. `releaseStatus` is `draft`, `completed`, or `inProgress`; only `inProgress`
-uses a numeric fraction strictly between zero and one. `language` is the verified
-BCP-47 notes locale. `retainVersionCodes` is an explicit array of existing version
-code strings; `[]` deliberately retains none. Inspect the actual track before
-choosing it; the API track update replaces its releases. One edit/track per app
-per plan avoids edits invalidating each other.
-
-The Android package and integer version code come from preset options. The
-preset must use Gradle AAB format, signing, and an `.aab` export path. Its
-`version/name` must be empty (Godot project fallback) or equal the Godot version.
-Existing Windows file/product version overrides must be empty or follow the
-source version (a trailing `.0` is accepted). Reservation updates explicit
-metadata already following the old version. Android code reservation is journaled
-before source edits and reused on retries. Commit those settings locally before
-exporting; a conflicting consumed code is reconciled separately, never silently
-changed during publication recovery. See [execution](execution.md).
-
-Standalone arguments support `{artifact}` (export directory), `{platform}` and
-`{repository}`. Supply an inspected script exercising relevant exported-game
-functionality on the actual OS; exit zero means success. Checks physically
-withhold exactly the Butler-excluded files, restore them, then verify the complete
-common artifact and Butler dry-run selection. There is no separate itch desktop
-preset or obligatory copy just to remove Steam files. Keep other DLLs. Linux needs
-its own working checking route; Windows startup is insufficient.
-
-Other destination types are rejected until a tested adapter is implemented.
-
-Do not infer a release boundary from version history alone. Confirm the source
-commit of the last published release, or a release tag that points to it. A
-first-ever release needs a separately reviewed baseline policy; null does not
-mean all history. Complete Git history is required. Plan reports local edits
-separately; preparation/publication require reviewed, committed source.
-It performs no network calls and does not claim that remote
-repositories, credentials or channels have been checked.
+Before first configuring an itch game, or changing to another game, explicitly
+confirm `distributions.itch.channels`; proposed mappings are not established facts.
+Writes require validated explicit answers and the inspected configuration hash.
+Invalid, secret or stale answers leave the file unchanged. `validate`, `plan` and
+`doctor` read the same structure. Plan makes no network calls and cannot claim
+remote permissions or publication have been checked.

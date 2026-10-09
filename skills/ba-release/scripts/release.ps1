@@ -43,7 +43,7 @@ try {
         }
         'validate' {
             $settings = Get-ReleaseConfiguration -Repository $Repository
-            [ordered]@{valid=$true; version=$settings.version; exports=$settings.presets; notesRepository=$settings.notesRepository; previousReleaseRef=$settings.config.previousReleaseRef; destinations=$settings.config.destinations} | ConvertTo-Json -Depth 20
+            [ordered]@{valid=$true; version=$settings.version; exports=$settings.presets; notesRepository=$settings.notesRepository; previousRelease=$settings.config.previousReleaseRef; destinations=$settings.config.destinations} | ConvertTo-Json -Depth 20
         }
         'doctor' {
             $report=Get-ReleaseDoctor -Repository $Repository -Destination $selected -GodotExecutable $GodotExecutable -TemplateRoot $TemplateRoot -EditorSettingsPath $EditorSettingsPath -AndroidSdkPath $AndroidSdkPath -JavaSdkPath $JavaSdkPath -ButlerExecutable $ButlerExecutable -SteamCmdExecutable $SteamCmdExecutable -GhExecutable $GhExecutable

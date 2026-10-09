@@ -56,7 +56,7 @@ Test 'doctor checks Android signing presence without serializing credentials' {
     try {
         $keyfile=Join-Path $sandbox 'doctor-private.keystore';'key fixture' | Set-Content $keyfile
         $env:GODOT_ANDROID_KEYSTORE_RELEASE_PATH=$keyfile;$env:GODOT_ANDROID_KEYSTORE_RELEASE_USER='private_fixture_alias';$env:GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD='private_fixture_password'
-        Change-Config $fixture.repo {param($c) $c.destinations | Where-Object {$_.type -eq 'google-play'} | ForEach-Object {$_.retainVersionCodes=@()}}
+        Change-Config $fixture.repo {param($c) $c.distributions['google-play'].retainVersionCodes=@()}
         $report=Get-ReleaseDoctor -Repository $fixture.repo -Destination @('google-play') -GodotExecutable $fixture.tool -TemplateRoot $fixture.templates -AndroidSdkPath (Join-Path $sandbox 'missing-sdk') -JavaSdkPath (Join-Path $sandbox 'missing-jdk')
         Assert (@($report.checks | Where-Object {$_.id -eq 'signing:Android existing AAB' -and $_.status -eq 'passed'}).Count -eq 1) 'Runtime release signing was not recognized.'
         Assert (($report | ConvertTo-Json -Depth 20) -notmatch 'private_fixture|doctor-private') 'Doctor leaked signing material.'

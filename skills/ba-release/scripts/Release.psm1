@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 $script:SteamIgnore = @('steam_api*.dll','libsteam_api.so','libgodotsteam.*','steam_appid.txt')
 Import-Module (Join-Path $PSScriptRoot 'ProcessTools.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'StoreAdapters.psm1') -Force
+. (Join-Path $PSScriptRoot 'Configuration.ps1')
 
 # Uses only read-only Git commands here; release scripts do not create source commits or tags.
 function Read-ReleaseGit([string]$Repository, [string[]]$Arguments) {
@@ -93,13 +94,14 @@ function Get-ReleaseConfiguration([string]$Repository, $Configuration = $null) {
     $raw = if ($null -ne $Configuration) {$Configuration | ConvertTo-Json -Depth 30} else {[IO.File]::ReadAllText($configPath)}
     $json = [System.Text.Json.JsonDocument]::Parse($raw)
     try { Assert-ReleaseJson $json.RootElement } finally { $json.Dispose() }
-    $config = $raw | ConvertFrom-Json -AsHashtable
+    $document = $raw | ConvertFrom-Json -AsHashtable
+    $config = ConvertTo-ReleaseRuntimeConfiguration $document
     Assert-ReleaseFields $config @('schemaVersion','project','previousReleaseRef','exports','verification','destinations','androidVersionCodePolicy','standalone','destinationBaselines') @('schemaVersion','project','previousReleaseRef','exports','verification','destinations') 'release.json'
-    if ($config.Contains('androidVersionCodePolicy') -and $config.androidVersionCodePolicy -cnotin @('existing','increment-once','increment-selected')) {throw 'androidVersionCodePolicy must be existing, increment-once or increment-selected.'}
+    if ($config.Contains('androidVersionCodePolicy') -and $config.androidVersionCodePolicy -cnotin @('existing','increment-selected')) {throw 'androidVersionCodePolicy must be existing or increment-selected.'}
     if ($config.schemaVersion -isnot [long] -and $config.schemaVersion -isnot [int]) { throw 'schemaVersion must be integer 1.' }
     if ($config.schemaVersion -ne 1) { throw 'Unsupported schemaVersion; expected 1.' }
     if ($config.project -isnot [string]) { throw 'project must be a relative directory.' }
-    if ($null -ne $config.previousReleaseRef -and ($config.previousReleaseRef -isnot [string] -or [string]::IsNullOrWhiteSpace($config.previousReleaseRef) -or $config.previousReleaseRef.StartsWith('-'))) { throw 'previousReleaseRef must be null or a Git ref.' }
+    if ($null -ne $config.previousReleaseRef -and ($config.previousReleaseRef -isnot [string] -or [string]::IsNullOrWhiteSpace($config.previousReleaseRef) -or $config.previousReleaseRef.StartsWith('-'))) { throw 'previousRelease must be null or a Git ref.' }
     $project = Resolve-ReleasePath $Repository $config.project -MustExist
     $projectSections = Read-GodotSections (Join-Path $project 'project.godot')
     if (-not $projectSections.Contains('application') -or -not $projectSections.application.Contains('config/version')) { throw 'Godot application config/version is required as the version source.' }
@@ -163,7 +165,7 @@ function Get-ReleaseConfiguration([string]$Repository, $Configuration = $null) {
                 if ($check.script -isnot [string] -or -not $check.script.EndsWith('.ps1')) {throw 'Standalone script must name an inspected PowerShell script or remain null.'}
                 Resolve-ReleasePath $Repository $check.script -Leaf | Out-Null
             }
-            if ($check.arguments -isnot [array] -or @($check.arguments | Where-Object {$_ -isnot [string] -or ($_ -replace '\{(?:artifact|platform|repository)\}','') -match '[{}]'}).Count) {throw 'Standalone arguments support only {artifact}, {platform} and {repository} substitutions.'}
+            if ($check.arguments -isnot [array] -or @($check.arguments | Where-Object {$_ -isnot [string] -or ($_ -replace '\{(?:artifact|platform|repository|filename)\}','') -match '[{}]'}).Count) {throw 'Standalone arguments support only {artifact}, {platform}, {repository} and {filename} substitutions.'}
         }
     }
     if ($config.destinations -isnot [array] -or $config.destinations.Count -eq 0) { throw 'destinations must be a nonempty array.' }
@@ -222,7 +224,7 @@ function Get-ReleaseConfiguration([string]$Repository, $Configuration = $null) {
     if ($origin -match '^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$' -or $origin -match '^(?:git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$') {
         $notesRepository = "$($Matches[1])/$($Matches[2])-release-notes"
     } else { throw 'A credential-free github.com origin is required to derive the public release-notes repository.' }
-    return @{repository=$Repository; projectPath=$project; version=$version; title=$title; config=$config; configHash=(Get-ReleaseTextHash $raw); presets=$presets.ToArray(); notesRepository=$notesRepository; verificationPath=$verificationPath}
+    return @{repository=$Repository; projectPath=$project; version=$version; title=$title; config=$config; document=$document; configHash=(Get-ReleaseTextHash $raw); presets=$presets.ToArray(); notesRepository=$notesRepository; verificationPath=$verificationPath}
 }
 
 # Emits a reproducible plan without exports, checks, writes, Git mutations or network access.
@@ -242,7 +244,7 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
     $previous = $null
     $changes = @()
     $changedFiles = @()
-    if ($null -eq $settings.config.previousReleaseRef) { $blockers.Add('previousReleaseRef is unconfirmed; identify the previous published release source commit/ref.') }
+    if ($null -eq $settings.config.previousReleaseRef) { $blockers.Add('previousRelease is unconfirmed; identify the previous published release source commit/ref.') }
     else {
         $previous = Read-ReleaseGit $Repository @('rev-parse','--verify',"$($settings.config.previousReleaseRef)^{commit}")
         $ancestor = Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$previous,$head) $Repository
