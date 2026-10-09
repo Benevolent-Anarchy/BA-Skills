@@ -11,6 +11,8 @@ Collect missing inputs together: project name, description, parent directory (de
 
 Discussion about a future project authorizes inspection. An actual request to create the named pair authorizes its routine creation steps without repeated approvals. Existing-clone setup authorizes local tooling only.
 
+Cicely's standing authorization covers installing, activating and using the four curated Obsidian plugins, accepting their author-trust prompt and allowing Mermaid viewing in the verified target vault. Read the scope and desktop-release procedure in [operations.md](references/operations.md) before app checks; tool-enforced permissions still apply.
+
 Resolve this skill's directory and run its helpers using PowerShell 7.2+, Git and an authenticated GitHub CLI. These examples run from that directory:
 
 ```powershell

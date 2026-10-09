@@ -191,6 +191,10 @@ Exclude workspace/window state, open tabs, scan snapshots/history, previously ig
 
 Where the official Obsidian CLI is available, it can install and enable plugins in the specifically identified vault. It requires the installed CLI integration and connects to the running application. Otherwise, acquire the published release files and prepare the local plugin/configuration folders. Separate verification of installed files from verification that Obsidian actually loaded and enabled the plugins; report any remaining first-use or enablement step truthfully.
 
+Cicely's standing authorization covers installing, activating and using the four curated plugins in the verified target vault, accepting their author-trust prompt, enabling Community plugins and allowing Mermaid viewing during creation, resume or requested local setup. Honour later user restrictions and preserve existing preferences and extra plugins. Additional plugins, DataviewJS, unrelated vaults and unrelated permissions remain outside this authorization. Tool-enforced approvals and security restrictions still apply; a blocked trust action remains an explicit user step.
+
+Prepare independent verification and reporting before foreground app interaction, and put the final visual checks at the end. Release desktop control immediately after the last required action, or when app checks cannot continue, using documented lifecycle operations. If no release operation exists, reset the runtime where supported and end the turn promptly with any remaining work marked pending. Do not equate runtime reset with verified release of control or keep the takeover session open for background work.
+
 On a fresh clone, the local-setup entry point derives project identity from its verified repository and README rather than creating GitHub repositories. It creates missing Obsidian configuration. If configuration already exists, retain local preferences and extra plugins; install missing standard plugins and provide a deliberate refresh operation rather than silently replacing settings or updating every plugin on every invocation.
 
 ## Helpers, installation and resumability
@@ -251,4 +255,3 @@ The implementation plan is the next artifact after review of this design. No ski
 ## Approved plugin packaging fallback (2026-10-09)
 
 If the newest published plugin release has inconsistent required assets or version metadata, choose the newest non-draft, non-prerelease release whose metadata is consistent. Report each skipped release and its reason alongside the installed version. A failed network request is an unresolved download, not evidence of inconsistent metadata. This was explicitly selected after observing Dataview's 0.5.70 release with a 0.5.68 manifest.
-
