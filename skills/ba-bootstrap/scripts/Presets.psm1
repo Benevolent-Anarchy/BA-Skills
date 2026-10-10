@@ -75,6 +75,7 @@ function Invoke-BootstrapPrerequisiteProbe([string]$Name) {
         }
         $tool=switch ($Name) {godot {if($env:GODOT){$env:GODOT}else{'godot'}} rust {'rustc'} clippy {'cargo-clippy'} default {$Name}}
         $exe=Get-BootstrapToolPath $tool
+        if ($Name -eq 'godot' -and -not $env:GODOT -and -not $exe) {$tool='godot4';$exe=Get-BootstrapToolPath $tool}
         if (-not $exe) {throw "Required executable missing: $tool"}
         [string[]]$arguments=@('--version')
         # npm.cmd cannot be spawned without a shell. Invoke its JS CLI through Node.

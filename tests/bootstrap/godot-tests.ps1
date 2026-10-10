@@ -56,6 +56,7 @@ Test 'Godot starter records renderer title engine source and effective ignores' 
         return @{ExitCode=0;Output='';Executable=$exe}
     }
     $result=Initialize-GodotPreset $id $selection $resolution $dir $download $process
+    Assert (-not [IO.File]::ReadAllText("$dir/tools/verify.json").Contains("`r")) 'Godot config changes bytes when Git normalizes its newlines.'
     $settings=[IO.File]::ReadAllText("$dir/project.godot")
     Assert ($settings -match '1280' -and $settings -match '800' -and $settings -match '0.0.1' -and $settings -match 'rendering_method="mobile"') 'Starter settings missing.'
     Assert ($settings.Contains('config/name='+($id.title | ConvertTo-Json -Compress))) 'Title not escaped for Godot.'

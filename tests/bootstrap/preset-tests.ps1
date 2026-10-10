@@ -1,5 +1,23 @@
 if (Test-Path "$skillRoot/scripts/Presets.psm1") {Import-Module "$skillRoot/scripts/Presets.psm1" -Force}
 . "$PSScriptRoot/PresetFixture.ps1"
+Test 'preset prerequisite finds godot4 and preserves an explicit executable choice' {
+    $old=$env:GODOT;$env:GODOT=$null
+    $module=Import-Module "$skillRoot/scripts/Presets.psm1" -Force -PassThru
+    try {
+        $fixture=@{lookups=[Collections.Generic.List[string]]::new();processCalls=[Collections.Generic.List[string]]::new()}
+        $result=& $module {
+            param($fixture)
+            $script:toolLookupFixture=$fixture
+            function script:Get-BootstrapToolPath([string]$Name) {$script:toolLookupFixture.lookups.Add($Name);if($Name -ceq 'godot4'){return 'fixture-godot4.exe'};return $null}
+            function script:Invoke-VerificationProcess($Executable,$Arguments,$Directory) {$script:toolLookupFixture.processCalls.Add($Executable);return @{ExitCode=0;Output='4.7.2.stable.official';Executable=$Executable}}
+            Get-BootstrapPrerequisites @{name='godot'}
+        } $fixture
+        Assert ($result.passed -and $result.checks[0].executable -ceq 'fixture-godot4.exe') 'Supported godot4-only installation was rejected.'
+        $env:GODOT='missing-selected-godot.exe';$fixture.lookups.Clear()
+        $explicit=& $module {Get-BootstrapPrerequisites @{name='godot'}}
+        Assert (-not $explicit.passed -and 'godot4' -notin $fixture.lookups) 'Missing explicit executable silently fell back.'
+    } finally {$env:GODOT=$old;Import-Module "$skillRoot/scripts/Presets.psm1" -Force}
+}
 Test 'preset override detection accepts the actual CLI bound-parameter dictionary' {
     function Invoke-BoundPresetProbe([string]$Preset) {Assert-BootstrapPresetOverride @{name='foundation';renderer=$null;appIdentifier=$null} $PSBoundParameters}
     Invoke-BoundPresetProbe -Preset foundation

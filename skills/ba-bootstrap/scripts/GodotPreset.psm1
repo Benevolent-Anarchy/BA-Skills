@@ -42,7 +42,7 @@ function Initialize-GodotPreset {
     })
     Write-BootstrapManifest $Repository $gut | Out-Null
     $config=@{schemaVersion=1;preset='godot';requiredChecks=@('documentation','godot-import','godot-compile','gut-headless');godot=@{versionFamily='4.7';renderedTests=$false}}
-    [IO.File]::WriteAllText("$Repository/tools/verify.json",($config | ConvertTo-Json -Depth 5)+"`n",[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText("$Repository/tools/verify.json",(($config | ConvertTo-Json -Depth 5)+"`n").Replace("`r`n","`n"),[Text.UTF8Encoding]::new($false))
     [IO.File]::AppendAllText("$Repository/.gitignore",[IO.File]::ReadAllText("$root/gitignore.fragment"),[Text.UTF8Encoding]::new($false))
     $sourcePaths=@(Get-ChildItem $Repository -Recurse -File -Force | Where-Object {$_.FullName -notmatch '[\\/]\.(godot|git)[\\/]'} | ForEach-Object {[IO.Path]::GetRelativePath($Repository,$_.FullName).Replace('\','/')})
     $sourceManifest=@(Get-BootstrapPreparedManifest $Repository $sourcePaths)
