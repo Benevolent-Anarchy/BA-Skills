@@ -120,7 +120,7 @@ function Initialize-BootstrapPreparation {
         & $Checkpoint 'resolution' @{resolvedAt=$Journal.resolution.resolvedAt} | Out-Null
     }
     if (-not $checkpoints.ContainsKey('foundation')) {
-        $manifest=@(Get-ProjectManifest $Identity)
+        $manifest=@(Get-ProjectManifest $Identity -PresetSelection $Selection)
         Write-BootstrapManifest $source $manifest | Out-Null
         & $Checkpoint 'foundation' @{manifest=@($manifest | ForEach-Object {@{path=$_.path;sha256=$_.sha256}})} | Out-Null
     } else {

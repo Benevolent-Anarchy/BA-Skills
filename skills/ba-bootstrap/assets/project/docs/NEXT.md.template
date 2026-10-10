@@ -1,6 +1,6 @@
 # {{PROJECT_TITLE}} — Project map
 
-- [README](../README.md) identifies the project and how to run verification.
+- [README](../README.md) identifies the selected preset, fresh-clone setup and complete verification.
 - [[DESIGN]], [[DECISIONS]] and [[JUDGEMENTS]] route the permanent canon.
 - [GitHub Issues]({{ISSUES_URL}}) hold unfinished work, questions and discussions.
 - [AGENTS.md](../AGENTS.md) defines the shared working process.

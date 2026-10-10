@@ -35,3 +35,13 @@ This is the canonical working process for every agent. Read docs/NEXT.md for ori
 16. Verify behaviour changes meaningfully and re-read new claims against the finished project state before calling work ready. Pay particular attention to claims about bounds, uniqueness and constants which later edits can invalidate.
 
 17. Keep temporary execution plans in ignored scratch space or the active conversation. Promote durable conclusions to design notes, decisions or judgements, unfinished work to Issues, and orientation to `NEXT.md`.
+
+18. Put exports in `dist/`. Keep generated caches, dependencies and local tooling ignored; retain required source, lockfiles, Godot UID/import sidecars and Tauri icons/capabilities in Git.
+
+## Selected preset: {{PRESET_NAME}}
+
+{{PRESET_SETUP}}
+
+Run `pwsh -NoProfile -File tools/verify.ps1` after setup and against the finished PR state.
+
+{{PRESET_GATE}}

@@ -146,7 +146,7 @@ function Get-BootstrapPlan([hashtable]$Identity,[scriptblock]$Request=$script:De
             if ($journal -and $journal.schemaVersion -eq 2 -and $journal.preparation.phase -in @('frozen','snapshotting')) {
                 $prepared=Get-BootstrapPublicationSource $journal $StateRoot
                 $manifest=$prepared.manifest
-            } else {$manifest=@(Get-ProjectManifest $Identity)}
+            } else {$manifest=@(Get-ProjectManifest $Identity -PresetSelection $selection)}
             Assert-BootstrapFoundation $manifest
             $prerequisites=if($null -eq $PrerequisiteProbe){Get-BootstrapPrerequisites $selection}else{Get-BootstrapPrerequisites $selection $PrerequisiteProbe}
             if (-not $prerequisites.passed) {throw ('Missing or unsupported prerequisites: '+(@($prerequisites.checks | Where-Object {-not $_.passed} | ForEach-Object {"$($_.name): $($_.message)"}) -join '; '))}

@@ -52,20 +52,43 @@ function ConvertTo-BootstrapMarkdownTitle([string]$Title) {
     return ([regex]::Replace($Title,'\s+',' ')).Replace('_','\_')
 }
 
-function Get-ProjectManifest([hashtable]$Identity,[string]$AssetRoot=(Join-Path $PSScriptRoot '../assets/project')) {
+function Get-BootstrapPresetDocumentation([hashtable]$Selection) {
+    $name=if($null -eq $Selection){'foundation'}else{$Selection.name}
+    switch($name) {
+        foundation {return @{name='Documentation foundation';setup='This preset supplies documentation and the working process. It has no engine dependencies. Use PowerShell 7.2 or newer and Git.';gate='The complete initial gate validates documentation. Extend this same gate as project checks are added.'}}
+        godot {return @{name='Godot';setup=@'
+Use Godot 4.7.x and PowerShell 7.2 or newer. GUT 9.7.1 is vendored in `addons/gut/`; no test package download is needed after cloning. Open `project.godot` in the matching Godot editor. If the executable is not available as `godot` or `godot4`, set the process-local `GODOT` environment variable to its full path before verification. Preserve committed `.uid` and source `.import` sidecars; `.godot/` is an ignored cache.
+'@;gate='The complete gate validates documentation, Godot import and script compilation, and GUT tests with post-run error/orphan checks. It discovers rendered tests when present; those checks require a display. `tools/verify_selftest.ps1` separately exercises deliberate verifier failures.'}}
+        tauri {return @{name='Tauri';setup=@'
+Use Node.js/npm, stable Rust with rustfmt and Clippy, and PowerShell 7.2 or newer. Windows also needs the MSVC C++ build tools and WebView2. Install missing toolchains separately; bootstrap reports missing prerequisites before creating repositories. After a fresh clone, install the frozen frontend dependencies:
+
+```powershell
+npm ci
+```
+
+`Cargo.lock` freezes Rust dependencies; verification uses locked Cargo commands. Use `npm run dev` for the frontend or `npm run tauri dev` for the desktop development app.
+'@;gate='The complete gate validates documentation, TypeScript, the frontend entry-point test and build, Rust formatting, Clippy, Rust tests, and a native Tauri build without installer bundling. The initial official Rust scaffold has no Rust unit tests; add meaningful tests as behavior develops. A successful build alone does not establish an observed app launch.'}}
+        default {throw 'Unknown preset for documentation.'}
+    }
+}
+function Get-ProjectManifest([hashtable]$Identity,[string]$AssetRoot=(Join-Path $PSScriptRoot '../assets/project'),[hashtable]$PresetSelection) {
     $assetPath=[IO.Path]::GetFullPath($AssetRoot)
     if (-not (Test-Path -LiteralPath $assetPath -PathType Container)) { throw 'Project assets are missing.' }
+    $presetDocs=Get-BootstrapPresetDocumentation $PresetSelection
     $tokens=@{
         '{{PROJECT_TITLE}}'=(ConvertTo-BootstrapMarkdownTitle $Identity.title)
         '{{DESCRIPTION}}'=$Identity.description
         '{{ISSUES_URL}}'="https://github.com/$($Identity.fullName)/issues"
+        '{{PRESET_NAME}}'=$presetDocs.name
+        '{{PRESET_SETUP}}'=$presetDocs.setup
+        '{{PRESET_GATE}}'=$presetDocs.gate
     }
     foreach ($file in Get-ChildItem -LiteralPath $assetPath -Recurse -File -Force | Sort-Object FullName) {
         if ($file.LinkType) { throw "Linked project asset is not supported: $($file.FullName)" }
         $relative=[IO.Path]::GetRelativePath($assetPath,$file.FullName).Replace('\','/') -replace '\.template$',''
         $text=[IO.File]::ReadAllText($file.FullName).Replace("`r`n","`n")
         # Replace tokens in one pass, so supplied text containing a token stays literal.
-        $text=[regex]::Replace($text,'\{\{(?:PROJECT_TITLE|DESCRIPTION|ISSUES_URL)\}\}',[Text.RegularExpressions.MatchEvaluator]{param($match) $tokens[$match.Value]})
+        $text=[regex]::Replace($text,'\{\{(?:PROJECT_TITLE|DESCRIPTION|ISSUES_URL|PRESET_NAME|PRESET_SETUP|PRESET_GATE)\}\}',[Text.RegularExpressions.MatchEvaluator]{param($match) $tokens[$match.Value]})
         $text=$text.Replace("`r`n","`n")
         @{path=$relative; text=$text; bytes=[Text.Encoding]::UTF8.GetBytes($text); sha256=(Get-BootstrapContentHash $text)}
     }
@@ -133,7 +156,7 @@ function Write-BootstrapManifest([string]$Repository,[object[]]$Manifest) {
     }
     return $manifest
 }
-function Write-ProjectFoundation([hashtable]$Identity,[string]$AssetRoot=(Join-Path $PSScriptRoot '../assets/project')) {
-    Write-BootstrapManifest -Repository $Identity.projectPath -Manifest @(Get-ProjectManifest -Identity $Identity -AssetRoot $AssetRoot)
+function Write-ProjectFoundation([hashtable]$Identity,[string]$AssetRoot=(Join-Path $PSScriptRoot '../assets/project'),[hashtable]$PresetSelection) {
+    Write-BootstrapManifest -Repository $Identity.projectPath -Manifest @(Get-ProjectManifest -Identity $Identity -AssetRoot $AssetRoot -PresetSelection $PresetSelection)
 }
 Export-ModuleMember -Function Resolve-BootstrapRepositoryName,New-BootstrapIdentity,Get-BootstrapContentHash,Get-ProjectManifest,Get-PublicReadme,Write-ProjectFoundation,Write-BootstrapManifest,Assert-BootstrapRelativePath,Assert-BootstrapOwnedPath
