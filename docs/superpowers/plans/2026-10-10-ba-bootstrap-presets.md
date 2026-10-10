@@ -10,7 +10,7 @@
 
 **Spec:** [Approved design](../specs/2026-10-09-ba-bootstrap-presets-design.md).
 
-**Status:** Plan for Cicely's review; product implementation has not started. Preserve Cicely's earlier choice of native execution: implement in this session, then request a fresh whole-branch review. This document supplies the concrete implementation and validation sequence; it does not report those checks as already completed.
+**Status:** Approved implementation is committed. Tasks 1–8 and Task 9 guidance/behavior/branch checks passed; final whole-branch review and PR preparation are in progress. Canonical skill installation remains conditional on Cicely merging and updating local main.
 
 ## Global Constraints
 
@@ -473,16 +473,16 @@ Keep definitive HTTP rejection versus uncertain create outcomes, lost-root-commi
 
 **Interfaces:** Exercise the actual generated `tools/verify.ps1` and actual production preparation adapters. The local native runner accepts `-Preset godot|tauri|all` and a fixture parent, checks containment before cleanup and has no GitHub-create capability. Real repository creation uses the ordinary public CLI with explicitly named disposable projects.
 
-- [ ] **Implement the native runner and establish a fail/pass fixture cycle.** Prepare a starter, initialize/commit a local bare repository, clone into a second path with spaces, install only from frozen locks where needed, then run its own gate. Preserve receipts with commands/exit results, versions, source hashes, Git status and test totals. Deliberately break a docs link, source compilation and a required dependency; each must fail, restoration must pass. Godot invokes gate self-tests for zero-success false positives. Tauri exercises frontend failure and native Rust/build failure independently.
+- [x] **Implement the native runner and establish a fail/pass fixture cycle.** Prepare a starter, initialize/commit a local bare repository, clone into a second path with spaces, install only from frozen locks where needed, then run its own gate. Preserve receipts with commands/exit results, versions, source hashes, Git status and test totals. Deliberately break a docs link, source compilation and a required dependency; each must fail, restoration must pass. Godot invokes gate self-tests for zero-success false positives. Tauri exercises frontend failure and native Rust/build failure independently.
 
 ```powershell
 pwsh -NoProfile -File tools/test-bootstrap-presets-native.ps1 -Preset godot
 pwsh -NoProfile -File tools/test-bootstrap-presets-native.ps1 -Preset tauri
 ```
 
-- [ ] **Resolve the local Rust prerequisite concretely if still missing.** Reinspect installed tools before proposing installation; initial inspection found Godot 4.7.2, Node 25.8.0, npm 11.11.0 and Visual Studio C++ tools but no Rust. Use [Rust's official Windows setup](https://rust-lang.org/tools/install/) for a per-user MSVC toolchain with rustfmt/clippy. Present the actual missing component and installation command for authorization if installation has not already been authorized. Keep existing SDK/default selections intact, use a process-local environment to address the selected tools, and do not silently install it from `bootstrap.ps1`. If installation requires external/manual action, continue independent verification while accurately leaving native Tauri validation pending.
-- [ ] **Run both original and fresh-clone native gates.** Validate clean tracked status after dependency install, repeated verification and Godot import. Verify every ignored-output class and every required source class with Git, and compare initial tree blobs to the frozen manifest. Godot checks all three renderer configurations headlessly; only configured rendered probes require a display. Tauri is a Windows validation claim, with no installer/signing claim.
-- [ ] **Perform the two real creations only after native local validation.** First run read-only plans and stop on collisions rather than adopting existing repositories. Use the approved default owner and disposable names below; Cicely owns teardown.
+- [x] **Resolve the local Rust prerequisite concretely if still missing.** Reinspect installed tools before proposing installation; initial inspection found Godot 4.7.2, Node 25.8.0, npm 11.11.0 and Visual Studio C++ tools but no Rust. Use [Rust's official Windows setup](https://rust-lang.org/tools/install/) for a per-user MSVC toolchain with rustfmt/clippy. Present the actual missing component and installation command for authorization if installation has not already been authorized. Keep existing SDK/default selections intact, use a process-local environment to address the selected tools, and do not silently install it from `bootstrap.ps1`. If installation requires external/manual action, continue independent verification while accurately leaving native Tauri validation pending.
+- [x] **Run both original and fresh-clone native gates.** Validate clean tracked status after dependency install, repeated verification and Godot import. Verify every ignored-output class and every required source class with Git, and compare initial tree blobs to the frozen manifest. Godot checks all three renderer configurations headlessly; only configured rendered probes require a display. Tauri is a Windows validation claim, with no installer/signing claim.
+- [x] **Perform the two real creations only after native local validation.** First run read-only plans and stop on collisions rather than adopting existing repositories. Use the approved default owner and disposable names below; Cicely owns teardown.
 
 ```powershell
 pwsh -NoProfile -File skills/ba-bootstrap/scripts/bootstrap.ps1 -Mode plan -Name 'BA Bootstrap Godot Smoke Test' -Description 'Disposable Godot preset validation.' -Preset godot
@@ -491,9 +491,9 @@ pwsh -NoProfile -File skills/ba-bootstrap/scripts/bootstrap.ps1 -Mode plan -Name
 pwsh -NoProfile -File skills/ba-bootstrap/scripts/bootstrap.ps1 -Mode create -Name 'BA Bootstrap Tauri Smoke Test' -Description 'Disposable Tauri preset validation.' -Preset tauri
 ```
 
-- [ ] **Verify both repository pairs and resume behavior.** Record GitHub returned IDs, private/public visibility and feature settings, main refs, public README-only tree, labels, exact initial private manifests and native gates. Clone each private repo into another local path, apply local-setup and verify fresh-clone gates. Repeat/resume without reselecting versions or creating additional repositories. If source changes after this trial, rerun the affected native trial before claiming that version passed.
-- [ ] **Finish any foreground app checks last.** Read `references/operations.md` before app use. Preserve scoped Obsidian authorization, exact target-vault identity and four plugins; use supported CLI readback where available. Check nickname and Diagram Popup's real behavior only if that evidence needs refreshing. Prepare other results first, then release documented control immediately after the final app action or reset the runtime and finish the turn if no release API is exposed. Do not retain desktop control while preparing PR text or running background tests.
-- [ ] **Record validation outcomes accurately**, then commit the native runner/fixtures: `test: verify bootstrap presets through native starters and fresh clones`. Ignored receipts stay available to the branch reviewer and user; do not delete user-owned trial projects or repos.
+- [x] **Verify both repository pairs and resume behavior.** Record GitHub returned IDs, private/public visibility and feature settings, main refs, public README-only tree, labels, exact initial private manifests and native gates. Clone each private repo into another local path, apply local-setup and verify fresh-clone gates. Repeat/resume without reselecting versions or creating additional repositories. If source changes after this trial, rerun the affected native trial before claiming that version passed.
+- [x] **Finish any foreground app checks last.** Read `references/operations.md` before app use. Preserve scoped Obsidian authorization, exact target-vault identity and four plugins; use supported CLI readback where available. Check nickname and Diagram Popup's real behavior only if that evidence needs refreshing. Prepare other results first, then release documented control immediately after the final app action or reset the runtime and finish the turn if no release API is exposed. Do not retain desktop control while preparing PR text or running background tests.
+- [x] **Record validation outcomes accurately**, then commit the native runner/fixtures: `test: verify bootstrap presets through native starters and fresh clones`. Ignored receipts stay available to the branch reviewer and user; do not delete user-owned trial projects or repos.
 
 ## Task 9: Skill guidance, final review and session-ready PR
 
@@ -501,7 +501,7 @@ pwsh -NoProfile -File skills/ba-bootstrap/scripts/bootstrap.ps1 -Mode create -Na
 
 **Interfaces:** Documentation describes actual implemented CLI/setup/gate/recovery behavior. Preset-specific README/agent sections are supplied during preparation, replacing the old docs-only claim without duplicating canon or exposing tooling internals in the starter UI.
 
-- [ ] **Test guidance against actual generated commands.** For each preset, use its documented setup and gate commands from a fresh clone, without importing BA-Skills. Assert generated README identifies its real gate and `AGENTS.md` retains Issues/canon/session-ready PR rules, names the selected gate/setup commands and requires exports under `dist/`.
+- [x] **Test guidance against actual generated commands.** For each preset, use its documented setup and gate commands from a fresh clone, without importing BA-Skills. Assert generated README identifies its real gate and `AGENTS.md` retains Issues/canon/session-ready PR rules, names the selected gate/setup commands and requires exports under `dist/`.
 
 ```powershell
 Test 'preset docs keep the full gate and session-ready PR contract' {
@@ -512,9 +512,9 @@ Test 'preset docs keep the full gate and session-ready PR contract' {
 }
 ```
 
-- [ ] **Update skill instructions concisely.** Collect identity/preset/options together; default Godot, offer foundation, plain TypeScript/Vite/npm for Tauri, visible identifier override and renderer selection. Explain latest stable versus frozen retries, required toolchains, how clone dependencies are installed, complete verification and exact JSON outcomes. Preserve v1/missing-snapshot recovery, no conversion in local-setup, no public local clone and no false build/app evidence. Keep detailed prerequisites/recovery in references so `SKILL.md` remains small.
-- [ ] **Run behavioral skill checks before deployment.** Apply the writing-skills workflow: baseline scenarios should expose the old engine-independent guidance, updated scenarios should choose the documented preset/restore stored options and report native failures honestly. Use scoped fresh agents only when that workflow requires behavioral evaluation; they must not create real repositories or mutate canonical aliases. Preserve the chosen native implementation method for product tasks.
-- [ ] **Run final branch verification on the finished state.** Run the BA-Skills gate, metadata validator and whitespace check. Source changes after any result invalidate the affected result; rerun only checks justified by the change.
+- [x] **Update skill instructions concisely.** Collect identity/preset/options together; default Godot, offer foundation, plain TypeScript/Vite/npm for Tauri, visible identifier override and renderer selection. Explain latest stable versus frozen retries, required toolchains, how clone dependencies are installed, complete verification and exact JSON outcomes. Preserve v1/missing-snapshot recovery, no conversion in local-setup, no public local clone and no false build/app evidence. Keep detailed prerequisites/recovery in references so `SKILL.md` remains small.
+- [x] **Run behavioral skill checks before deployment.** Apply the writing-skills workflow: baseline scenarios should expose the old engine-independent guidance, updated scenarios should choose the documented preset/restore stored options and report native failures honestly. Use scoped fresh agents only when that workflow requires behavioral evaluation; they must not create real repositories or mutate canonical aliases. Preserve the chosen native implementation method for product tasks.
+- [x] **Run final branch verification on the finished state.** Run the BA-Skills gate, metadata validator and whitespace check. Source changes after any result invalidate the affected result; rerun only checks justified by the change.
 
 ```powershell
 pwsh -NoProfile -File tools/verify.ps1
