@@ -21,6 +21,7 @@ function Initialize-GodotPreset {
     $feature=@{compatibility='GL Compatibility';'forward-plus'='Forward Plus';mobile='Mobile'}[$Selection.renderer]
     $manifest=@(foreach ($file in Get-ChildItem $root -Recurse -File -Force | Where-Object Name -ne 'gitignore.fragment') {
         $path=[IO.Path]::GetRelativePath($root,$file.FullName).Replace('\','/');$bytes=[IO.File]::ReadAllBytes($file.FullName)
+        if ($path.EndsWith('.template') -or [IO.Path]::GetExtension($path) -in @('.gd','.godot','.tscn','.cfg','.uid','.import','.ps1','.psm1','.txt','.json','.svg') -or $file.Name -in @('.gdignore','.gitkeep')) {$bytes=ConvertTo-BootstrapTextBytes $bytes}
         if ($path.EndsWith('.template')) {
             $path=$path.Substring(0,$path.Length-9)
             $text=[Text.Encoding]::UTF8.GetString($bytes).Replace('{{TITLE_JSON}}',($Identity.title | ConvertTo-Json -Compress)).Replace('{{FEATURE_JSON}}',($feature | ConvertTo-Json -Compress)).Replace('{{RENDERER_JSON}}',($renderer | ConvertTo-Json -Compress))
@@ -43,7 +44,7 @@ function Initialize-GodotPreset {
     Write-BootstrapManifest $Repository $gut | Out-Null
     $config=@{schemaVersion=1;preset='godot';requiredChecks=@('documentation','godot-import','godot-compile','gut-headless');godot=@{versionFamily='4.7';renderedTests=$false}}
     [IO.File]::WriteAllText("$Repository/tools/verify.json",(($config | ConvertTo-Json -Depth 5)+"`n").Replace("`r`n","`n"),[Text.UTF8Encoding]::new($false))
-    [IO.File]::AppendAllText("$Repository/.gitignore",[IO.File]::ReadAllText("$root/gitignore.fragment"),[Text.UTF8Encoding]::new($false))
+    [IO.File]::AppendAllText("$Repository/.gitignore",[IO.File]::ReadAllText("$root/gitignore.fragment").Replace("`r`n","`n"),[Text.UTF8Encoding]::new($false))
     $sourcePaths=@(Get-ChildItem $Repository -Recurse -File -Force | Where-Object {$_.FullName -notmatch '[\\/]\.(godot|git)[\\/]'} | ForEach-Object {[IO.Path]::GetRelativePath($Repository,$_.FullName).Replace('\','/')})
     $sourceManifest=@(Get-BootstrapPreparedManifest $Repository $sourcePaths)
     $Checkpoints['godot-source']=@{manifest=@($sourceManifest | ForEach-Object {@{path=$_.path;sha256=$_.sha256}})}

@@ -60,7 +60,7 @@ function Initialize-TauriPreset {
     if (-not $Checkpoints.ContainsKey('overlay')) {
         $manifest=@(foreach ($path in Get-TauriSourcePaths $generator | Where-Object {$_ -notin @('README.md','.gitignore') -and $_ -notmatch '^(src/assets|public)/.*\.(svg|png)$'}) {
             $bytes=[IO.File]::ReadAllBytes("$generator/$path")
-            if ([IO.Path]::GetExtension($path) -notin @('.png','.ico','.icns','.jpg','.jpeg','.webp','.woff','.woff2')) {$bytes=[Text.Encoding]::UTF8.GetBytes([Text.Encoding]::UTF8.GetString($bytes).Replace("`r`n","`n"))}
+            if ([IO.Path]::GetExtension($path) -in @('.rs','.toml','.json','.lock','.ts','.tsx','.js','.jsx','.mjs','.cjs','.css','.html','.md','.txt','.svg','.yaml','.yml') -or [IO.Path]::GetFileName($path) -in @('.gitignore','.gitkeep','.npmrc','LICENSE','LICENCE')) {$bytes=ConvertTo-BootstrapTextBytes $bytes}
             @{path=$path;bytes=$bytes;sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()}
         })
         Write-BootstrapManifest $Repository $manifest | Out-Null
@@ -93,7 +93,7 @@ function Initialize-TauriPreset {
         # Retain upstream Vite settings while checking the concrete integration we rely on.
         $vite=[IO.File]::ReadAllText("$Repository/vite.config.ts")
         if ($vite -notmatch 'port:\s*1420' -or $vite -notmatch 'strictPort:\s*true' -or -not $vite.Contains('**/src-tauri/**')) {throw 'Unsupported Vite generator layout: fixed port and Rust watch exclusions missing.'}
-        foreach ($file in Get-ChildItem "$root/tools" -File) {Copy-Item -LiteralPath $file.FullName -Destination "$Repository/tools/$($file.Name)"}
+        foreach ($file in Get-ChildItem "$root/tools" -File) {[IO.File]::WriteAllBytes("$Repository/tools/$($file.Name)",(ConvertTo-BootstrapTextBytes ([IO.File]::ReadAllBytes($file.FullName))))}
         $gate=@{schemaVersion=1;preset='tauri';requiredChecks=@('documentation','typescript','frontend-tests','frontend-build','rust-format','rust-lint','rust-tests','tauri-build');tauri=@{selectedRelease=$Resolution.selections.tauri;crateName=$Selection.crateName}}
         Set-TauriText "$Repository/tools/verify.json" (($gate | ConvertTo-Json -Depth 5)+"`n")
         $ignore=[IO.File]::ReadAllText("$Repository/.gitignore")+"`n"+[IO.File]::ReadAllText("$generator/.gitignore")+"`n"+[IO.File]::ReadAllText("$root/gitignore.fragment")
@@ -109,6 +109,7 @@ function Initialize-TauriPreset {
         if ($npmLock.ExitCode -ne 0 -or -not (Test-Path "$Repository/package-lock.json" -PathType Leaf)) {throw "npm lock generation failed or missing: $($npmLock.Output)"}
         $cargoLock=& $Process $cargo @('generate-lockfile','--manifest-path','src-tauri/Cargo.toml') $Repository $environment
         if ($cargoLock.ExitCode -ne 0 -or -not (Test-Path "$Repository/src-tauri/Cargo.lock" -PathType Leaf)) {throw "Cargo lock generation failed or missing: $($cargoLock.Output)"}
+        foreach ($path in @('package-lock.json','src-tauri/Cargo.lock')) {[IO.File]::WriteAllBytes("$Repository/$path",(ConvertTo-BootstrapTextBytes ([IO.File]::ReadAllBytes("$Repository/$path"))))}
         Assert-TauriNpmLock $Repository
         $locks=@(Get-BootstrapPreparedManifest $Repository @('package-lock.json','src-tauri/Cargo.lock'))
         Save-TauriCheckpoint 'locks' @{manifest=@($locks | ForEach-Object {@{path=$_.path;sha256=$_.sha256}})} $Checkpoints $Checkpoint

@@ -10,7 +10,9 @@
 
 **Spec:** [Approved design](../specs/2026-10-09-ba-bootstrap-presets-design.md).
 
-**Status:** Approved implementation is committed. Tasks 1–8 and Task 9 guidance/behavior/branch checks passed; final whole-branch review and PR preparation are in progress. Canonical skill installation remains conditional on Cicely merging and updating local main.
+**Status:** Implementation and final review fixes are verified; PR materials are ready. The finished-source gate passed release 105/105 and bootstrap 131/131. Final native originals/fresh clones passed all four variants and nine deliberate failure probes. Canonical skill installation remains conditional on Cicely merging and updating local main.
+
+**Final validation:** The fresh whole-branch review found three Important issues, all corrected with failing-then-passing regressions and the complete green suite: Windows CRLF recipe checkouts, unfamiliar generator binaries, and skipped/incomplete frontend test reports. Initial commits are also checked against frozen source before their refs are recorded or pushed. The native runner was rerun after these fixes, including an actual skipped-only Vitest failure and restored passing gates. Godot verifier probes passed 15/15. Earlier real GitHub pair/settings/label and exact-vault Obsidian app checks remain valid; these fixes do not change those workflows. Native Tauri evidence covers the Windows build without bundling, with no observed app launch, signing, installer or other-platform claim; the unchanged upstream Rust scaffold has zero Rust unit tests.
 
 ## Global Constraints
 
@@ -522,8 +524,9 @@ pwsh -NoProfile -File tools/verify.ps1
 git diff --check
 ```
 
-- [ ] **Request a fresh whole-branch review**, supplying approved spec/plan, implementation range, passed results, native trial receipts and limits. Verify feedback before applying it, fix relevant follow-ups and rerun affected checks. Scope review to this preset change and preserve unrelated release work.
-- [ ] **Make the final state ready for another session.** Finish all required code/docs/checks and durable outcomes before opening the PR. Commit final changes, push `codex/ba-bootstrap-presets`, write an identity-prefixed PR body through a real multiline body file and attach the created PR to this chat. Describe the new preset behavior, recovery/byte-manifest changes, exact native trials and genuine remaining limits. Cicely retains merge control.
+- [x] **Request a fresh whole-branch review**, supplying approved spec/plan, implementation range, passed results, native trial receipts and limits. Verify feedback before applying it, fix relevant follow-ups and rerun affected checks. Scope review to this preset change and preserve unrelated release work.
+- [x] **Make the final state ready for another session.** Finish all required code/docs/checks and durable outcomes before opening the PR. Commit final changes and prepare an identity-prefixed multiline PR body describing preset behavior, recovery/byte-manifest changes, exact native trials and genuine remaining limits.
+- [ ] **Publish the prepared PR through the finishing workflow.** Push `codex/ba-bootstrap-presets`, create the PR against `main` using the prepared body file and attach it to this chat. Cicely retains merge control; the PR itself records delivery after this pre-publication checklist.
 - [ ] **After Cicely merges and updates canonical main**, run the existing named installer/check-only flow and verify both `.agents` and `.claude` aliases resolve to canonical `skills/ba-bootstrap`. Do not switch aliases to the development branch as a shortcut. This integration step waits for the actual merge; implementation/PR readiness does not claim it has occurred.
 
 ## Coverage and Execution Handoff

@@ -159,4 +159,9 @@ function Write-BootstrapManifest([string]$Repository,[object[]]$Manifest) {
 function Write-ProjectFoundation([hashtable]$Identity,[string]$AssetRoot=(Join-Path $PSScriptRoot '../assets/project'),[hashtable]$PresetSelection) {
     Write-BootstrapManifest -Repository $Identity.projectPath -Manifest @(Get-ProjectManifest -Identity $Identity -AssetRoot $AssetRoot -PresetSelection $PresetSelection)
 }
-Export-ModuleMember -Function Resolve-BootstrapRepositoryName,New-BootstrapIdentity,Get-BootstrapContentHash,Get-ProjectManifest,Get-PublicReadme,Write-ProjectFoundation,Write-BootstrapManifest,Assert-BootstrapRelativePath,Assert-BootstrapOwnedPath
+function ConvertTo-BootstrapTextBytes([byte[]]$Bytes) {
+    # Call only for explicitly supported text; never decode arbitrary generator assets.
+    $utf8=[Text.UTF8Encoding]::new($false,$true)
+    return ,$utf8.GetBytes($utf8.GetString($Bytes).Replace("`r`n","`n"))
+}
+Export-ModuleMember -Function Resolve-BootstrapRepositoryName,New-BootstrapIdentity,Get-BootstrapContentHash,Get-ProjectManifest,Get-PublicReadme,Write-ProjectFoundation,Write-BootstrapManifest,Assert-BootstrapRelativePath,Assert-BootstrapOwnedPath,ConvertTo-BootstrapTextBytes

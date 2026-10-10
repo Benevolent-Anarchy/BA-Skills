@@ -81,6 +81,11 @@ function Invoke-TauriVerification([string]$Repository,[hashtable]$Config,[script
                 if ($root.LocalName -cne 'testsuites' -or $root.GetAttribute('tests') -cnotmatch '^[0-9]+$' -or [int]$root.GetAttribute('tests') -lt 1) {throw 'Frontend test results are malformed or contain zero tests.'}
                 foreach ($field in @('failures','errors')) {if ($root.GetAttribute($field) -cnotmatch '^[0-9]+$' -or [int]$root.GetAttribute($field) -ne 0) {throw "Frontend test results reported $field."}}
                 if ($xml.SelectNodes('//failure|//error').Count -gt 0) {throw 'Frontend test results contain failures.'}
+                $cases=@($xml.SelectNodes('//testcase'))
+                if ($cases.Count -ne [int]$root.GetAttribute('tests')) {throw 'Frontend test report counts do not match actual testcase records.'}
+                $skipped=@($cases | Where-Object {$null -ne $_.SelectSingleNode('skipped')}).Count
+                if ($root.HasAttribute('skipped') -and ($root.GetAttribute('skipped') -cnotmatch '^[0-9]+$' -or [int]$root.GetAttribute('skipped') -ne $skipped)) {throw 'Frontend test report skipped count is inconsistent.'}
+                if ($cases.Count - $skipped -lt 1) {throw 'Frontend test results contain zero executed non-skipped tests.'}
             }
             if ($stage -ceq 'tauri-build') {
                 $extension=if($IsWindows){'.exe'}else{''}

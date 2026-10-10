@@ -50,7 +50,7 @@ function New-TauriProcessFixture {
         if ($arguments -contains 'ci' -and $arguments -notcontains '--dry-run' -and $fixture.mode -ne 'install') {[IO.Directory]::CreateDirectory("$cwd/node_modules") | Out-Null}
         if ($arguments -contains 'metadata') {return @{ExitCode=0;Output=(& $fixture.metadata | ConvertTo-Json -Depth 8);Executable=$exe}}
         if ($environment.ContainsKey('BA_TAURI_RESULTS')) {
-            if ($fixture.mode -ne 'report') {Write-FixtureText $environment.BA_TAURI_RESULTS '<testsuites name="vitest" tests="1" failures="0" errors="0" />'}
+            if ($fixture.mode -ne 'report') {Write-FixtureText $environment.BA_TAURI_RESULTS '<testsuites name="vitest" tests="1" failures="0" errors="0"><testsuite tests="1" skipped="0"><testcase name="entry point" /></testsuite></testsuites>'}
         }
         if ($arguments -contains '--no-bundle') {[IO.Directory]::CreateDirectory("$cwd/src-tauri/target/release") | Out-Null;[IO.File]::WriteAllBytes("$cwd/src-tauri/target/release/starter.exe",[byte[]]@(1,2))}
         $fail=($fixture.mode -eq 'install' -and $arguments -contains 'ci') -or ($environment.ContainsKey('BA_TAURI_STAGE') -and $fixture.mode -ceq $environment.BA_TAURI_STAGE)

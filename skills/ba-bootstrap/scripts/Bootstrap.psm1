@@ -336,7 +336,9 @@ function Invoke-Bootstrap(
                 } else {
                     Invoke-CheckedGit $Git $Identity.projectPath (@('add','-f','--')+@($manifest.path)) | Out-Null
                     Invoke-CheckedGit $Git $Identity.projectPath @('commit','-m','Initial project foundation') | Out-Null
-                    $journal.refs.privateMain=Invoke-CheckedGit $Git $Identity.projectPath @('rev-parse','HEAD')
+                    $initial=Invoke-CheckedGit $Git $Identity.projectPath @('rev-parse','HEAD')
+                    Assert-BootstrapInitialCommit $Identity $manifest $Git $initial
+                    $journal.refs.privateMain=$initial
                 }
                 Write-BootstrapJournal $path $journal $lock
             }

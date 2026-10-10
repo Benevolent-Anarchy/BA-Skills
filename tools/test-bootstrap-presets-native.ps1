@@ -105,6 +105,7 @@ try {
             } else {
                 $negative.Add((Invoke-NativeNegative $clone 'TypeScript compilation' 'src/main.ts' 'broken-typescript.ts' 'typescript: FAILED'))
                 $negative.Add((Invoke-NativeNegative $clone 'frontend assertion' 'src/main.test.ts' 'failing-frontend.test.ts' 'frontend-tests: FAILED'))
+                $negative.Add((Invoke-NativeNegative $clone 'frontend all skipped' 'src/main.test.ts' 'skipped-frontend.test.ts' 'frontend-tests: FAILED'))
                 $negative.Add((Invoke-NativeNegative $clone 'Rust compilation' 'src-tauri/src/lib.rs' 'broken-rust.rs' '(rust-lint|rust-tests|tauri-build): FAILED'))
                 $dependency=Join-Path $clone 'src-tauri/Cargo.lock'
             }
