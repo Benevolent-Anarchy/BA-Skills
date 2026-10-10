@@ -26,6 +26,15 @@ function Get-BootstrapReport($Identity,$Journal,$Status,$Pending=@(),$Conflicts=
     $v2=$null -ne $Journal -and $Journal.schemaVersion -eq 2
     @{status=$Status;identity=$Identity;preset=$preset;resolution=$(if($v2){$Journal.resolution}else{$null});preparation=$(if($v2){$Journal.preparation}else{$null});verification=$(if($v2){$Journal.verification}else{$null});prerequisites=$(if($Journal -and $Journal.ContainsKey('prerequisites')){$Journal.prerequisites}else{$null});phases=$(if ($null -ne $Journal) {$Journal.phases} else {@{}});pending=@($Pending);conflicts=@($Conflicts);browserEvidence=$(if ($null -ne $Journal) {$Journal.browserEvidence} else {@{}});obsidian=$(if ($null -ne $Journal -and $Journal.ContainsKey('obsidian')) {$Journal.obsidian} else {@{}});journalPath=(Get-BootstrapJournalPath $Identity $StateRoot)}
 }
+function Invoke-BootstrapCompletionCleanup([hashtable]$Journal,[string]$StateRoot) {
+    try {
+        Remove-BootstrapCompletedPreparation $Journal $StateRoot
+        return @{status='removed'}
+    } catch {
+        # Disposable-cache failures cannot undo recorded project completion.
+        return @{status='deferred';reason=$_.Exception.Message}
+    }
+}
 function Get-CreationFailureMessage($Kind,$Failure) {
     $details=if (@($Failure.errors).Count) {' Errors: '+($Failure.errors | ConvertTo-Json -Depth 12 -Compress)} else {''}
     "GitHub $Kind repository creation failed (HTTP $($Failure.statusCode)): $($Failure.message)$details Repair the reported condition, then explicitly resume using the stored inputs."
@@ -244,7 +253,7 @@ function Invoke-Bootstrap(
     [hashtable]$PresetSelection,[scriptblock]$PrerequisiteProbe,[scriptblock]$Prepare,
     [scriptblock]$Process={param($exe,$arguments,$cwd,$environment) Invoke-VerificationProcess $exe $arguments $cwd $environment}
 ) {
-    $lock=$null;$journal=$null;$path=Get-BootstrapJournalPath $Identity $StateRoot
+    $lock=$null;$journal=$null;$cleanup=$null;$path=Get-BootstrapJournalPath $Identity $StateRoot
     try {
         $plan=Get-BootstrapPlan $Identity $Request $StateRoot $Git $PresetSelection $PrerequisiteProbe
         if ($plan.status -ne 'ready') {return $plan}
@@ -257,8 +266,9 @@ function Invoke-Bootstrap(
         $selection=$plan.preset
         if ($null -eq $journal) {$journal=New-BootstrapJournal $Identity @() $selection;$journal.prerequisites=$plan.prerequisites;Write-BootstrapJournal $path $journal $lock}
         if ($journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified') {
-            Remove-BootstrapCompletedPreparation $journal $StateRoot
+            $cleanup=Invoke-BootstrapCompletionCleanup $journal $StateRoot
             $report=Get-BootstrapStatus $Identity $StateRoot $Request
+            $report.cleanup=$cleanup
             if ($RefreshPlugins) {
                 $report.status='blocked'
                 $report.pending+="Completed bootstrap preserves project development. Run local-setup with -Repository '$($Identity.projectPath)' -RefreshPlugins to update this vault."
@@ -446,9 +456,11 @@ function Invoke-Bootstrap(
         }
         if ($journal.phases.pullRequests -eq 'verified' -and $journal.phases.obsidian -eq 'verified' -and ($journal.schemaVersion -eq 1 -or ($journal.verification.staging.Passed -and $journal.verification.checkout.Passed))) {
             Save-Phase 'complete'
-            Remove-BootstrapCompletedPreparation $journal $StateRoot
+            $cleanup=Invoke-BootstrapCompletionCleanup $journal $StateRoot
         }
-        return Get-BootstrapStatus $Identity $StateRoot $Request
+        $report=Get-BootstrapStatus $Identity $StateRoot $Request
+        if ($null -ne $cleanup) {$report.cleanup=$cleanup}
+        return $report
     } catch {
         $status=if ($null -ne $journal) {'partial'} else {'blocked'}
         return Get-BootstrapReport $Identity $journal $status @($_.Exception.Message) -StateRoot $StateRoot

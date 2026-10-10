@@ -118,3 +118,54 @@ Test 'review recovery owned cleanup validates the whole batch before deletion' {
     Expect-Error {Remove-BootstrapOwnedItems $owned @("$owned/keep.txt","$owned/tree")} 'link'
     Assert ((Test-Path "$owned/keep.txt") -and (Test-Path "$owned/tree/file.txt") -and (Test-Path "$outside/keep.txt")) 'Cleanup ignored a descendant link.'
 }
+Test 'review cleanup held file does not undo completion and retries after release' {
+    $api=New-GitHubFixture -FailPhase labels;$api.appEnabled=$true;$api.supportsPullRequests=$true
+    $id=New-BootstrapIdentity -Name 'Held staging cleanup' -Description 'Purpose' -Parent $sandbox
+    $selection=Resolve-BootstrapPreset $id -Preset foundation
+    $first=Invoke-Bootstrap $id $api.stateRoot $api.request $api.git $api.obsidianSetup -PresetSelection $selection
+    Assert ($first.status -eq 'partial' -and $first.phases.privateContent -eq 'verified') 'Fixture did not reach labels.'
+    $journal=Read-BootstrapJournal $first.journalPath
+    $staging=Join-Path $api.stateRoot "preparing/$($journal.invocationId)"
+    $heldPath=Join-Path $staging 'source/node_modules/held.bin';Write-FixtureText $heldPath 'held cache'
+    $held=[IO.File]::Open($heldPath,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    try {
+        $api.failPhase=''
+        $complete=Invoke-Bootstrap $id $api.stateRoot $api.request $api.git $api.obsidianSetup
+        Assert ($complete.status -eq 'complete' -and $complete.pending.Count -eq 0) "Cleanup undid completion: $($complete.status); $($complete.pending -join '; ')"
+        Assert ($complete.cleanup.status -eq 'deferred' -and $complete.cleanup.reason -match 'held.bin|access|process') 'Locked cleanup has no separate diagnostic.'
+        Assert ((Test-Path $staging) -and (Test-Path $heldPath)) 'Failed cleanup lost its held tree.'
+        $recorded=[IO.File]::ReadAllText($first.journalPath)
+        $status=Get-BootstrapStatus $id $api.stateRoot $api.request
+        Assert ($status.status -eq 'complete' -and [IO.File]::ReadAllText($first.journalPath) -ceq $recorded) 'Status changed completion or its journal.'
+        $again=Invoke-Bootstrap $id $api.stateRoot $api.request $api.git $api.obsidianSetup -Prepare {throw 'no preparation'} -Process {throw 'no rebuild'} -PrerequisiteProbe {throw 'no SDKs'}
+        Assert ($again.status -eq 'complete' -and $again.cleanup.status -eq 'deferred' -and $again.pending.Count -eq 0) 'Repeated locked cleanup reports unfinished bootstrap.'
+        Assert ([IO.File]::ReadAllText($first.journalPath) -ceq $recorded) 'Cleanup retry changed the completed journal.'
+    } finally {$held.Dispose()}
+    $cleared=Invoke-Bootstrap $id $api.stateRoot $api.request $api.git $api.obsidianSetup -Prepare {throw 'no preparation'} -Process {throw 'no rebuild'} -PrerequisiteProbe {throw 'no SDKs'}
+    Assert ($cleared.status -eq 'complete' -and $cleared.cleanup.status -eq 'removed' -and -not (Test-Path $staging)) 'Released cache was not cleaned on resume.'
+    Assert ([IO.File]::ReadAllText($first.journalPath) -ceq $recorded) 'Successful cleanup rewrote completion evidence.'
+    $frozen=Read-BootstrapPreparedProject (Read-BootstrapJournal $first.journalPath) $api.stateRoot
+    Assert ($frozen.manifest.Count -gt 0) 'Cleanup lost frozen recovery bytes.'
+}
+Test 'review cleanup junction remains refused without changing completed status' {
+    $api=New-GitHubFixture -FailPhase labels;$api.appEnabled=$true;$api.supportsPullRequests=$true
+    $id=New-BootstrapIdentity -Name 'Linked staging cleanup' -Description 'Purpose' -Parent $sandbox
+    $first=Invoke-Bootstrap $id $api.stateRoot $api.request $api.git $api.obsidianSetup -PresetSelection (Resolve-BootstrapPreset $id -Preset foundation)
+    Assert ($first.status -eq 'partial' -and $first.phases.privateContent -eq 'verified') 'Fixture did not reach labels.'
+    $journal=Read-BootstrapJournal $first.journalPath
+    $staging=Join-Path $api.stateRoot "preparing/$($journal.invocationId)"
+    $outside=New-BootstrapFixture 'cleanup junction target';Write-FixtureText "$outside/keep.txt" 'outside proof'
+    New-Item -ItemType Directory -Path "$staging/source/node_modules" -Force | Out-Null
+    New-Item -ItemType Junction -Path "$staging/source/node_modules/linked" -Target $outside | Out-Null
+    $before=(Get-FileHash -LiteralPath "$staging/source/README.md").Hash
+    $api.failPhase=''
+    $complete=Invoke-Bootstrap $id $api.stateRoot $api.request $api.git $api.obsidianSetup
+    Assert ($complete.status -eq 'complete' -and $complete.pending.Count -eq 0) "Junction cleanup undid completion: $($complete.status); $($complete.pending -join '; ')"
+    Assert ($complete.cleanup.status -eq 'deferred' -and $complete.cleanup.reason -match 'link') 'Junction refusal is not a separate cleanup diagnostic.'
+    $recorded=[IO.File]::ReadAllText($first.journalPath)
+    $again=Invoke-Bootstrap $id $api.stateRoot $api.request $api.git $api.obsidianSetup -Prepare {throw 'no preparation'} -Process {throw 'no rebuild'} -PrerequisiteProbe {throw 'no SDKs'}
+    Assert ($again.status -eq 'complete' -and $again.cleanup.status -eq 'deferred' -and $again.pending.Count -eq 0) 'Junction permanently blocks completed resume.'
+    Assert ((Get-FileHash -LiteralPath "$staging/source/README.md").Hash -ceq $before -and [IO.File]::ReadAllText("$outside/keep.txt") -ceq 'outside proof') 'Cleanup mutated staging or the linked target.'
+    Assert ([IO.File]::ReadAllText($first.journalPath) -ceq $recorded -and (Get-BootstrapStatus $id $api.stateRoot $api.request).status -eq 'complete') 'Cleanup changed durable completion.'
+    Assert ((Read-BootstrapPreparedProject (Read-BootstrapJournal $first.journalPath) $api.stateRoot).manifest.Count -gt 0) 'Cleanup lost the frozen snapshot.'
+}
