@@ -1,7 +1,7 @@
 # BA-Skills
 BA's shared agent skills and deterministic tooling. The same canonical skill folders can be used by Codex, Claude Code and other agents.
 
-The [bootstrap skill](skills/ba-bootstrap/SKILL.md) creates a private project, its public release-notes companion, topical documentation, agent rules and an ignored local Obsidian vault. Existing clones can receive the same vault setup without creating repositories. This first version provides the shared foundation; engine presets follow separately.
+The [bootstrap skill](skills/ba-bootstrap/SKILL.md) creates a private project, its public release-notes companion, topical documentation, agent rules and an ignored local Obsidian vault. Choose Godot (the default), Tauri or the documentation-only foundation; see [preset setup and prerequisites](skills/ba-bootstrap/references/presets.md). Existing clones can receive the same vault setup without creating repositories.
 
 The [release skill](skills/ba-release/SKILL.md) prepares and publishes Godot releases.
 Use PowerShell 7.3 or newer for release operations and repository verification;

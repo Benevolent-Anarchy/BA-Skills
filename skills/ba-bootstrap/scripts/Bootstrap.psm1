@@ -3,6 +3,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'Project.psm1')
 Import-Module (Join-Path $PSScriptRoot 'State.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Presets.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Preparation.psm1')
+Import-Module (Join-Path $PSScriptRoot '../assets/project/tools/Verification.psm1')
 Import-Module (Join-Path $PSScriptRoot 'GitHub.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Obsidian.psm1')
 Import-Module (Join-Path $PSScriptRoot '../assets/project/tools/Documentation.psm1')
@@ -19,7 +22,18 @@ function Invoke-CheckedGit($Git,$Repository,$Arguments) {
     return $result.Output.Trim()
 }
 function Get-BootstrapReport($Identity,$Journal,$Status,$Pending=@(),$Conflicts=@(),[string]$StateRoot=(Get-BootstrapStateRoot)) {
-    @{status=$Status;identity=$Identity;phases=$(if ($null -ne $Journal) {$Journal.phases} else {@{}});pending=@($Pending);conflicts=@($Conflicts);browserEvidence=$(if ($null -ne $Journal) {$Journal.browserEvidence} else {@{}});obsidian=$(if ($null -ne $Journal -and $Journal.ContainsKey('obsidian')) {$Journal.obsidian} else {@{}});journalPath=(Get-BootstrapJournalPath $Identity $StateRoot)}
+    $preset=if ($null -eq $Journal) {$null} elseif ($Journal.schemaVersion -eq 2) {$Journal.presetSelection} else {Resolve-BootstrapPreset $Identity -Preset foundation}
+    $v2=$null -ne $Journal -and $Journal.schemaVersion -eq 2
+    @{status=$Status;identity=$Identity;preset=$preset;resolution=$(if($v2){$Journal.resolution}else{$null});preparation=$(if($v2){$Journal.preparation}else{$null});verification=$(if($v2){$Journal.verification}else{$null});prerequisites=$(if($Journal -and $Journal.ContainsKey('prerequisites')){$Journal.prerequisites}else{$null});phases=$(if ($null -ne $Journal) {$Journal.phases} else {@{}});pending=@($Pending);conflicts=@($Conflicts);browserEvidence=$(if ($null -ne $Journal) {$Journal.browserEvidence} else {@{}});obsidian=$(if ($null -ne $Journal -and $Journal.ContainsKey('obsidian')) {$Journal.obsidian} else {@{}});journalPath=(Get-BootstrapJournalPath $Identity $StateRoot)}
+}
+function Invoke-BootstrapCompletionCleanup([hashtable]$Journal,[string]$StateRoot) {
+    try {
+        Remove-BootstrapCompletedPreparation $Journal $StateRoot
+        return @{status='removed'}
+    } catch {
+        # Disposable-cache failures cannot undo recorded project completion.
+        return @{status='deferred';reason=$_.Exception.Message}
+    }
 }
 function Get-CreationFailureMessage($Kind,$Failure) {
     $details=if (@($Failure.errors).Count) {' Errors: '+($Failure.errors | ConvertTo-Json -Depth 12 -Compress)} else {''}
@@ -29,8 +43,33 @@ function Get-BootstrapStoredIdentity([string]$Name,[string]$Owner='Benevolent-An
     $repository=Resolve-BootstrapRepositoryName $Name
     $journal=Read-BootstrapJournal (Get-BootstrapJournalPath @{owner=$Owner;repository=$repository} $StateRoot)
     if ($null -eq $journal) {throw "No bootstrap journal exists for $Owner/$repository."}
-    if ($journal.identity.owner -ine $Owner -or $journal.identity.repository -ine $repository -or $journal.inputHash -ne (Get-BootstrapInputHash $journal.identity)) {throw 'Stored journal identity/input hash is inconsistent.'}
+    $selection=if($journal.schemaVersion -eq 2){$journal.presetSelection}else{$null}
+    if ($journal.identity.owner -ine $Owner -or $journal.identity.repository -ine $repository -or $journal.inputHash -ne (Get-BootstrapInputHash $journal.identity $selection)) {throw 'Stored journal identity/input hash is inconsistent.'}
     return $journal.identity
+}
+function Get-BootstrapStoredSelection([string]$Name,[string]$Owner='Benevolent-Anarchy',[string]$StateRoot=(Get-BootstrapStateRoot)) {
+    $identity=Get-BootstrapStoredIdentity $Name $Owner $StateRoot
+    $journal=Read-BootstrapJournal (Get-BootstrapJournalPath $identity $StateRoot)
+    if ($journal.schemaVersion -eq 2) {return $journal.presetSelection}
+    return Resolve-BootstrapPreset $identity -Preset foundation
+}
+function Remove-BootstrapInvocation([hashtable]$Identity,[string]$StateRoot=(Get-BootstrapStateRoot)) {
+    $root=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($StateRoot))
+    $path=Get-BootstrapJournalPath $Identity $root
+    Assert-BootstrapOwnedPath $root $path
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {throw 'No bootstrap journal exists to discard.'}
+    $lock=Enter-BootstrapLock $path
+    try {
+        $journal=Read-BootstrapJournal $path
+        $selection=if($journal.schemaVersion -eq 2){$journal.presetSelection}else{$null}
+        if ($journal.inputHash -cne (Get-BootstrapInputHash $Identity $selection)) {throw 'Discard identity differs from the recorded invocation.'}
+        if ($journal.repositories.Count -gt 0 -or $journal.refs.Count -gt 0 -or $journal.phases.ContainsKey('privateRepository') -or $journal.phases.ContainsKey('publicRepository')) {throw 'Discard refused: a repository creation attempt was recorded. Preserve remote identity and recovery evidence.'}
+        $targets=@(Get-BootstrapDisposablePreparationPaths $journal $root)+@(Join-Path $root "prepared/$($journal.invocationId)")
+        Remove-BootstrapOwnedItems $root $targets
+        # Delete the journal last; an interrupted cleanup remains safely retryable.
+        Remove-BootstrapOwnedItems $root @($path)
+        return @{status='discarded';identity=$journal.identity;journalPath=$path;pending=@();conflicts=@()}
+    } finally {$lock.Dispose()}
 }
 function Assert-BootstrapPublicSettings($Identity,$Request) {
     $public=(Invoke-CheckedApi $Request GET "/repos/$($Identity.notesFullName)").Data
@@ -110,12 +149,7 @@ function Assert-BootstrapFoundation($Manifest) {
     $sandbox=Join-Path $temporaryRoot ('ba-bootstrap-plan-'+[guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $sandbox | Out-Null
     try {
-        foreach ($entry in $Manifest) {
-            $target=[IO.Path]::GetFullPath((Join-Path $sandbox $entry.path))
-            if (-not $target.StartsWith($sandbox+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) {throw 'Foundation path escapes its preflight sandbox.'}
-            [IO.Directory]::CreateDirectory((Split-Path $target -Parent)) | Out-Null
-            [IO.File]::WriteAllText($target,$entry.text,[Text.UTF8Encoding]::new($false))
-        }
+        Write-BootstrapManifest $sandbox $Manifest | Out-Null
         $report=Test-ProjectDocumentation -Repository $sandbox
         if (-not $report.Passed) {
             $errors=@($report.Diagnostics | Where-Object Severity -eq 'error' | ForEach-Object {"{0}:{1}: {2}: {3}" -f $_.File,$_.Line,$_.Code,$_.Message})
@@ -127,15 +161,24 @@ function Assert-BootstrapFoundation($Manifest) {
         Remove-Item -LiteralPath $directory.FullName -Recurse -Force
     }
 }
-function Get-BootstrapPlan([hashtable]$Identity,[scriptblock]$Request=$script:DefaultRequest,[string]$StateRoot=(Get-BootstrapStateRoot),[scriptblock]$Git=$script:DefaultGit) {
-    $conflicts=[Collections.Generic.List[string]]::new();$journal=$null;$ownerType=$null
+function Get-BootstrapPlan([hashtable]$Identity,[scriptblock]$Request=$script:DefaultRequest,[string]$StateRoot=(Get-BootstrapStateRoot),[scriptblock]$Git=$script:DefaultGit,[hashtable]$PresetSelection,[scriptblock]$PrerequisiteProbe) {
+    $conflicts=[Collections.Generic.List[string]]::new();$journal=$null;$ownerType=$null;$selection=$PresetSelection;$prerequisites=$null
     try {
-        $manifest=Get-ProjectManifest $Identity
-        Assert-BootstrapFoundation $manifest
         $journal=Read-BootstrapJournal (Get-BootstrapJournalPath $Identity $StateRoot)
-        if ($null -ne $journal -and $journal.inputHash -ne (Get-BootstrapInputHash $Identity)) {throw 'Journal input differs from the requested identity.'}
-        if ($null -ne $journal -and -not ($journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified')) {Assert-BootstrapJournal $journal $Identity $manifest}
-        Test-BootstrapLocalState $Identity $journal $manifest $Git ($null -ne $journal -and $journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified')
+        if ($null -eq $selection) {$selection=if($null -eq $journal){Resolve-BootstrapPreset $Identity}elseif($journal.schemaVersion -eq 2){$journal.presetSelection}else{Resolve-BootstrapPreset $Identity -Preset foundation}}
+        $completed=$null -ne $journal -and $journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified'
+        $manifest=@()
+        if ($journal) {Assert-BootstrapJournal $journal $Identity $(if($journal.schemaVersion -eq 1 -and -not $completed){@(Get-ProjectManifest $Identity)}else{@()}) $selection}
+        if (-not $completed) {
+            if ($journal -and $journal.schemaVersion -eq 2 -and $journal.preparation.phase -in @('frozen','snapshotting')) {
+                $prepared=Get-BootstrapPublicationSource $journal $StateRoot
+                $manifest=$prepared.manifest
+            } else {$manifest=@(Get-ProjectManifest $Identity -PresetSelection $selection)}
+            Assert-BootstrapFoundation $manifest
+            $prerequisites=if($null -eq $PrerequisiteProbe){Get-BootstrapPrerequisites $selection}else{Get-BootstrapPrerequisites $selection $PrerequisiteProbe}
+            if (-not $prerequisites.passed) {throw ('Missing or unsupported prerequisites: '+(@($prerequisites.checks | Where-Object {-not $_.passed} | ForEach-Object {"$($_.name): $($_.message)"}) -join '; '))}
+        }
+        Test-BootstrapLocalState $Identity $journal $manifest $Git $completed
         $user=(Invoke-CheckedApi $Request GET '/user').Data
         $owner=(Invoke-CheckedApi $Request GET "/users/$($Identity.owner)").Data
         $ownerType=$owner.type
@@ -160,6 +203,7 @@ function Get-BootstrapPlan([hashtable]$Identity,[scriptblock]$Request=$script:De
     $report=Get-BootstrapReport $Identity $journal $(if ($conflicts.Count) {'blocked'} else {'ready'}) @() $conflicts.ToArray()
     if (@($conflicts | Where-Object {$_ -like 'identity-unconfirmed:*'}).Count) {$report.status='identity-unconfirmed'}
     $report.ownerType=$ownerType;$report.journalPath=Get-BootstrapJournalPath $Identity $StateRoot
+    $report.preset=$selection;$report.prerequisites=$prerequisites
     return $report
 }
 function Get-BootstrapStatus([hashtable]$Identity,[string]$StateRoot=(Get-BootstrapStateRoot),[scriptblock]$Request=$script:DefaultRequest) {
@@ -178,9 +222,15 @@ function Get-BootstrapStatus([hashtable]$Identity,[string]$StateRoot=(Get-Bootst
         foreach ($phase in @('privateRepository','publicRepository','privateContent','publicContent','labels','publicSettings')) {
             if (-not ($journal.phases.ContainsKey($phase) -and $journal.phases[$phase] -eq 'verified')) {$pending+="Unfinished bootstrap phase: $phase"}
         }
+        if ($journal.schemaVersion -eq 2) {
+            foreach ($phase in @('staging','checkout')) {
+                $receipt=$journal.verification[$phase]
+                if ($receipt -isnot [hashtable] -or $receipt.Passed -isnot [bool] -or -not $receipt.Passed -or $receipt.manifestHash -cne $journal.preparation.manifestHash) {$pending+="Unfinished native verification: $phase"}
+            }
+        }
         if (-not ($journal.phases.ContainsKey('pullRequests') -and $journal.phases.pullRequests -eq 'verified')) {$pending+="Disable Pull requests and verify in https://github.com/$($Identity.notesFullName)/settings"}
         if (-not ($journal.phases.ContainsKey('obsidian') -and $journal.phases.obsidian -eq 'verified')) {$pending+='Obsidian installation and first-use enablement verification'}
-        $status=if ($journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified') {'complete'} else {'partial'}
+        $status=if ($journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified' -and -not @($pending | Where-Object {$_ -like 'Unfinished native verification:*'}).Count) {'complete'} else {'partial'}
         $conflicts=@()
         foreach ($kind in @('private','public')) {
             if ($journal.repositories.ContainsKey($kind) -or -not $journal.phases.ContainsKey($kind+'Repository')) {continue}
@@ -199,21 +249,26 @@ function Get-BootstrapStatus([hashtable]$Identity,[string]$StateRoot=(Get-Bootst
 }
 function Invoke-Bootstrap(
     [hashtable]$Identity,[string]$StateRoot=(Get-BootstrapStateRoot),[scriptblock]$Request=$script:DefaultRequest,[scriptblock]$Git=$script:DefaultGit,
-    [scriptblock]$ObsidianSetup={param($id,$state,$refresh) Install-ProjectObsidian -Identity $id -StateRoot $state -RefreshPlugins:$refresh},[switch]$RefreshPlugins
+    [scriptblock]$ObsidianSetup={param($id,$state,$refresh) Install-ProjectObsidian -Identity $id -StateRoot $state -RefreshPlugins:$refresh},[switch]$RefreshPlugins,
+    [hashtable]$PresetSelection,[scriptblock]$PrerequisiteProbe,[scriptblock]$Prepare,
+    [scriptblock]$Process={param($exe,$arguments,$cwd,$environment) Invoke-VerificationProcess $exe $arguments $cwd $environment}
 ) {
-    $lock=$null;$journal=$null;$path=Get-BootstrapJournalPath $Identity $StateRoot
+    $lock=$null;$journal=$null;$cleanup=$null;$path=Get-BootstrapJournalPath $Identity $StateRoot
     try {
-        $plan=Get-BootstrapPlan $Identity $Request $StateRoot $Git
+        $plan=Get-BootstrapPlan $Identity $Request $StateRoot $Git $PresetSelection $PrerequisiteProbe
         if ($plan.status -ne 'ready') {return $plan}
         $lock=Enter-BootstrapLock $path
         # Repeat preflight after locking; another completed invocation may have changed state.
-        $plan=Get-BootstrapPlan $Identity $Request $StateRoot $Git
+        $plan=Get-BootstrapPlan $Identity $Request $StateRoot $Git $PresetSelection $PrerequisiteProbe
         if ($plan.status -ne 'ready') {return $plan}
         $manifest=Get-ProjectManifest $Identity
         $journal=Read-BootstrapJournal $path
-        if ($null -eq $journal) {$journal=New-BootstrapJournal $Identity $manifest;Write-BootstrapJournal $path $journal $lock}
+        $selection=$plan.preset
+        if ($null -eq $journal) {$journal=New-BootstrapJournal $Identity @() $selection;$journal.prerequisites=$plan.prerequisites;Write-BootstrapJournal $path $journal $lock}
         if ($journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified') {
+            $cleanup=Invoke-BootstrapCompletionCleanup $journal $StateRoot
             $report=Get-BootstrapStatus $Identity $StateRoot $Request
+            $report.cleanup=$cleanup
             if ($RefreshPlugins) {
                 $report.status='blocked'
                 $report.pending+="Completed bootstrap preserves project development. Run local-setup with -Repository '$($Identity.projectPath)' -RefreshPlugins to update this vault."
@@ -221,6 +276,35 @@ function Invoke-Bootstrap(
             return $report
         }
         function Save-Phase($Name,$Status='verified') {$journal.phases[$Name]=$Status;Write-BootstrapJournal $path $journal $lock}
+        if ($journal.schemaVersion -eq 2) {
+            if ($journal.preparation.phase -notin @('frozen','snapshotting')) {
+                if ($journal.recipeVersion -ne 1) {throw 'Unfinished preparation requires the matching recipe version; preserve its state.'}
+                $journal.preparation.phase='preparing';Write-BootstrapJournal $path $journal $lock
+                $write=Get-Command Write-BootstrapJournal
+                $checkpoint={param($phase,$value) $journal.preparation.checkpoints[$phase]=$value;& $write $path $journal $lock}.GetNewClosure()
+                if ($null -eq $Prepare) {$Prepare={param($id,$preset,$state,$root,$save) Initialize-BootstrapPreparation $id $preset $state $root $save -Process $Process}}
+                $prepared=& $Prepare $Identity $selection $journal $StateRoot $checkpoint
+                Save-BootstrapPreparedProject $journal $path $lock $prepared.sourcePath $prepared.manifest
+            } elseif ($journal.preparation.phase -eq 'snapshotting') {
+                $prepared=Get-BootstrapPublicationSource $journal $StateRoot
+                Save-BootstrapPreparedProject $journal $path $lock $prepared.sourcePath $prepared.manifest
+            }
+            $frozen=Read-BootstrapPreparedProject $journal $StateRoot;$manifest=$frozen.manifest
+            if ($journal.verification.staging -isnot [hashtable] -or -not $journal.verification.staging.Passed -or $journal.verification.staging.manifestHash -cne $journal.preparation.manifestHash) {
+                $source=Get-BootstrapPreparationSource $journal $StateRoot
+                Write-BootstrapManifest $source $manifest | Out-Null
+                Install-BootstrapLockedDependencies $source $selection $Process
+                $gate=Invoke-BootstrapProjectGate $source $Process
+                if ($gate.Passed) {
+                    try {Assert-BootstrapPreparedBytes $source $manifest;Assert-BootstrapIgnoreRules $source $manifest $selection $Git}
+                    catch {$gate.Passed=$false;$gate.Diagnostics+=@($_.Exception.Message)}
+                }
+                $gate.manifestHash=$journal.preparation.manifestHash;$gate.observedAt=[DateTime]::UtcNow.ToString('o');$journal.verification.staging=$gate
+                Write-BootstrapJournal $path $journal $lock
+                if (-not $gate.Passed) {throw ('Staging complete gate failed: '+($gate.Diagnostics -join '; '))}
+                Save-Phase 'stagingVerification'
+            }
+        }
         foreach ($kind in @('private','public')) {
             if ($journal.repositories.ContainsKey($kind)) {continue}
             $name=if ($kind -eq 'private') {$Identity.repository} else {$Identity.notesRepository}
@@ -230,7 +314,7 @@ function Invoke-Bootstrap(
             $endpoint=if ($plan.ownerType -eq 'Organization') {"/orgs/$($Identity.owner)/repos"} else {'/user/repos'}
             try {$response=& $Request POST $endpoint $body} catch {
                 $message=$_.Exception.Message
-                $report=Get-BootstrapPlan $Identity $Request $StateRoot $Git
+                $report=Get-BootstrapPlan $Identity $Request $StateRoot $Git $selection $PrerequisiteProbe
                 $report.status='identity-unconfirmed';$report.pending+=$message;return $report
             }
             $statusCode=if ($null -ne $response) {[int]$response.StatusCode} else {0}
@@ -249,7 +333,7 @@ function Invoke-Bootstrap(
             }
             if ($statusCode -ne 201 -or $null -eq $response.Data -or -not $response.Data.id) {
                 # Never bind a GET observation to an invocation whose create result was lost.
-                $report=Get-BootstrapPlan $Identity $Request $StateRoot $Git
+                $report=Get-BootstrapPlan $Identity $Request $StateRoot $Git $selection $PrerequisiteProbe
                 $report.status='identity-unconfirmed';return $report
             }
             $fullName=if ($kind -eq 'private') {$Identity.fullName} else {$Identity.notesFullName}
@@ -259,13 +343,20 @@ function Invoke-Bootstrap(
             Save-Phase ($kind+'Repository')
         }
         if (-not ($journal.phases.ContainsKey('privateContent') -and $journal.phases.privateContent -eq 'verified')) {
-            Write-ProjectFoundation $Identity | Out-Null
+            Write-BootstrapManifest $Identity.projectPath $manifest | Out-Null
             if (-not (Test-Path -LiteralPath (Join-Path $Identity.projectPath '.git'))) {
                 Invoke-CheckedGit $Git $Identity.projectPath @('init','--initial-branch=main') | Out-Null
                 Invoke-CheckedGit $Git $Identity.projectPath @('remote','add','origin',"https://github.com/$($Identity.fullName).git") | Out-Null
             }
-            $gate=& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $Identity.projectPath 'tools/verify.ps1') 2>&1
-            if ($LASTEXITCODE -ne 0) {throw "Initial documentation gate failed: $gate"}
+            Install-BootstrapLockedDependencies $Identity.projectPath $selection $Process
+            $gate=Invoke-BootstrapProjectGate $Identity.projectPath $Process
+            if ($gate.Passed) {
+                try {Assert-BootstrapPreparedBytes $Identity.projectPath $manifest;Assert-BootstrapIgnoreRules $Identity.projectPath $manifest $selection $Git}
+                catch {$gate.Passed=$false;$gate.Diagnostics+=@($_.Exception.Message)}
+            }
+            if ($journal.schemaVersion -eq 2) {$gate.manifestHash=$journal.preparation.manifestHash;$gate.observedAt=[DateTime]::UtcNow.ToString('o');$journal.verification.checkout=$gate;Write-BootstrapJournal $path $journal $lock}
+            if (-not $gate.Passed) {throw ('Checkout complete gate failed: '+($gate.Diagnostics -join '; '))}
+            if ($journal.schemaVersion -eq 2) {Save-Phase 'checkoutVerification'}
             if (-not $journal.refs.ContainsKey('privateMain')) {
                 $head=& $Git $Identity.projectPath @('rev-parse','--verify','HEAD')
                 if ($head.ExitCode -eq 0) {
@@ -274,7 +365,9 @@ function Invoke-Bootstrap(
                 } else {
                     Invoke-CheckedGit $Git $Identity.projectPath (@('add','-f','--')+@($manifest.path)) | Out-Null
                     Invoke-CheckedGit $Git $Identity.projectPath @('commit','-m','Initial project foundation') | Out-Null
-                    $journal.refs.privateMain=Invoke-CheckedGit $Git $Identity.projectPath @('rev-parse','HEAD')
+                    $initial=Invoke-CheckedGit $Git $Identity.projectPath @('rev-parse','HEAD')
+                    Assert-BootstrapInitialCommit $Identity $manifest $Git $initial
+                    $journal.refs.privateMain=$initial
                 }
                 Write-BootstrapJournal $path $journal $lock
             }
@@ -361,8 +454,13 @@ function Invoke-Bootstrap(
                 return $report
             }
         }
-        if ($journal.phases.pullRequests -eq 'verified' -and $journal.phases.obsidian -eq 'verified') {Save-Phase 'complete'}
-        return Get-BootstrapStatus $Identity $StateRoot $Request
+        if ($journal.phases.pullRequests -eq 'verified' -and $journal.phases.obsidian -eq 'verified' -and ($journal.schemaVersion -eq 1 -or ($journal.verification.staging.Passed -and $journal.verification.checkout.Passed))) {
+            Save-Phase 'complete'
+            $cleanup=Invoke-BootstrapCompletionCleanup $journal $StateRoot
+        }
+        $report=Get-BootstrapStatus $Identity $StateRoot $Request
+        if ($null -ne $cleanup) {$report.cleanup=$cleanup}
+        return $report
     } catch {
         $status=if ($null -ne $journal) {'partial'} else {'blocked'}
         return Get-BootstrapReport $Identity $journal $status @($_.Exception.Message) -StateRoot $StateRoot
@@ -382,4 +480,19 @@ function Set-BootstrapBrowserEvidence([hashtable]$Identity,[string]$Setting,[has
         return Get-BootstrapStatus $Identity $StateRoot $Request
     } finally {$lock.Dispose()}
 }
-Export-ModuleMember -Function Get-BootstrapPlan,Get-BootstrapStatus,Invoke-Bootstrap,Set-BootstrapBrowserEvidence,Get-BootstrapStoredIdentity
+function Assert-BootstrapIgnoreRules([string]$Repository,[object[]]$Manifest,[hashtable]$Selection,[scriptblock]$Git=$script:DefaultGit) {
+    if (-not (Test-Path "$Repository/.git")) {Invoke-CheckedGit $Git $Repository @('init','--initial-branch=main') | Out-Null}
+    $empty=Join-Path $Repository '.git/ba-bootstrap-empty-excludes'
+    [IO.File]::WriteAllText($empty,'')
+    $prefix=@('-c',"core.excludesFile=$empty")
+    $intended=& $Git $Repository ($prefix+@('check-ignore','--no-index','--')+@($Manifest.path))
+    if ($intended.ExitCode -ne 1) {throw "Project ignore rules hide intended source or failed: $($intended.Output)"}
+    $generated=@('dist/exports/probe','nested/dist/exports/probe','.test-results/probe')
+    if ($Selection.name -eq 'godot') {$generated+=@('.godot/cache/probe','assets/probe.translation','export_credentials.cfg','android/build/probe','.mono/probe')}
+    if ($Selection.name -eq 'tauri') {$generated+=@('node_modules/probe','src-tauri/target/probe','src-tauri/gen/schemas/probe','.vite/probe','coverage/probe','.env.local')}
+    foreach ($path in $generated) {$ignored=& $Git $Repository ($prefix+@('check-ignore','--no-index','--',$path));if ($ignored.ExitCode -ne 0) {throw "Required generated output is not ignored: $path"}}
+    $untracked=Invoke-CheckedGit $Git $Repository ($prefix+@('ls-files','--others','--exclude-standard'))
+    $unexpected=@($untracked -split "`n" | Where-Object {$_ -and $_ -cnotin @($Manifest.path)})
+    if ($unexpected.Count) {throw ('Unexpected unignored source outside frozen manifest: '+($unexpected -join ', '))}
+}
+Export-ModuleMember -Function Get-BootstrapPlan,Get-BootstrapStatus,Invoke-Bootstrap,Set-BootstrapBrowserEvidence,Get-BootstrapStoredIdentity,Get-BootstrapStoredSelection,Assert-BootstrapIgnoreRules,Remove-BootstrapInvocation

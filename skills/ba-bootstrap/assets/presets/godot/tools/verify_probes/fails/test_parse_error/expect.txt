@@ -1,0 +1,1 @@
+does not compile: res://test/unit/test_probe.gd

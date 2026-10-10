@@ -5,13 +5,34 @@
 | Result | Meaning and next action |
 | --- | --- |
 | `ready` | Read-only preflight succeeded; creation still needs an actual user request. |
-| `complete` | Required phases have verified receipts. Status rechecks remote identity/settings; browser/app receipts retain their observation time. |
+| `complete` | Required phases have verified receipts. A create/resume result can include a non-blocking `cleanup.status='deferred'` note. Status rechecks remote identity/settings; browser/app receipts retain their observation time. |
 | `partial` | Some work succeeded. Explain the reported pending items; repair that concrete condition and resume by name/owner. |
 | `blocked` | Conflicting paths, inputs, identity, access or state. Preserve existing material and explain the specific conflict. |
 | `identity-unconfirmed` | A create result was lost or unresolved. An observed name/ID alone cannot bind that repository to this invocation. Ask Cicely to resolve the named repository and ID; do not clear the journal or retry automatically. |
 | `missing-input` | Collect the listed inputs; no creation has started. |
+| `discarded` | Explicitly requested unpublished preparation was removed. A new invocation can use the same name. |
 
 Creation journals live under `%LOCALAPPDATA%/BA-Skills/ba-bootstrap/state/`; vault journals are separately keyed by actual vault path under `vaults/`. Use the result's exact `journalPath`. These files contain identity, generated hashes, returned repository IDs and phase/ref receipts, never authentication tokens. Atomic snapshots and an exclusive lock protect retries. Preserve unreadable or incompatible journals; use a matching skill version or resolve the concrete conflict before continuing.
+
+New creation journals use schema v2 and include normalized preset/options, recipe version, exact dependency resolution, retained preparation checkpoints, a byte manifest/frozen snapshot and separate native staging/checkout receipts. Complete preparation and the selected full gate before the first repository POST; verify effective ignores and unchanged source bytes before recording success. Repeat the full gate on the private checkout before committing its exact frozen tree. Documentation or frontend success alone cannot replace a missing native check.
+
+`plan` uses read-only prerequisite probes and validates documentation without generating/installing/building the engine. Status reports recorded selection and native receipts. Status/resume restore omitted options; explicit conflicting identity/preset/renderer/identifier options fail before services or mutation. Finished invocations do not require SDKs or rebuild later project development.
+
+An interrupted snapshot publication can reuse its exact retained source and completion receipt. A published missing, corrupted, extra or linked snapshot is preserved and rejected; do not regenerate it from moving skill assets/upstream releases. Completed generator and lock receipts remain authoritative. A reported generator, lock or Godot source-step failure rolls back only that step's owned output and records its outcome; resume retries using the recorded resolution. A crash with no recorded outcome stays unresolved and is never automatically regenerated.
+
+When Cicely explicitly asks to abandon an unpublished failed or incompatible preparation, run `discard` using its original name/owner:
+
+```powershell
+pwsh -NoProfile -File scripts/bootstrap.ps1 -Mode discard -Name 'Foo Bar Baz' -Owner Benevolent-Anarchy
+```
+
+Discard runs locally under the journal lock, validates ownership and rejects linked paths before deletion. It removes this invocation's preparation trees, unpublished snapshot fragments, frozen snapshot and journal; it preserves the project path and unrelated state. It refuses if either repository creation phase was ever recorded, including a failed or unresolved attempt, or if any repository ID/ref is retained. Such invocations require identity recovery. Do not discard automatically to bypass an incompatible latest release or a missing SDK. After an authorized discard, collect the new selection and plan/create normally; no silent downgrade or preset substitution occurs.
+
+Once `complete` is recorded, bootstrap attempts to remove `preparing/<invocationId>/` (generator, dependency extraction, installed packages and native build output) and that invocation's unpublished snapshot fragments. Incomplete invocations retain these trees for recovery; a Tauri staging tree can occupy several gigabytes. Completion keeps the journal, verification/acquisition receipts, and `prepared/<invocationId>/source` with its receipt.
+
+Create/resume reports `cleanup.status='removed'` after successful cleanup. A locked file, linked path or other cleanup error instead returns `cleanup.status='deferred'` with its `reason`; report the project as complete and explain this separate cache-removal note. Cleanup failures do not add unfinished work to `pending`, change the completion receipt or make a complete result exit nonzero. Remaining staging is retained, and linked targets remain protected. A later resume retries cleanup without rebuilding, requiring SDKs or rewriting the completed journal; release a transient lock or resolve a linked staging entry safely before retrying. This cleanup note describes that run and is not stored in the journal. Status stays read-only and does not attempt cleanup. Shared vault/plugin state is separate and retained.
+
+Schema v1 creation journals are foundation projects. Completed ones are reported without rewriting them or adding engine checks. An unfinished v1 invocation can resume only when its original foundation manifest still matches; otherwise preserve it and use the matching skill version. It cannot be silently converted into default Godot. See [presets.md](presets.md) for selection, version and clone rules.
 
 `plan` and `status` inspect without creating state, repositories, checkouts or plugins. `resume` restores the original inputs. A recorded-ID retry reuses both repositories; lost push/README responses are checked by ref/content readback. A completed invocation preserves later project development. Do not force-push, stage unrelated files, replace differing README content, or delete partial results as cleanup.
 

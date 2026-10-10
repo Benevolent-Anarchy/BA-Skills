@@ -1,0 +1,7 @@
+
+# Godot-generated caches and exports; source UIDs/import sidecars stay tracked.
+.godot/
+*.translation
+export_credentials.cfg
+.mono/
+android/build/

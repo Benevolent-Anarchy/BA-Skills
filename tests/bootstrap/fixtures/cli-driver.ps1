@@ -61,15 +61,26 @@ function Invoke-Cli([hashtable]$Parameters) {
 }
 $missing=Invoke-Cli @{Mode='create';Name='Missing Description'}
 Assert ($missing.code -eq 1 -and $missing.report.status -eq 'missing-input' -and $global:BoundaryCalls.Count -eq 0) 'Missing input contacted a service.'
+$discardIdentity=New-BootstrapIdentity -Name 'Abandoned CLI Project' -Description 'Purpose' -Parent $sandbox -Owner cicely-f
+Import-Module "$SkillRoot/scripts/Presets.psm1"
+$discardSelection=Resolve-BootstrapPreset $discardIdentity -Preset tauri
+$discardJournal=New-BootstrapJournal $discardIdentity @() $discardSelection
+$discardPath=Get-BootstrapJournalPath $discardIdentity;Write-BootstrapJournal $discardPath $discardJournal
+$discard=Invoke-Cli @{Mode='discard';Name=$discardIdentity.title;Owner='cicely-f'}
+Assert ($discard.code -eq 0 -and $discard.report.status -eq 'discarded' -and -not (Test-Path $discardPath) -and $global:BoundaryCalls.Count -eq 0) 'CLI discard failed, used the wrong owner or contacted GitHub.'
 $parent=Join-Path $sandbox 'first parent with spaces'
 New-Item -ItemType Directory -Path $parent | Out-Null
-$parameters=@{Name='CLI Literal Project';Description='Literal $5, `ticks`, and $(never execute).';Parent=$parent}
+$parameters=@{Name='CLI Literal Project';Description='Literal $5, `ticks`, and $(never execute).';Parent=$parent;Preset='foundation'}
 $plan=Invoke-Cli ($parameters+@{Mode='plan'})
 Assert ($plan.code -eq 0 -and $plan.report.status -eq 'ready') 'CLI plan failed.'
 Assert (-not (Test-Path $plan.report.identity.projectPath) -and -not (Test-Path $plan.report.journalPath)) 'Plan wrote checkout/state.'
 Assert (@($global:CliApi.calls | Where-Object method -ne 'GET').Count -eq 0) 'Plan mutated repository.'
 $create=Invoke-Cli ($parameters+@{Mode='create'})
 Assert ($create.code -eq 1 -and $create.report.status -eq 'partial' -and $create.report.phases.privateRepository -eq 'verified') ($create | ConvertTo-Json -Depth 30)
+$before=[IO.File]::ReadAllText($create.report.journalPath);$offset=$global:BoundaryCalls.Count
+$conflicting=Invoke-Cli @{Mode='resume';Name=$parameters.Name;Preset='tauri'}
+Assert ($conflicting.code -eq 1 -and $conflicting.report.status -eq 'blocked' -and ($conflicting.report.conflicts -join ' ') -match 'conflict') 'Conflicting preset accepted by CLI.'
+Assert ($global:BoundaryCalls.Count -eq $offset -and [IO.File]::ReadAllText($create.report.journalPath) -ceq $before) 'Conflicting resume touched a service or journal.'
 $global:CliApi.failPhase=''
 $resume=Invoke-Cli @{Mode='resume';Name=$parameters.Name;Owner='Benevolent-Anarchy'}
 Assert ($resume.code -eq 1 -and $resume.report.status -eq 'partial' -and $resume.report.phases.obsidian -eq 'needs-app') ($resume | ConvertTo-Json -Depth 30)
@@ -88,9 +99,31 @@ $checkoutOutput=& $global:FixtureRealGit -C $clone checkout --quiet main 2>&1
 Assert ($LASTEXITCODE -eq 0) ($checkoutOutput -join "`n")
 & $global:FixtureRealGit -C $clone remote set-url origin "https://github.com/$($id.fullName).git"
 $offset=$global:CliApi.calls.Count
+$engineSetup=Invoke-Cli @{Mode='local-setup';Repository=$clone;Preset='tauri'}
+Assert ($engineSetup.code -eq 1 -and $engineSetup.report.status -eq 'blocked' -and ($engineSetup.report.conflicts -join ' ') -match 'Obsidian only') 'local-setup accepted engine conversion.'
+Assert ($global:CliApi.calls.Count -eq $offset -and -not (Test-Path "$clone/docs/.obsidian")) 'Rejected engine setup changed the clone or contacted GitHub.'
 $local=Invoke-Cli @{Mode='local-setup';Repository=$clone}
 Assert ($local.code -eq 1 -and $local.report.status -eq 'partial' -and $local.report.installedVerified -and -not $local.report.enabledVerified) ($local | ConvertTo-Json -Depth 20)
 Assert (@($global:CliApi.calls | Select-Object -Skip $offset | Where-Object method -ne 'GET').Count -eq 0) 'Clone setup mutated GitHub.'
 Assert (@($global:CliApi.calls | Where-Object isRepositoryCreate).Count -eq 2) 'Duplicate repositories created.'
 Assert ((Get-Content -Raw "$clone/docs/.obsidian/plugins/vault-nickname/data-shared.json" | ConvertFrom-Json).nickname -ceq $id.title) 'Clone nickname wrong.'
-@{missing=$missing;plan=$plan;create=$create;resume=$resume;status=$status;local=$local;boundaryCalls=$global:BoundaryCalls.Count;creates=2;clone=$clone} | ConvertTo-Json -Depth 40
+# Record the offline app observation and supported public setting before completion.
+$global:CliApi.repos[$id.notesFullName].has_pull_requests=$false
+$journal=Read-BootstrapJournal $resume.report.journalPath
+$journal.phases.obsidian='verified';$journal.obsidian.enabledVerified=$true
+Write-BootstrapJournal $resume.report.journalPath $journal
+$staging=Join-Path (Get-BootstrapStateRoot) "preparing/$($journal.invocationId)"
+$heldPath=Join-Path $staging 'source/node_modules/held.bin';Write-FixtureText $heldPath 'held CLI cache'
+$held=[IO.File]::Open($heldPath,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+try {
+    $completed=Invoke-Cli @{Mode='resume';Name=$parameters.Name}
+    Assert ($completed.code -eq 0 -and $completed.report.status -eq 'complete' -and $completed.report.pending.Count -eq 0) "CLI cleanup changed success exit: $($completed.code), $($completed.report.status), $($completed.report.pending -join '; ')"
+    Assert ($completed.report.cleanup.status -eq 'deferred' -and $completed.report.cleanup.reason -match 'held.bin|access|process') 'CLI lost deferred cleanup diagnostic.'
+    $completedStatus=Invoke-Cli @{Mode='status';Name=$parameters.Name}
+    Assert ($completedStatus.code -eq 0 -and $completedStatus.report.status -eq 'complete' -and (Test-Path $heldPath)) 'Read-only CLI status lost completion or tried deletion.'
+    $repeated=Invoke-Cli @{Mode='resume';Name=$parameters.Name}
+    Assert ($repeated.code -eq 0 -and $repeated.report.status -eq 'complete' -and $repeated.report.cleanup.status -eq 'deferred') 'Completed CLI retry fails on held staging.'
+} finally {$held.Dispose()}
+$cleaned=Invoke-Cli @{Mode='resume';Name=$parameters.Name}
+Assert ($cleaned.code -eq 0 -and $cleaned.report.status -eq 'complete' -and $cleaned.report.cleanup.status -eq 'removed' -and -not (Test-Path $staging)) 'CLI did not retry released cleanup successfully.'
+@{missing=$missing;plan=$plan;create=$create;resume=$resume;status=$status;local=$local;completed=$completed;cleaned=$cleaned;boundaryCalls=$global:BoundaryCalls.Count;creates=2;clone=$clone} | ConvertTo-Json -Depth 40
