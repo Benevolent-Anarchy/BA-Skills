@@ -23,14 +23,20 @@ function Get-TauriProcessEnvironment([string]$Repository) {
     $cargo=Get-TauriTool 'cargo';$node=Get-TauriTool 'node'
     return @{PATH=((Split-Path $cargo -Parent)+[IO.Path]::PathSeparator+(Split-Path $node -Parent)+[IO.Path]::PathSeparator+$env:PATH);CARGO_TARGET_DIR=(Join-Path $Repository 'src-tauri/target')}
 }
-function Assert-TauriSelectedRelease([hashtable]$Resolution,[hashtable]$CargoMetadata) {
+function Assert-TauriSelectedRelease([hashtable]$Resolution,[hashtable]$CargoMetadata,[switch]$RequireExactPreparedVersions) {
     $root=$CargoMetadata.resolve.root
     $node=@($CargoMetadata.resolve.nodes | Where-Object id -CEQ $root)
     if (-not $root -or $node.Count -ne 1) {throw 'Cargo metadata does not identify one application root.'}
     $dep=@($node[0].deps | Where-Object name -CEQ 'tauri')
     if ($dep.Count -ne 1) {throw 'Application does not have exactly one direct Tauri dependency.'}
     $package=@($CargoMetadata.packages | Where-Object id -CEQ $dep[0].pkg)
-    if ($package.Count -ne 1 -or $package[0].name -cne 'tauri' -or $package[0].version -cne $Resolution.selections.tauri) {throw "Application does not use selected Tauri release $($Resolution.selections.tauri); preserve the failed preparation rather than selecting an older release."}
+    $selected=[string]$Resolution.selections.tauri
+    $valid=$package.Count -eq 1 -and $package[0].name -ceq 'tauri' -and $package[0].version -cmatch '^[0-9]+\.[0-9]+\.[0-9]+$'
+    if ($RequireExactPreparedVersions) {
+        if (-not $valid -or $package[0].version -cne $selected) {throw "Application does not use selected Tauri release $selected; preserve the failed preparation rather than selecting an older release."}
+    } elseif (-not $valid -or ([version]$package[0].version).Major -ne ([version]$selected).Major -or [version]$package[0].version -lt [version]$selected) {
+        throw "Application requires a stable Tauri release at least $selected in the same major. For an intentional major upgrade, update dependencies and locks together, then record the new baseline in tools/verify.json (tauri.selectedRelease)."
+    }
 }
 function Assert-TauriNpmLock([string]$Repository) {
     $package=[IO.File]::ReadAllText("$Repository/package.json") | ConvertFrom-Json -AsHashtable
@@ -45,7 +51,7 @@ function Assert-TauriNpmLock([string]$Repository) {
         foreach ($key in $expected.Keys) {if (-not $actual.ContainsKey($key) -or $actual[$key] -cne $expected[$key]) {throw "npm lockfile is stale for $key."}}
     }
 }
-function Invoke-TauriVerification([string]$Repository,[hashtable]$Config,[scriptblock]$Process) {
+function Invoke-TauriVerification([string]$Repository,[hashtable]$Config,[scriptblock]$Process,[switch]$RequireExactPreparedVersions) {
     $stages=[Collections.Generic.List[object]]::new();$diagnostics=[Collections.Generic.List[string]]::new();$stage='typescript';$binary=$null
     try {
         if (-not $Config.ContainsKey('tauri') -or $Config.tauri.selectedRelease -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $Config.tauri.crateName -cnotmatch '^[a-z][a-z0-9-]*$') {throw 'Tauri verification configuration requires a selected stable release and legal crate name.'}
@@ -56,7 +62,7 @@ function Invoke-TauriVerification([string]$Repository,[hashtable]$Config,[script
         $npm=Get-TauriNpm;$cargo=Get-TauriTool 'cargo';$environment=Get-TauriProcessEnvironment $Repository
         $metadata=& $Process $cargo @('metadata','--manifest-path','src-tauri/Cargo.toml','--locked','--format-version','1','--quiet') $Repository $environment
         if ($metadata.ExitCode -ne 0) {throw "Locked Cargo metadata failed: $($metadata.Output)"}
-        Assert-TauriSelectedRelease @{selections=@{tauri=$Config.tauri.selectedRelease}} ($metadata.Output | ConvertFrom-Json -AsHashtable)
+        Assert-TauriSelectedRelease @{selections=@{tauri=$Config.tauri.selectedRelease}} ($metadata.Output | ConvertFrom-Json -AsHashtable) -RequireExactPreparedVersions:$RequireExactPreparedVersions
         $lockCheck=& $Process $npm.exe ($npm.prefix+@('ci','--dry-run','--ignore-scripts','--no-audit','--no-fund')) $Repository $environment
         if ($lockCheck.ExitCode -ne 0) {throw "Locked npm dependency check failed: $($lockCheck.Output)"}
         $run=Join-Path $Repository ('.test-results/tauri-'+[guid]::NewGuid().ToString('N'))

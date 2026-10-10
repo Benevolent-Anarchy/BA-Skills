@@ -22,7 +22,7 @@ function New-PresetMetadataFixture {
     return $fixture
 }
 function New-TauriProcessFixture {
-    $fixture=@{mode='pass';calls=[Collections.Generic.List[object]]::new();version='3.0.0'}
+    $fixture=@{mode='pass';calls=[Collections.Generic.List[object]]::new();version='3.0.0';testVersions=@{vitest='4.2.0';jsdom='29.0.0'}}
     $fixture.metadata={
         $appId='path+file:///fixture/src-tauri#starter@0.0.1';$tauriId="registry+https://github.com/rust-lang/crates.io-index#tauri@$($fixture.version)"
         return @{packages=@(@{id=$appId;name='starter';version='0.0.1'},@{id=$tauriId;name='tauri';version=$fixture.version});resolve=@{root=$appId;nodes=@(@{id=$appId;deps=@(@{name='tauri';pkg=$tauriId})})}}
@@ -33,8 +33,10 @@ function New-TauriProcessFixture {
         if ($arguments -contains 'create-tauri-app' -and $arguments -contains '.') {
             foreach ($path in @('src/main.ts','src/styles.css','src-tauri/build.rs','src-tauri/src/main.rs','src-tauri/src/lib.rs','tsconfig.json','vite.config.ts','index.html')) {Write-FixtureText "$cwd/$path" 'upstream source'}
             Write-FixtureText "$cwd/vite.config.ts" 'export default {server: {port: 1420, strictPort: true, watch: {ignored: ["**/src-tauri/**"]}}}'
-            Write-FixtureText "$cwd/package.json" '{"name":"upstream","version":"0.1.0","type":"module","scripts":{"dev":"vite","build":"tsc && vite build","tauri":"tauri"},"dependencies":{"@tauri-apps/api":"^3"},"devDependencies":{"@tauri-apps/cli":"^3","typescript":"latest","vite":"latest"}}'
-            Write-FixtureText "$cwd/src-tauri/Cargo.toml" "[package]`nname = `"starter`"`nversion = `"0.1.0`"`n[lib]`nname = `"starter_lib`"`n[dependencies]`ntauri = { version = `"3`", features = [] }`n"
+            Write-FixtureText "$cwd/package.json" '{"name":"upstream","version":"0.1.0","type":"module","scripts":{"dev":"vite","build":"tsc && vite build","tauri":"tauri"},"dependencies":{"@tauri-apps/api":"^3"},"devDependencies":{"@tauri-apps/cli":"^3","typescript":"~6.0.3","vite":"^8.0.16"}}'
+            Write-FixtureText "$cwd/src-tauri/Cargo.toml" "[package]`nname = `"starter`"`nversion = `"0.1.0`"`nedition = `"2021`"`ndescription = `"A Tauri App`"`nauthors = [`"you`"]`n[lib]`nname = `"tauri_app_lib`"`n[dependencies]`ntauri = { version = `"3`", features = [] }`n"
+            Write-FixtureText "$cwd/src-tauri/src/lib.rs" 'pub fn run() {}'
+            Write-FixtureText "$cwd/src-tauri/src/main.rs" 'fn main() { tauri_app_lib::run(); }'
             Write-FixtureText "$cwd/src-tauri/tauri.conf.json" '{"$schema":"https://schema.tauri.app/config/3","productName":"starter","version":"0.1.0","identifier":"com.example.starter","build":{"beforeDevCommand":"npm run dev","beforeBuildCommand":"npm run build","devUrl":"http://localhost:1420","frontendDist":"../dist"},"app":{"windows":[{"title":"starter"}]},"bundle":{"icon":["icons/icon.ico"]}}'
             if ($fixture.mode -ne 'layout') {Write-FixtureText "$cwd/src-tauri/capabilities/default.json" '{"identifier":"default","windows":["main"],"permissions":["core:default"]}'}
             Write-FixtureText "$cwd/.gitignore" 'upstream.cache/'
@@ -44,7 +46,7 @@ function New-TauriProcessFixture {
         }
         if ($arguments -contains '--package-lock-only' -and $fixture.mode -ne 'locks') {
             $package=[IO.File]::ReadAllText("$cwd/package.json") | ConvertFrom-Json -AsHashtable
-            @{lockfileVersion=3;name=$package.name;version=$package.version;packages=@{''=$package}} | ConvertTo-Json -Depth 8 | ForEach-Object {Write-FixtureText "$cwd/package-lock.json" $_}
+            @{lockfileVersion=3;name=$package.name;version=$package.version;packages=@{''=$package;'node_modules/vitest'=@{version=$fixture.testVersions.vitest};'node_modules/jsdom'=@{version=$fixture.testVersions.jsdom}}} | ConvertTo-Json -Depth 8 | ForEach-Object {Write-FixtureText "$cwd/package-lock.json" $_}
         }
         if ($arguments -contains 'generate-lockfile' -and $fixture.mode -ne 'locks') {Write-FixtureText "$cwd/src-tauri/Cargo.lock" 'version = 4'}
         if ($arguments -contains 'ci' -and $arguments -notcontains '--dry-run' -and $fixture.mode -ne 'install') {[IO.Directory]::CreateDirectory("$cwd/node_modules") | Out-Null}

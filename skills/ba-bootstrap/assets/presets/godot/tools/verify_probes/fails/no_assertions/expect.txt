@@ -1,0 +1,1 @@
+gut-headless found zero assertions.

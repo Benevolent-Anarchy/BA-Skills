@@ -31,7 +31,7 @@ function Invoke-VerificationProcess([string]$Executable,[string[]]$Arguments,[st
         return @{ExitCode=$process.ExitCode;Output=($stdout.GetAwaiter().GetResult()+$stderr.GetAwaiter().GetResult());Executable=$Executable}
     } finally {$process.Dispose()}
 }
-function Invoke-ProjectVerification([string]$Repository,[scriptblock]$Process={param($exe,$arguments,$cwd,$environment) Invoke-VerificationProcess $exe $arguments $cwd $environment}) {
+function Invoke-ProjectVerification([string]$Repository,[scriptblock]$Process={param($exe,$arguments,$cwd,$environment) Invoke-VerificationProcess $exe $arguments $cwd $environment},[switch]$RequireExactPreparedVersions) {
     $stages=[Collections.Generic.List[object]]::new();$diagnostics=[Collections.Generic.List[string]]::new();$binary=$null
     try {$config=Read-ProjectVerificationConfig $Repository}
     catch {return @{Passed=$false;Stages=@();Diagnostics=@($_.Exception.Message)}}
@@ -47,7 +47,7 @@ function Invoke-ProjectVerification([string]$Repository,[scriptblock]$Process={p
             $module=Join-Path $Repository "tools/$helper.psm1"
             if (-not (Test-Path -LiteralPath $module -PathType Leaf)) {throw "Required preset helper missing: $module"}
             Import-Module $module -Force
-            $engine=if ($config.preset -eq 'godot') {Invoke-GodotVerification $Repository $config $Process} else {Invoke-TauriVerification $Repository $config $Process}
+            $engine=if ($config.preset -eq 'godot') {Invoke-GodotVerification $Repository $config $Process} else {Invoke-TauriVerification $Repository $config $Process -RequireExactPreparedVersions:$RequireExactPreparedVersions}
             if ($engine.ContainsKey('BinaryPath')) {$binary=$engine.BinaryPath}
             foreach ($stage in $engine.Stages) {$stages.Add($stage)}
             foreach ($message in $engine.Diagnostics) {$diagnostics.Add($message)}

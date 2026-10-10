@@ -4,7 +4,4 @@
 *.translation
 export_credentials.cfg
 .mono/
-bin/
-obj/
-.godot/editor/
 android/build/

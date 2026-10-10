@@ -1,6 +1,9 @@
 #requires -Version 7.2
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+function Test-GodotStableVersion([string]$Version) {
+    return $Version.Trim() -cmatch '^4\.7(?:\.[0-9]+)?\.stable(?:\.|$)'
+}
 function Get-VerificationGodot {
     if ($env:GODOT) {
         $command=Get-Command $env:GODOT -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -35,7 +38,7 @@ function Invoke-GodotVerification([string]$Repository,[hashtable]$Config,[script
         if (-not $Config.ContainsKey('godot') -or $Config.godot.versionFamily -cne '4.7' -or $Config.godot.renderedTests -isnot [bool]) {throw 'Godot verification configuration requires versionFamily 4.7 and a renderedTests boolean.'}
         $exe=Get-VerificationGodot
         $version=& $Process $exe @('--version') $Repository @{}
-        if ($version.ExitCode -ne 0 -or $version.Output.Trim() -cnotmatch '^4\.7\.[0-9]+\.stable') {throw "Unsupported Godot version: $($version.Output.Trim()). This recipe requires stable 4.7.x."}
+        if ($version.ExitCode -ne 0 -or -not (Test-GodotStableVersion $version.Output)) {throw "Unsupported Godot version: $($version.Output.Trim()). This recipe requires stable 4.7.x."}
         foreach ($file in @('project.godot','addons/gut/gut_cmdln.gd','addons/gut/plugin.cfg','tools/check_scripts.gd','tools/verify_pre_run.gd','tools/verify_post_run.gd')) {if (-not (Test-Path (Join-Path $Repository $file) -PathType Leaf)) {throw "Required Godot source missing: $file"}}
         $import=& $Process $exe @('--headless','--path',$Repository,'--import') $Repository @{}
         if ($import.ExitCode -ne 0) {throw "Godot import failed: $($import.Output)"}
@@ -68,19 +71,24 @@ function Invoke-GodotVerification([string]$Repository,[hashtable]$Config,[script
             if ($root.LocalName -cne 'testsuites' -or $root.GetAttribute('tests') -cnotmatch '^[0-9]+$') {throw "$stage wrote malformed results."}
             $tests=[int]$root.GetAttribute('tests')
             if ($tests -le 0) {throw "$stage found zero tests."}
+            $cases=@($xml.SelectNodes('/testsuites/testsuite/testcase'))
+            if ($cases.Count -ne $tests) {throw "$stage testcase records do not match reported test counts."}
             foreach ($field in @('failures','errors')) {
                 if ($field -ceq 'errors' -and -not $root.HasAttribute($field)) {continue} # GUT 9.7.1 omits the optional errors count.
                 if ($root.GetAttribute($field) -cnotmatch '^[0-9]+$' -or [int]$root.GetAttribute($field) -ne 0) {throw "$stage reported test $field."}
             }
             if ($xml.SelectNodes('//failure|//error').Count -gt 0) {throw "$stage reported failed tests."}
+            $executed=@($cases | Where-Object {$_.SelectNodes('skipped').Count -eq 0 -and $_.GetAttribute('status') -cne 'pending'}).Count
+            if ($executed -le 0) {throw "$stage found zero executed non-skipped tests."}
             if (-not (Test-Path "$report/totals.json" -PathType Leaf)) {throw "$stage post-run hook wrote no totals."}
             $totals=[IO.File]::ReadAllText("$report/totals.json") | ConvertFrom-Json -AsHashtable
             if ($totals.hookComplete -cne $true -or $totals.failed -cne $false) {throw "$stage hook did not complete cleanly; unexpected errors or orphan nodes."}
             foreach ($field in @('scripts','tests','asserts','seconds')) {if ($totals[$field] -isnot [ValueType] -or $totals[$field] -is [bool] -or $totals[$field] -lt 0) {throw "$stage malformed totals: $field"}}
-            if ($totals.tests -ne $tests -or $totals.scripts -lt 1) {throw "$stage totals do not match executed tests."}
+            if ($totals.tests -ne $cases.Count -or $totals.scripts -lt 1) {throw "$stage totals do not match executed tests."}
+            if ($totals.asserts -le 0) {throw "$stage found zero assertions."}
             $stages.Add(@{Name=$stage;Passed=$true;ExitCode=0;Diagnostics=@();Totals=$totals})
         }
     } catch {$diagnostics.Add($_.Exception.Message);$stages.Add(@{Name=$stage;Passed=$false;ExitCode=1;Diagnostics=@()})}
     return @{Passed=(@($stages | Where-Object {-not $_.Passed}).Count -eq 0);Stages=$stages.ToArray();Diagnostics=$diagnostics.ToArray()}
 }
-Export-ModuleMember -Function Invoke-GodotVerification,Get-VerificationGodot,Get-GodotSourceFiles
+Export-ModuleMember -Function Invoke-GodotVerification,Get-VerificationGodot,Get-GodotSourceFiles,Test-GodotStableVersion

@@ -1,6 +1,6 @@
 # Bootstrap Godot and Tauri presets
 
-Status: approved by Cicely on 2026-10-10. Implementation has not started. The implementation plan is [2026-10-10-ba-bootstrap-presets.md](../plans/2026-10-10-ba-bootstrap-presets.md).
+Status: approved by Cicely on 2026-10-10; implemented and under review in [PR #11](https://github.com/Benevolent-Anarchy/BA-Skills/pull/11). The full repository gate and fresh native Windows originals/clones passed after the PR review fixes. Merge and canonical installation remain pending. The implementation plan is [2026-10-10-ba-bootstrap-presets.md](../plans/2026-10-10-ba-bootstrap-presets.md).
 
 ## Intended result
 
@@ -22,7 +22,7 @@ For Godot, offer a renderer choice: Compatibility by default, with Forward Plus 
 
 For Tauri, use desktop Tauri latest, plain TypeScript, Vite and npm. npm is a proposed default because it is already available alongside Node; this version does not add a package-manager matrix. Collect an application identifier with a visible, validated owner/name-derived reverse-DNS suggestion and an override. The identifier is separate from the human title, GitHub repository name and package/crate names. Preserve valid GitHub naming while generating legal, deterministic names for each tool's configuration.
 
-“Latest” means the latest stable Tauri release at the start of a new creation, including a new major release; exclude prereleases. Select a compatible stable official generator and dependencies, and verify that the resulting project actually uses the selected Tauri release. Do not impose a v2 ceiling or silently substitute an older major if preparation fails. Freeze the resolved selections for that invocation. Retries, resumes and normal verification retain them, and existing projects are not automatically upgraded. A future incompatible upstream change produces a concrete preparation failure before either repository is created; the bootstrap cannot promise compatibility with an unknown release without validating it.
+“Latest” means the latest stable Tauri release at the start of a new creation, including a new major release; exclude prereleases. Select a compatible stable official generator and dependencies, and verify that the resulting project actually uses the selected Tauri release. Do not impose a v2 ceiling or silently substitute an older major if preparation fails. Freeze the resolved selections for that invocation; retries and resumes retain them. Bootstrap preparation and checkout verification require the exact selected release. After creation, the project's ordinary gate permits a deliberately upgraded stable Tauri release in the same major at or above that baseline, while older or different-major versions require explicit upgrade guidance. Verification does not upgrade dependencies. A future incompatible upstream change produces a concrete preparation failure before either repository is created; the bootstrap cannot promise compatibility with an unknown release without validating it.
 
 Record the preset, its recipe version and resolved options in the invocation. Resume/status restore these values; omitted options never choose a different engine. A conflicting option on an existing invocation is rejected before mutation. Existing-clone `local-setup` continues to configure local Obsidian tooling; it does not convert engines or rewrite tracked project files.
 

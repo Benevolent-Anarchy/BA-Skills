@@ -60,13 +60,13 @@ function Get-BootstrapPresetDocumentation([hashtable]$Selection) {
 Use Godot 4.7.x and PowerShell 7.2 or newer. GUT 9.7.1 is vendored in `addons/gut/`; no test package download is needed after cloning. Open `project.godot` in the matching Godot editor. If the executable is not available as `godot` or `godot4`, set the process-local `GODOT` environment variable to its full path before verification. Preserve committed `.uid` and source `.import` sidecars; `.godot/` is an ignored cache.
 '@;gate='The complete gate validates documentation, Godot import and script compilation, and GUT tests with post-run error/orphan checks. It discovers rendered tests when present; those checks require a display. `tools/verify_selftest.ps1` separately exercises deliberate verifier failures.'}}
         tauri {return @{name='Tauri';setup=@'
-Use Node.js/npm, stable Rust with rustfmt and Clippy, and PowerShell 7.2 or newer. Windows also needs the MSVC C++ build tools and WebView2. Install missing toolchains separately; bootstrap reports missing prerequisites before creating repositories. After a fresh clone, install the frozen frontend dependencies:
+Use Node.js/npm, stable Rust with rustfmt and Clippy, and PowerShell 7.2 or newer. Windows also needs the MSVC C++ build tools, the Windows SDK and WebView2. Install missing toolchains separately; bootstrap reports missing prerequisites before creating repositories. After a fresh clone, install the frozen frontend dependencies:
 
 ```powershell
 npm ci
 ```
 
-`Cargo.lock` freezes Rust dependencies; verification uses locked Cargo commands. Use `npm run dev` for the frontend or `npm run tauri dev` for the desktop development app.
+`Cargo.lock` freezes Rust dependencies; verification uses locked Cargo commands. Use `npm run dev` for the frontend or `npm run tauri dev` for the desktop development app. The manifest permits deliberate compatible Tauri upgrades; run `cargo update -p tauri --manifest-path src-tauri/Cargo.toml` and commit the resulting lockfile. The project gate accepts stable releases at or above `tools/verify.json`'s `tauri.selectedRelease` within the same major. For an intentional major upgrade, update that recorded release, Cargo and npm dependency ranges and application code together, regenerate the locks, and run the full gate. Bootstrap itself requires its exact recorded release.
 '@;gate='The complete gate validates documentation, TypeScript, the frontend entry-point test and build, Rust formatting, Clippy, Rust tests, and a native Tauri build without installer bundling. The initial official Rust scaffold has no Rust unit tests; add meaningful tests as behavior develops. A successful build alone does not establish an observed app launch.'}}
         default {throw 'Unknown preset for documentation.'}
     }

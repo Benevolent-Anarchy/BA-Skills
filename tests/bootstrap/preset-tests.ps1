@@ -36,7 +36,7 @@ Test 'preset defaults to Godot and validates engine-specific options' {
     Expect-Error {Resolve-BootstrapPreset $id -Preset foundation -Renderer ''} 'renderer|Godot'
 }
 Test 'preset derives legal deterministic tool names without changing repository names' {
-    foreach ($case in @(@('Foo_Bar','foo-bar'),@('Foo.Bar','foo-bar'),@('1 Project','project-1-project'),@('fn','project-fn'),@('---','project'))) {
+    foreach ($case in @(@('Foo_Bar','foo-bar'),@('Foo.Bar','foo-bar'),@('1 Project','project-1-project'),@('fn','project-fn'),@('Build','project-build'),@('Deps','project-deps'),@('Examples','project-examples'),@('Incremental','project-incremental'),@('---','project'))) {
         $id=New-BootstrapIdentity -Name $case[0] -Description 'Purpose' -Parent $sandbox
         $selection=Resolve-BootstrapPreset $id -Preset tauri
         Assert ($selection.packageName -ceq $case[1] -and $selection.crateName -ceq $case[1]) 'Illegal tool name.'
@@ -60,9 +60,44 @@ Test 'preset prerequisite inspection reports missing tools without installing' {
     $fixture=New-PresetPrerequisiteFixture -Missing clippy
     $result=Get-BootstrapPrerequisites (Resolve-BootstrapPreset $id -Preset tauri) $fixture.probe
     Assert (-not $result.passed -and @($result.checks | Where-Object {-not $_.passed}).Count -eq 1) 'Missing Clippy hidden.'
-    Assert ($fixture.calls.Count -eq 8 -and $fixture.calls -contains 'msvc' -and $fixture.calls -contains 'webview2') 'Prerequisite checks incomplete.'
+    Assert ($fixture.calls.Count -eq 9 -and $fixture.calls -contains 'msvc' -and $fixture.calls -contains 'windows-sdk' -and $fixture.calls -contains 'webview2') 'Prerequisite checks incomplete.'
     $fixture.calls.Clear()
     Assert ((Get-BootstrapPrerequisites (Resolve-BootstrapPreset $id -Preset foundation) $fixture.probe).passed -and $fixture.calls.Count -eq 0) 'Foundation inspects engine dependencies.'
     $badEngine={param($name) @{passed=$true;version='4.8.0';executable='fixture';message=''}}
     Assert (-not (Get-BootstrapPrerequisites (Resolve-BootstrapPreset $id) $badEngine).passed) 'Unsupported Godot accepted.'
+}
+Test 'preset prerequisites reject preview Godot before preparation' {
+    foreach ($version in @('4.7.2.rc1.official','4.7.3.beta.official','4.7.2','4.8.0.stable.official')) {
+        $fixture=New-PresetPrerequisiteFixture -GodotVersion $version
+        Assert (-not (Get-BootstrapPrerequisites @{name='godot'} $fixture.probe).passed) "Unsupported preview/version accepted: $version"
+    }
+    foreach ($version in @('4.7.stable.official','4.7.2.stable.official')) {
+        $fixture=New-PresetPrerequisiteFixture -GodotVersion $version
+        Assert ((Get-BootstrapPrerequisites @{name='godot'} $fixture.probe).passed) "Supported stable version rejected: $version"
+    }
+}
+Test 'preset Windows SDK probe requires a real x64 import library' {
+    $module=Import-Module "$skillRoot/scripts/Presets.psm1" -Force -PassThru
+    $root=New-BootstrapFixture 'Windows SDK'
+    $fixture=@{root=$null;registryReads=[Collections.Generic.List[string]]::new()}
+    try {
+        $probe=& $module {
+            param($fixture)
+            $script:sdkProbeFixture=$fixture
+            function script:Get-ItemProperty([string]$LiteralPath,[string]$Name) {
+                if ($LiteralPath -cne 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' -or $Name -cne 'KitsRoot10') {throw 'Unexpected SDK registry query.'}
+                $script:sdkProbeFixture.registryReads.Add($LiteralPath)
+                return @{KitsRoot10=$script:sdkProbeFixture.root}
+            }
+        } $fixture
+        $probe={& $module {Invoke-BootstrapPrerequisiteProbe 'windows-sdk'}}.GetNewClosure()
+        Assert (-not (& $probe).passed) 'SDK accepted with no registered root.'
+        $fixture.root=$root
+        Assert (-not (& $probe).passed) 'SDK accepted without libraries.'
+        Write-FixtureText "$root/Lib/10.0.26100.0/um/x86/kernel32.lib" 'x86 library'
+        Assert (-not (& $probe).passed) 'SDK accepted an x86-only installation.'
+        Write-FixtureText "$root/Lib/10.0.26100.0/um/x64/kernel32.lib" 'x64 library'
+        $result=& $probe
+        Assert ($result.passed -and $result.version -ceq '10.0.26100.0' -and $fixture.registryReads.Count -eq 4) 'Complete registered x64 SDK rejected.'
+    } finally {Import-Module "$skillRoot/scripts/Presets.psm1" -Force}
 }

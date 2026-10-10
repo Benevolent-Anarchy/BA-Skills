@@ -1,0 +1,2 @@
+test/test_main.gd
+test/test_main.gd.uid

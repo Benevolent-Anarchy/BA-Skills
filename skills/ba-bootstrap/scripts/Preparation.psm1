@@ -6,6 +6,38 @@ Import-Module (Join-Path $PSScriptRoot 'State.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Dependencies.psm1')
 Import-Module (Join-Path $PSScriptRoot '../assets/project/tools/Verification.psm1')
 
+function Remove-BootstrapOwnedItems([string]$Root,[string[]]$Paths) {
+    $rootPath=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Root))
+    $targets=@($Paths | ForEach-Object {[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($_))} | Select-Object -Unique)
+    # Validate the entire batch, including descendants, before deleting its first item.
+    foreach ($target in $targets) {
+        if ($target -ieq $rootPath) {throw 'Cleanup cannot delete its ownership root.'}
+        Assert-BootstrapOwnedPath $rootPath $target
+        if (Test-Path -LiteralPath $target -PathType Container) {
+            foreach ($item in Get-ChildItem -LiteralPath $target -Recurse -Force) {
+                if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {throw "Cleanup contains a linked path: $($item.FullName)"}
+            }
+        }
+    }
+    foreach ($target in $targets | Sort-Object Length -Descending) {
+        if (Test-Path -LiteralPath $target) {Remove-Item -LiteralPath $target -Recurse -Force}
+    }
+}
+function Get-BootstrapDisposablePreparationPaths([hashtable]$Journal,[string]$StateRoot) {
+    $root=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($StateRoot))
+    $id=[guid]::Empty
+    if (-not [guid]::TryParse($Journal.invocationId,[ref]$id) -or $id.ToString() -cne $Journal.invocationId) {throw 'Invalid preparation cleanup invocation ID.'}
+    Join-Path $root "preparing/$id"
+    $prepared=Join-Path $root 'prepared'
+    Assert-BootstrapOwnedPath $root $prepared
+    if (Test-Path -LiteralPath $prepared -PathType Container) {
+        Get-ChildItem -LiteralPath $prepared -Force | Where-Object {$_.Name -cmatch ('^\.'+[regex]::Escape($id.ToString())+'\.[a-zA-Z0-9]+\.partial$')} | ForEach-Object {$_.FullName}
+    }
+}
+function Remove-BootstrapCompletedPreparation([hashtable]$Journal,[string]$StateRoot) {
+    if (-not ($Journal.phases.ContainsKey('complete') -and $Journal.phases.complete -ceq 'verified')) {throw 'Preparation cleanup requires a recorded complete invocation.'}
+    Remove-BootstrapOwnedItems $StateRoot @(Get-BootstrapDisposablePreparationPaths $Journal $StateRoot)
+}
 function Get-BootstrapPreparedManifest([string]$Repository,[string[]]$Paths) {
     $Repository=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Repository))
     $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -152,6 +184,8 @@ function Install-BootstrapLockedDependencies([string]$Repository,[hashtable]$Sel
 }
 function Invoke-BootstrapProjectGate([string]$Repository,[scriptblock]$Process={param($exe,$arguments,$cwd,$environment) Invoke-VerificationProcess $exe $arguments $cwd $environment}) {
     $module=Import-Module (Join-Path $Repository 'tools/Verification.psm1') -Force -PassThru
-    & $module.ExportedCommands['Invoke-ProjectVerification'] $Repository $Process
+    $gate=$module.ExportedCommands['Invoke-ProjectVerification']
+    if ($gate.Parameters.ContainsKey('RequireExactPreparedVersions')) {& $gate $Repository $Process -RequireExactPreparedVersions}
+    else {& $gate $Repository $Process} # Earlier frozen helpers already enforce the exact Tauri release.
 }
-Export-ModuleMember -Function Get-BootstrapPreparedManifest,Read-BootstrapPreparedProject,Save-BootstrapPreparedProject,Get-BootstrapPreparationSource,Get-BootstrapPublicationSource,Assert-BootstrapPreparedBytes,Initialize-BootstrapPreparation,Install-BootstrapLockedDependencies,Invoke-BootstrapProjectGate
+Export-ModuleMember -Function Get-BootstrapPreparedManifest,Read-BootstrapPreparedProject,Save-BootstrapPreparedProject,Get-BootstrapPreparationSource,Get-BootstrapPublicationSource,Assert-BootstrapPreparedBytes,Initialize-BootstrapPreparation,Install-BootstrapLockedDependencies,Invoke-BootstrapProjectGate,Remove-BootstrapOwnedItems,Get-BootstrapDisposablePreparationPaths,Remove-BootstrapCompletedPreparation

@@ -2,6 +2,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot '../assets/project/tools/Verification.psm1')
+Import-Module (Join-Path $PSScriptRoot '../assets/presets/godot/tools/GodotVerification.psm1')
 
 function Resolve-BootstrapPreset([hashtable]$Identity,[string]$Preset='godot',[string]$Renderer,[string]$AppIdentifier) {
     $Preset=$Preset.ToLowerInvariant()
@@ -17,7 +18,7 @@ function Resolve-BootstrapPreset([hashtable]$Identity,[string]$Preset='godot',[s
     } elseif ($Preset -eq 'tauri') {
         $base=[regex]::Replace($Identity.repository.ToLowerInvariant(),'[^a-z0-9-]+','-').Trim('-')
         if (-not $base) {$base='project'}
-        $reserved=@('as','async','await','break','const','continue','crate','dyn','else','enum','extern','false','fn','for','if','impl','in','let','loop','match','mod','move','mut','pub','ref','return','self','static','struct','super','trait','true','type','unsafe','use','where','while','abstract','become','box','do','final','macro','override','priv','try','typeof','unsized','virtual','yield','gen')
+        $reserved=@('as','async','await','break','const','continue','crate','dyn','else','enum','extern','false','fn','for','if','impl','in','let','loop','match','mod','move','mut','pub','ref','return','self','static','struct','super','trait','true','type','unsafe','use','where','while','abstract','become','box','do','final','macro','override','priv','try','typeof','unsized','virtual','yield','gen','build','deps','examples','incremental')
         if ($base -notmatch '^[a-z]' -or $base -in $reserved) {$base='project-'+$base}
         if ($base -notmatch '^[a-z][a-z0-9-]*$' -or $base.Length -gt 214) {throw 'Cannot derive legal package/crate names.'}
         $selection.packageName=$base;$selection.crateName=$base
@@ -64,6 +65,16 @@ function Invoke-BootstrapPrerequisiteProbe([string]$Name) {
             if ($result.ExitCode -ne 0 -or -not $result.Output.Trim()) {throw 'MSVC x64/x86 C++ build tools were not found.'}
             return @{passed=$true;version='installed';executable=$result.Output.Trim();message=''}
         }
+        if ($Name -eq 'windows-sdk') {
+            $kits=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' -Name 'KitsRoot10' -ErrorAction Stop
+            $kitsRoot=[string]$kits.KitsRoot10
+            if (-not $kitsRoot -or -not (Test-Path -LiteralPath (Join-Path $kitsRoot 'Lib') -PathType Container)) {throw 'Windows SDK libraries were not found at the registered KitsRoot10.'}
+            $sdk=Get-ChildItem -LiteralPath (Join-Path $kitsRoot 'Lib') -Directory |
+                Where-Object {$_.Name -match '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'um/x64/kernel32.lib') -PathType Leaf)} |
+                Sort-Object {[version]$_.Name} -Descending | Select-Object -First 1
+            if (-not $sdk) {throw 'Windows SDK x64 import library kernel32.lib was not found. Install the Windows SDK separately.'}
+            return @{passed=$true;version=$sdk.Name;executable=$kitsRoot;message=''}
+        }
         if ($Name -eq 'webview2') {
             $runtime=@(foreach ($hive in @('HKLM:','HKCU:')) {
                 foreach ($branch in @('SOFTWARE/Microsoft/EdgeUpdate/Clients/*','SOFTWARE/WOW6432Node/Microsoft/EdgeUpdate/Clients/*')) {
@@ -101,11 +112,11 @@ function Invoke-BootstrapPrerequisiteProbe([string]$Name) {
 }
 
 function Get-BootstrapPrerequisites([hashtable]$Selection,[scriptblock]$Probe={param($name) Invoke-BootstrapPrerequisiteProbe $name}) {
-    [string[]]$names=@(switch ($Selection.name) {godot {'godot'} tauri {@('node','npm','rust','cargo','rustfmt','clippy','msvc','webview2')} foundation {@()} default {throw 'Invalid preset.'}})
+    [string[]]$names=@(switch ($Selection.name) {godot {'godot'} tauri {@('node','npm','rust','cargo','rustfmt','clippy','msvc','windows-sdk','webview2')} foundation {@()} default {throw 'Invalid preset.'}})
     $checks=@(foreach ($name in $names) {
         try {$check=& $Probe $name;$check.name=$name}
         catch {$check=@{name=$name;passed=$false;version=$null;executable=$null;message=$_.Exception.Message}}
-        if ($name -eq 'godot' -and $check.passed -and $check.version -notmatch '^4\.7\.') {$check.passed=$false;$check.message="Unsupported Godot version: $($check.version); recipe requires 4.7.x."}
+        if ($name -eq 'godot' -and $check.passed -and -not (Test-GodotStableVersion $check.version)) {$check.passed=$false;$check.message="Unsupported Godot version: $($check.version); recipe requires stable 4.7.x."}
         $check
     })
     return @{passed=(@($checks | Where-Object {-not $_.passed}).Count -eq 0);checks=$checks}

@@ -10,9 +10,9 @@
 
 **Spec:** [Approved design](../specs/2026-10-09-ba-bootstrap-presets-design.md).
 
-**Status:** Implementation and final review fixes are verified; PR materials are ready. The finished-source gate passed release 105/105 and bootstrap 131/131. Final native originals/fresh clones passed all four variants and nine deliberate failure probes. Canonical skill installation remains conditional on Cicely merging and updating local main.
+**Status:** Implementation and PR review fixes are verified in [PR #11](https://github.com/Benevolent-Anarchy/BA-Skills/pull/11). The finished-source gate passed release 105/105 and bootstrap 159/159. Fresh native originals/clones passed all four variants and nine deliberate failure probes after the review fixes. Canonical skill installation remains conditional on Cicely merging and updating local main.
 
-**Final validation:** The fresh whole-branch review found three Important issues, all corrected with failing-then-passing regressions and the complete green suite: Windows CRLF recipe checkouts, unfamiliar generator binaries, and skipped/incomplete frontend test reports. Initial commits are also checked against frozen source before their refs are recorded or pushed. The native runner was rerun after these fixes, including an actual skipped-only Vitest failure and restored passing gates. Godot verifier probes passed 15/15. Earlier real GitHub pair/settings/label and exact-vault Obsidian app checks remain valid; these fixes do not change those workflows. Native Tauri evidence covers the Windows build without bundling, with no observed app launch, signing, installer or other-platform claim; the unchanged upstream Rust scaffold has zero Rust unit tests.
+**Final validation:** Initial branch review corrections cover Windows CRLF recipe checkouts, unfamiliar generator binaries, initial Git filters, and skipped/incomplete frontend reports. The subsequent PR review corrections cover known-failure rollback versus unknown crash protection, explicit unpublished discard, Godot zero-patch stable versions, executed GUT tests/assertions, source-safe ignores and renderer defaults, tested frontend version ranges, deterministic Cargo-safe Rust metadata, Windows SDK libraries, compatible project upgrades ([#12](https://github.com/Benevolent-Anarchy/BA-Skills/issues/12)) and completed staging cleanup ([#13](https://github.com/Benevolent-Anarchy/BA-Skills/issues/13)). Regressions and the final full gate passed; the new command-line fixture's quoting typo was corrected before the final green run. Fresh native originals/clones were rerun on unchanged runtime source, including actual skipped-only Vitest rejection and restored passing gates. Godot verifier probes passed 18/18, including pending-only, assertion-free and mixed pending/executed cases. Earlier real GitHub pair/settings/label and exact-vault Obsidian app checks provide prior workflow evidence; this review revision used local native trials without claiming another GitHub pair or Obsidian app trial. Native Tauri evidence covers the Windows build without bundling, with no observed app launch, signing, installer or other-platform claim; the official Rust scaffold has zero Rust unit tests.
 
 ## Global Constraints
 
@@ -103,12 +103,14 @@ Initialize-BootstrapPreparation -Identity $Identity -Selection $Selection -Journ
 Initialize-GodotPreset -Identity $Identity -Selection $Selection -Resolution $Resolution -Repository $Root -Download $Download -Process $Process
 Initialize-TauriPreset -Identity $Identity -Selection $Selection -Resolution $Resolution -Repository $Root -Process $Process
 # {trackedPaths; receipts}; includes source metadata but excludes generated output.
-Assert-TauriSelectedRelease -Resolution $Resolution -CargoMetadata $CargoMetadata
-# Requires the application's resolved direct Tauri dependency to match selection.
+Assert-TauriSelectedRelease -Resolution $Resolution -CargoMetadata $CargoMetadata -RequireExactPreparedVersions
+# Bootstrap requires the exact selected release. The ordinary project gate accepts
+# a stable same-major version at or above its recorded baseline.
 
 # Generated tools: always local to the generated project.
 Read-ProjectVerificationConfig -Repository $Root
 Invoke-ProjectVerification -Repository $Root -Process $Process
+# Bootstrap additionally passes -RequireExactPreparedVersions.
 # {Passed; Stages=@(@{Name; Passed; ExitCode; Diagnostics}); Diagnostics}
 Invoke-GodotVerification -Repository $Root -Config $Config -Process $Process
 Invoke-TauriVerification -Repository $Root -Config $Config -Process $Process
@@ -526,7 +528,7 @@ git diff --check
 
 - [x] **Request a fresh whole-branch review**, supplying approved spec/plan, implementation range, passed results, native trial receipts and limits. Verify feedback before applying it, fix relevant follow-ups and rerun affected checks. Scope review to this preset change and preserve unrelated release work.
 - [x] **Make the final state ready for another session.** Finish all required code/docs/checks and durable outcomes before opening the PR. Commit final changes and prepare an identity-prefixed multiline PR body describing preset behavior, recovery/byte-manifest changes, exact native trials and genuine remaining limits.
-- [ ] **Publish the prepared PR through the finishing workflow.** Push `codex/ba-bootstrap-presets`, create the PR against `main` using the prepared body file and attach it to this chat. Cicely retains merge control; the PR itself records delivery after this pre-publication checklist.
+- [x] **Publish the prepared PR through the finishing workflow.** Push `codex/ba-bootstrap-presets`, create the PR against `main` using the prepared body file and attach it to this chat. Published as [PR #11](https://github.com/Benevolent-Anarchy/BA-Skills/pull/11); subsequent review fixes update that PR. Cicely retains merge control.
 - [ ] **After Cicely merges and updates canonical main**, run the existing named installer/check-only flow and verify both `.agents` and `.claude` aliases resolve to canonical `skills/ba-bootstrap`. Do not switch aliases to the development branch as a shortcut. This integration step waits for the actual merge; implementation/PR readiness does not claim it has occurred.
 
 ## Coverage and Execution Handoff

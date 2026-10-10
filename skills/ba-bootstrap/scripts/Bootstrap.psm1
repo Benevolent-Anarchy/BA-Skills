@@ -44,6 +44,24 @@ function Get-BootstrapStoredSelection([string]$Name,[string]$Owner='Benevolent-A
     if ($journal.schemaVersion -eq 2) {return $journal.presetSelection}
     return Resolve-BootstrapPreset $identity -Preset foundation
 }
+function Remove-BootstrapInvocation([hashtable]$Identity,[string]$StateRoot=(Get-BootstrapStateRoot)) {
+    $root=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($StateRoot))
+    $path=Get-BootstrapJournalPath $Identity $root
+    Assert-BootstrapOwnedPath $root $path
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {throw 'No bootstrap journal exists to discard.'}
+    $lock=Enter-BootstrapLock $path
+    try {
+        $journal=Read-BootstrapJournal $path
+        $selection=if($journal.schemaVersion -eq 2){$journal.presetSelection}else{$null}
+        if ($journal.inputHash -cne (Get-BootstrapInputHash $Identity $selection)) {throw 'Discard identity differs from the recorded invocation.'}
+        if ($journal.repositories.Count -gt 0 -or $journal.refs.Count -gt 0 -or $journal.phases.ContainsKey('privateRepository') -or $journal.phases.ContainsKey('publicRepository')) {throw 'Discard refused: a repository creation attempt was recorded. Preserve remote identity and recovery evidence.'}
+        $targets=@(Get-BootstrapDisposablePreparationPaths $journal $root)+@(Join-Path $root "prepared/$($journal.invocationId)")
+        Remove-BootstrapOwnedItems $root $targets
+        # Delete the journal last; an interrupted cleanup remains safely retryable.
+        Remove-BootstrapOwnedItems $root @($path)
+        return @{status='discarded';identity=$journal.identity;journalPath=$path;pending=@();conflicts=@()}
+    } finally {$lock.Dispose()}
+}
 function Assert-BootstrapPublicSettings($Identity,$Request) {
     $public=(Invoke-CheckedApi $Request GET "/repos/$($Identity.notesFullName)").Data
     foreach ($key in @('has_issues','has_wiki','has_projects','has_discussions','allow_auto_merge')) {
@@ -239,6 +257,7 @@ function Invoke-Bootstrap(
         $selection=$plan.preset
         if ($null -eq $journal) {$journal=New-BootstrapJournal $Identity @() $selection;$journal.prerequisites=$plan.prerequisites;Write-BootstrapJournal $path $journal $lock}
         if ($journal.phases.ContainsKey('complete') -and $journal.phases.complete -eq 'verified') {
+            Remove-BootstrapCompletedPreparation $journal $StateRoot
             $report=Get-BootstrapStatus $Identity $StateRoot $Request
             if ($RefreshPlugins) {
                 $report.status='blocked'
@@ -425,7 +444,10 @@ function Invoke-Bootstrap(
                 return $report
             }
         }
-        if ($journal.phases.pullRequests -eq 'verified' -and $journal.phases.obsidian -eq 'verified' -and ($journal.schemaVersion -eq 1 -or ($journal.verification.staging.Passed -and $journal.verification.checkout.Passed))) {Save-Phase 'complete'}
+        if ($journal.phases.pullRequests -eq 'verified' -and $journal.phases.obsidian -eq 'verified' -and ($journal.schemaVersion -eq 1 -or ($journal.verification.staging.Passed -and $journal.verification.checkout.Passed))) {
+            Save-Phase 'complete'
+            Remove-BootstrapCompletedPreparation $journal $StateRoot
+        }
         return Get-BootstrapStatus $Identity $StateRoot $Request
     } catch {
         $status=if ($null -ne $journal) {'partial'} else {'blocked'}
@@ -461,4 +483,4 @@ function Assert-BootstrapIgnoreRules([string]$Repository,[object[]]$Manifest,[ha
     $unexpected=@($untracked -split "`n" | Where-Object {$_ -and $_ -cnotin @($Manifest.path)})
     if ($unexpected.Count) {throw ('Unexpected unignored source outside frozen manifest: '+($unexpected -join ', '))}
 }
-Export-ModuleMember -Function Get-BootstrapPlan,Get-BootstrapStatus,Invoke-Bootstrap,Set-BootstrapBrowserEvidence,Get-BootstrapStoredIdentity,Get-BootstrapStoredSelection,Assert-BootstrapIgnoreRules
+Export-ModuleMember -Function Get-BootstrapPlan,Get-BootstrapStatus,Invoke-Bootstrap,Set-BootstrapBrowserEvidence,Get-BootstrapStoredIdentity,Get-BootstrapStoredSelection,Assert-BootstrapIgnoreRules,Remove-BootstrapInvocation

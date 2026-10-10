@@ -10,6 +10,7 @@
 | `blocked` | Conflicting paths, inputs, identity, access or state. Preserve existing material and explain the specific conflict. |
 | `identity-unconfirmed` | A create result was lost or unresolved. An observed name/ID alone cannot bind that repository to this invocation. Ask Cicely to resolve the named repository and ID; do not clear the journal or retry automatically. |
 | `missing-input` | Collect the listed inputs; no creation has started. |
+| `discarded` | Explicitly requested unpublished preparation was removed. A new invocation can use the same name. |
 
 Creation journals live under `%LOCALAPPDATA%/BA-Skills/ba-bootstrap/state/`; vault journals are separately keyed by actual vault path under `vaults/`. Use the result's exact `journalPath`. These files contain identity, generated hashes, returned repository IDs and phase/ref receipts, never authentication tokens. Atomic snapshots and an exclusive lock protect retries. Preserve unreadable or incompatible journals; use a matching skill version or resolve the concrete conflict before continuing.
 
@@ -17,7 +18,17 @@ New creation journals use schema v2 and include normalized preset/options, recip
 
 `plan` uses read-only prerequisite probes and validates documentation without generating/installing/building the engine. Status reports recorded selection and native receipts. Status/resume restore omitted options; explicit conflicting identity/preset/renderer/identifier options fail before services or mutation. Finished invocations do not require SDKs or rebuild later project development.
 
-An interrupted snapshot publication can reuse its exact retained source and completion receipt. A published missing, corrupted, extra or linked snapshot is preserved and rejected; do not regenerate it from moving skill assets/upstream releases. Completed generator and lock receipts remain authoritative. An unfinished generator/lock/source operation without a completion receipt stays unresolved for concrete recovery.
+An interrupted snapshot publication can reuse its exact retained source and completion receipt. A published missing, corrupted, extra or linked snapshot is preserved and rejected; do not regenerate it from moving skill assets/upstream releases. Completed generator and lock receipts remain authoritative. A reported generator, lock or Godot source-step failure rolls back only that step's owned output and records its outcome; resume retries using the recorded resolution. A crash with no recorded outcome stays unresolved and is never automatically regenerated.
+
+When Cicely explicitly asks to abandon an unpublished failed or incompatible preparation, run `discard` using its original name/owner:
+
+```powershell
+pwsh -NoProfile -File scripts/bootstrap.ps1 -Mode discard -Name 'Foo Bar Baz' -Owner Benevolent-Anarchy
+```
+
+Discard runs locally under the journal lock, validates ownership and rejects linked paths before deletion. It removes this invocation's preparation trees, unpublished snapshot fragments, frozen snapshot and journal; it preserves the project path and unrelated state. It refuses if either repository creation phase was ever recorded, including a failed or unresolved attempt, or if any repository ID/ref is retained. Such invocations require identity recovery. Do not discard automatically to bypass an incompatible latest release or a missing SDK. After an authorized discard, collect the new selection and plan/create normally; no silent downgrade or preset substitution occurs.
+
+Once `complete` is recorded, bootstrap removes `preparing/<invocationId>/` (generator, dependency extraction, installed packages and native build output) and that invocation's unpublished snapshot fragments. Incomplete invocations retain these trees for recovery; a Tauri staging tree can occupy several gigabytes. Completion keeps the journal, verification/acquisition receipts, and `prepared/<invocationId>/source` with its receipt. A later resume retries interrupted cleanup without rebuilding or changing project development. Status remains read-only. Shared vault/plugin state is separate and retained.
 
 Schema v1 creation journals are foundation projects. Completed ones are reported without rewriting them or adding engine checks. An unfinished v1 invocation can resume only when its original foundation manifest still matches; otherwise preserve it and use the matching skill version. It cannot be silently converted into default Godot. See [presets.md](presets.md) for selection, version and clone rules.
 

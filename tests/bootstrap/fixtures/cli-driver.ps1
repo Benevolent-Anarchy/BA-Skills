@@ -61,6 +61,13 @@ function Invoke-Cli([hashtable]$Parameters) {
 }
 $missing=Invoke-Cli @{Mode='create';Name='Missing Description'}
 Assert ($missing.code -eq 1 -and $missing.report.status -eq 'missing-input' -and $global:BoundaryCalls.Count -eq 0) 'Missing input contacted a service.'
+$discardIdentity=New-BootstrapIdentity -Name 'Abandoned CLI Project' -Description 'Purpose' -Parent $sandbox -Owner cicely-f
+Import-Module "$SkillRoot/scripts/Presets.psm1"
+$discardSelection=Resolve-BootstrapPreset $discardIdentity -Preset tauri
+$discardJournal=New-BootstrapJournal $discardIdentity @() $discardSelection
+$discardPath=Get-BootstrapJournalPath $discardIdentity;Write-BootstrapJournal $discardPath $discardJournal
+$discard=Invoke-Cli @{Mode='discard';Name=$discardIdentity.title;Owner='cicely-f'}
+Assert ($discard.code -eq 0 -and $discard.report.status -eq 'discarded' -and -not (Test-Path $discardPath) -and $global:BoundaryCalls.Count -eq 0) 'CLI discard failed, used the wrong owner or contacted GitHub.'
 $parent=Join-Path $sandbox 'first parent with spaces'
 New-Item -ItemType Directory -Path $parent | Out-Null
 $parameters=@{Name='CLI Literal Project';Description='Literal $5, `ticks`, and $(never execute).';Parent=$parent;Preset='foundation'}

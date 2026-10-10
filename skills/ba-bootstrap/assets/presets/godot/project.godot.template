@@ -15,5 +15,4 @@ window/stretch/mode="canvas_items"
 enabled=PackedStringArray("res://addons/gut/plugin.cfg")
 
 [rendering]
-renderer/rendering_method={{RENDERER_JSON}}
-renderer/rendering_method.mobile={{RENDERER_JSON}}
+{{RENDERER_SETTINGS}}

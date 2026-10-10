@@ -51,8 +51,13 @@ function Assert-NativeTree([string]$Directory,[object[]]$Manifest,[hashtable]$Se
     $required=Invoke-NativeCommand $git ($prefix+@($Manifest.path)) $run -AllowFailure
     if($required.ExitCode -ne 1){throw "Required source is ignored: $($required.Output)"}
     $outputs=@('dist/native.zip','nested/dist/native.zip','.test-results/native.json','docs/.obsidian/app.json','docs/Vault Inspector Reports/native.md')
-    $outputs+=if($Selection.name -eq 'godot'){@('.godot/cache','android/build/cache','.mono/temp/cache','bin/temp','obj/temp','export_credentials.cfg')}else{@('node_modules/package/cache','src-tauri/target/cache','src-tauri/gen/schemas/config.json')}
+    $outputs+=if($Selection.name -eq 'godot'){@('.godot/cache','android/build/cache','.mono/temp/cache','export_credentials.cfg')}else{@('node_modules/package/cache','src-tauri/target/cache','src-tauri/gen/schemas/config.json')}
     foreach($output in $outputs){$ignored=Invoke-NativeCommand $git ($prefix+@($output)) $run -AllowFailure;if($ignored.ExitCode -ne 0){throw "Generated output is not ignored: $output"}}
+    if($Selection.name -eq 'godot') {
+        $addable=@('addons/x/bin/lib.dll','assets/obj/ship.obj.import','bin/source.gd','obj/source.gd')
+        $source=Invoke-NativeCommand $git ($prefix+$addable) $run -AllowFailure
+        if($source.ExitCode -ne 1){throw "Godot addon or asset source is ignored: $($source.Output)"}
+    }
     return @{status=$status;sourceHash=(Get-BootstrapTemplateVersion $Manifest);trackedPaths=$Manifest.Count;binaryPaths=@($Manifest.path | Where-Object {$_ -match '\.(png|ico|icns)$'})}
 }
 function Invoke-NativeNegative([string]$Directory,[string]$Label,[string]$Relative,[string]$Fixture,[string]$Pattern) {
