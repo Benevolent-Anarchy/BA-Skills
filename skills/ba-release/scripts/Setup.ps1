@@ -1,5 +1,7 @@
 # Inspects real projects, reports missing release facts and validates explicitly supplied setup answers.
 # Dot-sourced by Release.psm1 to share its path, JSON and Godot validation.
+# Store choices belong to release.json; the destinations a particular release selects are chosen separately.
+$script:SetupStores=@('itch','steam','google-play','notes')
 
 # Reads project facts without executing scripts or changing source/configuration.
 function Get-ReleaseSetupFacts([string]$Repository, [string]$Project = '.') {
@@ -24,7 +26,7 @@ function Get-ReleaseSetupFacts([string]$Repository, [string]$Project = '.') {
 
 # Proposes aliases only for actual inspected exports, retaining existing user aliases when stores change.
 function New-ReleaseSetupConfiguration($Facts, [string[]]$Stores, $ExistingExports=$null) {
-    foreach ($store in $Stores) {if ($store -cnotin @('itch','steam','google-play','notes')) {throw "Unsupported setup store: $store"}}
+    foreach ($store in $Stores) {if ($store -cnotin $script:SetupStores) {throw "Unsupported setup store: $store"}}
     $exports=[ordered]@{}
     if ($null -ne $ExistingExports) {foreach ($key in $ExistingExports.Keys) {$exports[$key]=$ExistingExports[$key]}}
     $desktop=@($Facts.presets | Where-Object {$_.platform -in @('Windows Desktop','Linux') -and $_.exportPath})
@@ -60,6 +62,31 @@ function New-ReleaseSetupConfiguration($Facts, [string[]]$Stores, $ExistingExpor
     return [ordered]@{schemaVersion=1;project=$Facts.project;previousRelease=$null;exports=$exports;verification=$verificationSettings;distributions=$distributions;androidVersionCodePolicy='increment-selected'}
 }
 
+# Lists the stores a configuration declares, in its order; notes counts only while true, as only then is it selectable.
+function Get-ReleaseConfiguredStores($Configuration) {
+    if ($null -eq $Configuration) {return @()}
+    return @($Configuration.distributions.Keys | Where-Object {$_ -cne 'notes' -or $Configuration.distributions.notes -eq $true})
+}
+
+# Names the store that would provide a destination ID, or null when no store could.
+function Get-ReleaseDestinationStore([string]$Id) {
+    if ($Id -cmatch '^itch-[a-z][a-z0-9-]*$') {return 'itch'}
+    if ($Id -cin @('steam','google-play','notes')) {return $Id}
+    return $null
+}
+
+# Applies interactive store changes: a name adds that store and -name removes it, so adding never drops another.
+function Update-ReleaseStoreSelection([string[]]$Configured, [string[]]$Changes) {
+    $stores=[Collections.Generic.List[string]]::new($Configured)
+    foreach ($change in $Changes) {
+        $store=if ($change.StartsWith('-')) {$change.Substring(1).Trim()} else {$change}
+        if ($store -cnotin $script:SetupStores) {throw "Unsupported setup store: $store"}
+        if ($change.StartsWith('-')) {if (-not $stores.Remove($store)) {throw "Cannot remove $store; release.json does not configure it."}}
+        elseif ($store -cnotin $stores) {$stores.Add($store)}
+    }
+    return ,$stores.ToArray()
+}
+
 # Resolves a display label from source metadata, rejecting unsupported template substitutions.
 function Resolve-ReleaseDisplayName($Template, [string]$Title, [string]$Version, [string]$Platform) {
     if ($Template -isnot [string] -or [string]::IsNullOrWhiteSpace($Template) -or $Template -match '[\x00-\x1f]' -or ($Template -replace '\{(?:title|version|os)\}','') -match '[{}]') {throw 'displayNameTemplate supports only {title}, {version} and {os} with no control characters.'}
@@ -82,7 +109,7 @@ function Get-ReleaseSetup([string]$Repository, [string[]]$Destination=@(), $Conf
         $files=Read-ReleaseGit $Repository @('-c','core.quotepath=false','ls-files','--cached','--others','--exclude-standard','--','*project.godot')
         $projects=@($files.Split("`n") | Where-Object {$_ -match '(?:^|/)project\.godot$' -and (Test-Path -LiteralPath (Join-Path $Repository $_) -PathType Leaf)} | ForEach-Object {[IO.Path]::GetDirectoryName($_).Replace('\','/')} | Sort-Object -Unique)
         if ($projects.Count -eq 1) {$project=$projects[0]}
-        else {return @{mode='setup';readOnly=$true;configSha256=$hash;facts=@{projects=$projects};configuration=$null;questions=@(@{key='project';prompt='Choose the actual Godot project directory inside this repository; no project has been guessed.';choices=$projects});selection=@{required=$true;choices=@();selected=@()}}}
+        else {return @{mode='setup';readOnly=$true;configSha256=$hash;facts=@{projects=$projects};configuration=$null;questions=@(@{key='project';prompt='Choose the actual Godot project directory inside this repository; no project has been guessed.';choices=$projects});stores=@{configured=@();choices=$script:SetupStores};selection=@{required=$true;choices=@();selected=@()}}}
     }
     $facts=Get-ReleaseSetupFacts $Repository $project
     $new=($null -eq $Configuration)
@@ -91,8 +118,12 @@ function Get-ReleaseSetup([string]$Repository, [string[]]$Destination=@(), $Conf
         $Configuration=New-ReleaseSetupConfiguration $facts $stores
     }
     $runtime=ConvertTo-ReleaseRuntimeConfiguration $Configuration -AllowIncomplete
+    # Store choice belongs to the configuration; a requested destination of an undeclared store only prompts for it.
+    $configured=@(Get-ReleaseConfiguredStores $Configuration)
+    $undeclared=@($Destination | Where-Object {$_ -cnotin @($runtime.destinations | ForEach-Object {$_.id})} | ForEach-Object {Get-ReleaseDestinationStore $_} | Where-Object {$_ -and $_ -cnotin $configured} | Select-Object -Unique)
     $questions=[Collections.Generic.List[object]]::new()
-    if ($new) {$questions.Add(@{key='stores';prompt='Which stores is this game published on? Select itch, steam, google-play and/or notes.';choices=@('itch','steam','google-play','notes')})}
+    if ($new) {$questions.Add(@{key='stores';prompt='Which stores is this game published on? Select itch, steam, google-play and/or notes.';choices=$script:SetupStores})}
+    elseif ($undeclared.Count) {$questions.Add(@{key='stores';configured=$configured;choices=$script:SetupStores;prompt="The selected destinations need $($undeclared -join ', '), which release.json does not configure; it configures $(if ($configured.Count) {$configured -join ', '} else {'no stores'}). To add a store, list every store to keep as well as the new ones: a configured store left out is removed with its settings."})}
     if ($null -eq $Configuration.previousRelease) {$questions.Add(@{key='previousRelease';prompt='What source commit/ref was used for the previous published release? A version-history candidate needs your confirmation.'})}
     if ($null -eq $Configuration.verification.gate.script) {$questions.Add(@{key='verification.gate.script';prompt='Which existing PowerShell script verifies this game? Inspect its contents and arguments before using it.'})}
     if ($Configuration.exports.Count -eq 0) {$questions.Add(@{key='exports';prompt='Supply aliases for actual configured Godot export presets after inspecting this project.'})}
@@ -100,11 +131,13 @@ function Get-ReleaseSetup([string]$Repository, [string[]]$Destination=@(), $Conf
         if ($null -eq $Configuration.distributions.itch.game) {$questions.Add(@{key='distributions.itch.game';prompt='What is the itch Butler owner/game? A page URL identifies this game, but not its channels.'})}
         $questions.Add(@{key='distributions.itch.channels';prompt='Supply explicit channel-to-export-alias mappings from the inspected presets. No ambiguous preset has been selected.'})
     }
-    $pendingMappings=[Collections.Generic.List[object]]::new()
+    $pending=[Collections.Generic.List[object]]::new()
     foreach ($id in $Destination) {
         if ($id -cin @($runtime.destinations | ForEach-Object {$_.id})) {continue}
+        $store=Get-ReleaseDestinationStore $id
+        if ($store -and $store -cin $undeclared) {$pending.Add(@{id=$id;type=$store;preset=$null;storeRequired=$true});continue}
         if ($id -cmatch '^itch-[a-z][a-z0-9-]*$' -and $Configuration.distributions.Contains('itch') -and ($hash -eq 'missing' -or $Configuration.distributions.itch.channels.Count -eq 0)) {
-            $pendingMappings.Add(@{id=$id;type='itch';preset=$null;mappingRequired=$true})
+            $pending.Add(@{id=$id;type='itch';preset=$null;mappingRequired=$true})
             $questions.Add(@{key='distributions.itch.channels';prompt="Supply an explicit channel-to-export-alias mapping for '$id' from the inspected presets. No ambiguous preset has been selected."})
             if ($null -eq $Configuration.distributions.itch.game) {$questions.Add(@{key='distributions.itch.game';prompt='What is the itch Butler owner/game? A page URL identifies this game, but not its channels.'})}
         } else {throw "Unknown destination: $id"}
@@ -145,7 +178,7 @@ function Get-ReleaseSetup([string]$Repository, [string[]]$Destination=@(), $Conf
         if ($unique.Contains($question.key)) {if ($unique[$question.key].prompt -cne $question.prompt) {$unique[$question.key].prompt+="`n"+$question.prompt}}
         else {$unique[$question.key]=$question}
     }
-    return [ordered]@{mode='setup';readOnly=$true;configSha256=$hash;facts=$facts;configuration=$Configuration;questions=@($unique.Values);selection=@{required=($Destination.Count -eq 0);selected=@($Destination);choices=(@($runtime.destinations | ForEach-Object {@{id=$_.id;type=$_.type;preset=$_['preset']}})+$pendingMappings.ToArray())}}
+    return [ordered]@{mode='setup';readOnly=$true;configSha256=$hash;facts=$facts;configuration=$Configuration;questions=@($unique.Values);stores=@{configured=$configured;choices=$script:SetupStores};selection=@{required=($Destination.Count -eq 0);selected=@($Destination);choices=(@($runtime.destinations | ForEach-Object {@{id=$_.id;type=$_.type;preset=$_['preset']}})+$pending.ToArray())}}
 }
 
 # Sets public dotted paths, expanding a channel/depot shorthand only when an override is supplied.
@@ -175,10 +208,13 @@ function Merge-ReleaseSetupAnswers($report, $answers, [string]$Repository) {
     if ($null -eq $config) {throw 'Select the actual Godot project before applying other setup answers.'}
     if ($answers.Contains('stores')) {
         if ($answers.stores -isnot [array] -or @($answers.stores | Where-Object {$_ -isnot [string]}).Count) {throw 'stores must be an array of store types.'}
-        $candidate=New-ReleaseSetupConfiguration $report.facts $answers.stores $config.exports
+        # The list replaces the store choice: listed configured stores keep their place and settings, and new ones follow.
+        $configured=@(Get-ReleaseConfiguredStores $config)
+        $stores=@($configured | Where-Object {$_ -cin $answers.stores})+@($answers.stores | Where-Object {$_ -cnotin $configured})
+        $candidate=New-ReleaseSetupConfiguration $report.facts $stores $config.exports
         $candidate.previousRelease=$config.previousRelease;$candidate.verification=$config.verification
-        if ($config.Contains('androidVersionCodePolicy')) {$candidate.androidVersionCodePolicy=$config.androidVersionCodePolicy}
-        foreach ($store in @($candidate.distributions.Keys)) {if ($config.distributions.Contains($store)) {$candidate.distributions[$store]=$config.distributions[$store]}}
+        if ($config.Contains('androidVersionCodePolicy')) {$candidate.androidVersionCodePolicy=$config.androidVersionCodePolicy} else {$candidate.Remove('androidVersionCodePolicy')}
+        foreach ($store in @($candidate.distributions.Keys)) {if ($store -cne 'notes' -and $config.distributions.Contains($store)) {$candidate.distributions[$store]=$config.distributions[$store]}}
         $config=$candidate
     }
     foreach ($key in $answers.Keys) {if ($key -cin @('stores','project')) {continue};Set-ReleaseSetupAnswer $config $key $answers[$key]}
@@ -188,20 +224,37 @@ function Merge-ReleaseSetupAnswers($report, $answers, [string]$Repository) {
 # Iterates public-path questions so selecting a new store immediately exposes its missing facts.
 function Invoke-ReleaseInteractiveSetup([string]$Repository, [string[]]$Destination=@(), [scriptblock]$Prompt) {
     $initial=Get-ReleaseSetup $Repository $Destination
-    $report=$initial;$answers=[ordered]@{};$asked=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $report=$initial;$answers=[ordered]@{};$asked=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$scope=$Destination
     if (-not $Prompt) {$Prompt={param($question) Read-Host ($question.prompt+' Leave blank to defer')}}
+    # An existing configuration first offers its stores as explicit changes, so adding one never drops another.
+    $storeQuestion=$null
+    if ($initial.configSha256 -ne 'missing') {
+        $configured=[string[]]@($initial.stores.configured)
+        $addable=@($initial.stores.choices | Where-Object {$_ -cnotin $configured})
+        $storeQuestion=@{key='stores';configured=$configured;choices=$initial.stores.choices;prompt="Configured stores: $(if ($configured.Count) {$configured -join ', '} else {'none'}). Add stores by name ($(if ($addable.Count) {$addable -join ', '} else {'none left'})), or remove a configured store and its settings by entering it with a leading -."}
+    }
     while ($true) {
-        $unasked=@($report.questions | Where-Object {-not $asked.Contains($_.key)})
+        $questions=if ($storeQuestion) {@($storeQuestion)+@($report.questions | Where-Object {$_.key -ne 'stores'})} else {@($report.questions)}
+        $unasked=@($questions | Where-Object {-not $asked.Contains($_.key)})
         if (-not $unasked.Count) {break}
         $question=$unasked[0];$asked.Add($question.key) | Out-Null
         $answer=& $Prompt $question
         if ([string]::IsNullOrWhiteSpace($answer)) {continue}
-        if ($question.key -eq 'stores') {$answers[$question.key]=@($answer.Split(',') | ForEach-Object {$_.Trim()})}
+        if ($question.key -eq 'stores') {
+            $stores=@($answer.Split(',') | ForEach-Object {$_.Trim()} | Where-Object {$_})
+            if ($storeQuestion) {
+                $stores=Update-ReleaseStoreSelection $storeQuestion.configured $stores
+                if (($stores -join ',') -ceq ($storeQuestion.configured -join ',')) {continue}
+                # Once the stores change, every missing fact is in scope, including the new stores' settings and baselines.
+                $scope=@()
+            }
+            $answers[$question.key]=$stores
+        }
         elseif ($question.key -cin @('exports','verification.standalone') -or $question.key -match '\.(channels|depots|retainVersionCodes|userFraction)$') {$answers[$question.key]=$answer | ConvertFrom-Json -AsHashtable -NoEnumerate}
         elseif ($question.key -match '\.appId$') {$answers[$question.key]=[long]$answer}
         else {$answers[$question.key]=$answer}
         $candidate=Merge-ReleaseSetupAnswers $initial $answers $Repository
-        $report=Get-ReleaseSetup $Repository $Destination $candidate
+        $report=Get-ReleaseSetup $Repository $scope $candidate
     }
     if (-not $answers.Count) {return @{written=$false;report=$report}}
     $path=Join-Path ([IO.Path]::GetTempPath()) ('ba-release-answers-'+[guid]::NewGuid().ToString('N')+'.json')

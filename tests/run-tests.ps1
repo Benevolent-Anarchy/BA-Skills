@@ -732,6 +732,90 @@ Test 'interactive setup exposes newly chosen store questions and writes one vali
     Assert ($result.written -and $asked.Contains('distributions.steam.appId') -and $asked.Contains('distributions.google-play.track') -and -not $asked.Contains('distributions.itch.game')) 'Wizard did not adapt to the selected stores.'
     Assert ((Get-ReleasePlan $repo @('steam','google-play')).configurationReady) 'Wizard wrote incomplete selected store settings.'
 }
+Test 'interactive setup adds Steam to a complete itch-only configuration and keeps every itch setting' {
+    $repo=New-Fixture 'interactive-add-steam'
+    Change-Config $repo {param($c)
+        $c.exports=[ordered]@{win='Windows existing';tux='Linux existing'}
+        $c.verification=[ordered]@{gate=[ordered]@{script='tools/verify.ps1';arguments=@('-Quick')};standalone=[ordered]@{exports=@('win','tux');script='tools/standalone.ps1';arguments=@('{artifact}','{filename}')}}
+        $c.distributions.itch.displayNameTemplate='{title} {version} ({os})'
+        $c.distributions.itch.channels=[ordered]@{windows='win';linux=[ordered]@{export='tux';channel='linux-beta';ignore=@('steam_api*.dll','libsteam_api.so','libgodotsteam.*','steam_appid.txt','*.pdb')}}
+    }
+    $configPath=Join-Path $repo 'release.json';$before=Get-Content $configPath -Raw | ConvertFrom-Json -AsHashtable
+    Assert ((Get-ReleaseSetup $repo).questions.Count -eq 0) 'The itch-only fixture is not complete.'
+    $asked=[Collections.Generic.List[string]]::new()
+    $prompt={param($question)
+        $asked.Add($question.key)
+        switch ($question.key) {
+            'stores' {'steam'}
+            'distributions.steam.appId' {'100'}
+            'distributions.steam.branch' {'default'}
+            'distributions.steam.depots' {'{"101":"win","102":"tux"}'}
+            'distributions.steam.previousRelease' {'v1.2.2'}
+            default {''}
+        }
+    }.GetNewClosure()
+    $result=Invoke-ReleaseInteractiveSetup $repo @() $prompt
+    $expected='stores,distributions.steam.previousRelease,distributions.steam.appId,distributions.steam.branch,distributions.steam.depots'
+    Assert ($result.written -and ($asked -join ',') -ceq $expected) "Adding Steam asked $($asked -join ', ') instead of the store choice and Steam's own facts."
+    $saved=Get-Content $configPath -Raw | ConvertFrom-Json -AsHashtable
+    Assert ((@($saved.distributions.Keys) -join ',') -ceq 'itch,notes,steam' -and $saved.distributions.steam.appId -eq 100 -and $saved.distributions.steam.previousRelease -ceq 'v1.2.2') 'Steam was not added beside the configured stores.'
+    foreach ($key in 'previousRelease','exports','verification','androidVersionCodePolicy') {
+        Assert (($saved[$key] | ConvertTo-Json -Depth 30 -Compress) -ceq ($before[$key] | ConvertTo-Json -Depth 30 -Compress)) "Adding Steam changed $key."
+    }
+    foreach ($store in 'itch','notes') {
+        Assert (($saved.distributions[$store] | ConvertTo-Json -Depth 30 -Compress) -ceq ($before.distributions[$store] | ConvertTo-Json -Depth 30 -Compress)) "Adding Steam changed the $store settings."
+    }
+    $plan=Get-ReleasePlan $repo @('itch-windows','itch-linux','steam')
+    Assert ($plan.configurationReady -and @($plan.destinations | Where-Object id -EQ 'itch-linux')[0].target -ceq 'example/real-game:linux-beta') 'Steam could not be planned beside the retained itch channels.'
+}
+Test 'setup inspection reports undeclared stores without adding them or selecting a destination' {
+    $repo=New-Fixture 'setup-undeclared-store'
+    $configPath=Join-Path $repo 'release.json';$hash=(Get-FileHash $configPath).Hash.ToLowerInvariant()
+    $report=Get-ReleaseSetup $repo
+    Assert ((@($report.stores.configured) -join ',') -ceq 'itch,notes' -and $report.questions.Count -eq 0 -and $report.selection.required) 'Default inspection offered a store change or selected a destination.'
+    $report=Get-ReleaseSetup $repo @('steam','itch-windows')
+    $question=@($report.questions | Where-Object key -EQ 'stores')
+    Assert ($question.Count -eq 1 -and (@($question[0].configured) -join ',') -ceq 'itch,notes' -and $question[0].prompt -match 'steam') 'An undeclared store was not asked about.'
+    Assert (-not $report.configuration.distributions.Contains('steam') -and @($report.stores.configured) -notcontains 'steam') 'Inspection added the requested store.'
+    Assert (@($report.selection.choices | Where-Object {$_.id -eq 'steam' -and $_.storeRequired}).Count -eq 1 -and @($report.questions | Where-Object key -Like 'distributions.steam.*').Count -eq 0) 'The undeclared destination was reported as configured.'
+    Expect-Error {Get-ReleaseSetup $repo @('itch-mac')} 'Unknown destination: itch-mac'
+    Assert ((Get-FileHash $configPath).Hash.ToLowerInvariant() -ceq $hash) 'Inspection changed release.json.'
+    $asked=[Collections.Generic.List[string]]::new()
+    $prompt={param($question) $asked.Add($question.key);switch ($question.key) {'stores' {'steam'};'distributions.steam.appId' {'100'};'distributions.steam.depots' {'{"101":"windows"}'};default {''}}}.GetNewClosure()
+    $result=Invoke-ReleaseInteractiveSetup $repo @('steam') $prompt
+    $saved=Get-Content $configPath -Raw | ConvertFrom-Json -AsHashtable
+    Assert ($result.written -and $asked[0] -ceq 'stores' -and $asked.Contains('distributions.steam.depots') -and $saved.distributions.Contains('itch') -and $saved.distributions.steam.appId -eq 100) 'Interactive setup for an undeclared destination did not add its store and ask for its settings.'
+    Assert ($saved.distributions.steam.Contains('previousRelease') -and $null -eq $saved.distributions.steam.previousRelease -and -not (Get-ReleasePlan $repo @('steam')).configurationReady) 'A deferred Steam baseline fell back to the shared baseline.'
+}
+Test 'setup keeps deliberately unknown baselines and removes a store only when it is named' {
+    $repo=New-Fixture 'setup-store-removal'
+    Change-Config $repo {param($c) $c.distributions.itch.channels.linux=@{export='linux';previousRelease=$null}}
+    $configPath=Join-Path $repo 'release.json';$hash=(Get-FileHash $configPath).Hash.ToLowerInvariant()
+    foreach ($answer in '','itch','itch, notes') {
+        $result=Invoke-ReleaseInteractiveSetup $repo @() {param($question) if ($question.key -eq 'stores') {$answer} else {''}}.GetNewClosure()
+        Assert (-not $result.written -and (Get-FileHash $configPath).Hash.ToLowerInvariant() -ceq $hash) "Store answer '$answer' rewrote release.json."
+    }
+    foreach ($case in @(@{answer='-steam';error='Cannot remove steam'},@{answer='stream';error='Unsupported setup store: stream'})) {
+        $answer=$case.answer;$prompt={param($question) if ($question.key -eq 'stores') {$answer} else {''}}.GetNewClosure()
+        Expect-Error {Invoke-ReleaseInteractiveSetup $repo @() $prompt} $case.error
+    }
+    Assert ((Get-FileHash $configPath).Hash.ToLowerInvariant() -ceq $hash) 'A rejected store change rewrote release.json.'
+    $result=Invoke-ReleaseInteractiveSetup $repo @() {param($question) if ($question.key -eq 'stores') {'-notes'} else {''}}
+    $settings=Get-ReleaseConfiguration $repo
+    Assert ($result.written -and (@($settings.config.destinations | ForEach-Object {$_.id}) -join ',') -ceq 'itch-windows,itch-linux') 'Removing notes did not remove only notes.'
+    Assert ($settings.config.destinationBaselines.Contains('itch-linux') -and $null -eq $settings.config.destinationBaselines['itch-linux']) 'Changing stores resolved a deliberately unknown baseline.'
+    # Answers files replace the list: every retained store must be named, and one left out is removed.
+    $hash=(Get-FileHash $configPath).Hash.ToLowerInvariant();$answers=Join-Path $sandbox 'store-removal-answers.json'
+    $steam=@{'distributions.steam.appId'=100;'distributions.steam.branch'='default';'distributions.steam.depots'=@{'101'='windows'};'distributions.steam.previousRelease'='v1.2.2'}
+    Write-Json $answers ($steam+@{stores=@('itch','steam')})
+    Set-ReleaseSetup $repo $answers $hash | Out-Null
+    $saved=Get-Content $configPath -Raw | ConvertFrom-Json -AsHashtable
+    Assert ((@($saved.distributions.Keys) -join ',') -ceq 'itch,steam' -and $saved.distributions.itch.channels.linux.Contains('previousRelease') -and $null -eq $saved.distributions.itch.channels.linux.previousRelease) 'The full store list did not keep itch with its unknown baseline.'
+    $hash=(Get-FileHash $configPath).Hash.ToLowerInvariant()
+    Write-Json $answers @{stores=@('steam')}
+    Set-ReleaseSetup $repo $answers $hash | Out-Null
+    Assert ((@((Get-Content $configPath -Raw | ConvertFrom-Json -AsHashtable).distributions.Keys) -join ',') -ceq 'steam') 'A replacement store list kept a store it left out.'
+}
 Test 'itch supports the inspected signed APK and plans its display label without another desktop export' {
     $repo=New-StoreFixture 'itch-apk'
     @'
