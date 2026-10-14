@@ -13,6 +13,7 @@ Test 'aggregate gate preserves failed stages and rejects syntax errors' {
     Write-FixtureText "$fixture/tools/verify.ps1" ([IO.File]::ReadAllText($gate))
     Write-FixtureText "$fixture/tests/run-tests.ps1" "Write-Output 'deliberate stage failure'; exit 1"
     Write-FixtureText "$fixture/tests/bootstrap/run-tests.ps1" "Write-Output 'later stage passed'; exit 0"
+    Write-FixtureText "$fixture/tests/integrate/run-tests.ps1" "Write-Output 'integrate stage passed'; exit 0"
     $output=& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File "$fixture/tools/verify.ps1" 2>&1
     Assert ($LASTEXITCODE -eq 1 -and ($output -join "`n") -match 'later stage passed') 'Later success hid earlier failure.'
     Write-FixtureText "$fixture/tests/run-tests.ps1" "Write-Output 'first stage passed'; exit 0"

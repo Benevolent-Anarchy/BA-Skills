@@ -22,7 +22,7 @@ foreach ($file in Get-SourceScripts $root) {
     }
 }
 if ($failed) {exit 1}
-foreach ($suite in @('tests/run-tests.ps1','tests/bootstrap/run-tests.ps1')) {
+foreach ($suite in @('tests/run-tests.ps1','tests/bootstrap/run-tests.ps1','tests/integrate/run-tests.ps1')) {
     & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $root $suite)
     if ($LASTEXITCODE -ne 0) {$failed=$true}
 }
