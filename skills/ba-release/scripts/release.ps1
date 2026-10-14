@@ -26,7 +26,8 @@ param(
     [string]$HoldReason,
     [switch]$PlayTrackReviewed,
     [switch]$RetryUncertain,
-    [switch]$ReplacePlayEdit
+    [switch]$ReplacePlayEdit,
+    [switch]$MigrateConfiguration
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Release.psm1') -Force
@@ -34,6 +35,7 @@ $selected = @($Destination | ForEach-Object {$_.Split(',')} | Where-Object {$_})
 try {
     if ($Mode -eq 'unhold' -and $PSBoundParameters.ContainsKey('HoldReason')) {throw '-HoldReason cannot be supplied to unhold.'}
     if ($PlayTrackReviewed -and $Mode -ne 'unhold') {throw '-PlayTrackReviewed applies only to unhold.'}
+    if ($MigrateConfiguration -and $Mode -ne 'extend') {throw '-MigrateConfiguration applies only to extend.'}
     if ($Mode -in @('setup','validate','doctor','plan','prepare') -and -not $Repository) { throw '-Repository must name the inspected game Git root.' }
     if ($Mode -in @('extend','hold','unhold','publish','status','confirm') -and -not $StatePath) { throw '-StatePath must name an existing prepared release.' }
     if ($Mode -eq 'confirm' -and -not $ReceiptPath) {throw '-ReceiptPath must name an actual observed store result.'}
@@ -70,7 +72,7 @@ try {
             if ($result.status -in @('preparation-failed','source-update-required')) { exit 3 }
         }
         'extend' {
-            $result=Expand-ReleaseDestinations -StatePath $StatePath -Destination $selected -GodotExecutable $GodotExecutable -ButlerExecutable $ButlerExecutable
+            $result=Expand-ReleaseDestinations -StatePath $StatePath -Destination $selected -GodotExecutable $GodotExecutable -ButlerExecutable $ButlerExecutable -MigrateConfiguration:$MigrateConfiguration
             $result | ConvertTo-Json -Depth 20
             if ($result.status -in @('preparation-failed','source-update-required')) {exit 3}
         }

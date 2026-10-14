@@ -101,7 +101,8 @@ function Get-ReleaseConfiguration([string]$Repository, $Configuration = $null) {
     if ([IO.Path]::GetFullPath($gitRoot) -ne $Repository) { throw 'Repository must name the Git root.' }
     $configPath = Join-Path $Repository 'release.json'
     if ($null -eq $Configuration -and -not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw 'Run setup to inspect the game and gather its missing release.json settings.' }
-    $raw = if ($null -ne $Configuration) {$Configuration | ConvertTo-Json -Depth 30} else {[IO.File]::ReadAllText($configPath)}
+    # A string is exact release.json text, such as a committed copy; its hash then matches the file's.
+    $raw = if ($Configuration -is [string]) {$Configuration} elseif ($null -ne $Configuration) {$Configuration | ConvertTo-Json -Depth 30} else {[IO.File]::ReadAllText($configPath)}
     $json = [System.Text.Json.JsonDocument]::Parse($raw)
     try { Assert-ReleaseJson $json.RootElement } finally { $json.Dispose() }
     $document = $raw | ConvertFrom-Json -AsHashtable
