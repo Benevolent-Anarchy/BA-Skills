@@ -32,7 +32,10 @@ the canonical skill directory for inspected facts and missing questions, or add
 `-Interactive` for a terminal wizard. Configuration writes use explicit answers
 and the reported hash. Each new release chooses its destinations and
 patch/minor/major/current version handling; retries reuse the reservation.
-`extend` adds stores later, retaining existing artifacts and completed uploads.
+`extend` later adds stores that release.json declared when the release was
+prepared, retaining existing artifacts and completed uploads. A store configured
+afterwards needs that release.json change committed by itself and
+`extend -MigrateConfiguration`, which accepts only additions.
 Run `doctor` with the intended selection before preparation to find local tool,
 engine/template and selected Android signing prerequisites. It remains read-only
 and distinguishes local presence from unverified remote authentication.

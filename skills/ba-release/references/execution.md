@@ -9,6 +9,7 @@ are passed after the script path. Comma-separated destination IDs work with
 -Mode plan -Repository <game-root> -Destination itch-windows,notes -VersionChange patch
 -Mode prepare -Repository <game-root> -Destination itch-windows,notes -VersionChange patch
 -Mode extend -StatePath <prepared-state-directory> -Destination google-play
+-Mode extend -StatePath <prepared-state-directory> -Destination steam -MigrateConfiguration
 -Mode status -StatePath <prepared-state-directory>
 -Mode hold -StatePath <prepared-state-directory> -Destination google-play -HoldReason "Waiting for existing review to clear."
 -Mode unhold -StatePath <prepared-state-directory> -Destination google-play -PlayTrackReviewed
@@ -144,6 +145,8 @@ lock. HEAD, config bytes, version, previous-release commit and sorted selection
 identify the plan. A different plan for the same version is refused; resolve it
 explicitly instead of bumping a version to retry. Do not edit state.json by hand.
 
+## Extending a prepared release
+
 `extend` explicitly adds destinations while retaining canonical notes, artifact
 provenance, previous plan/approval history and completed operations. It exports
 only missing presets and requires approval of the expanded plan/new note variants.
@@ -153,6 +156,40 @@ desktops retain their original source commit. Unrelated source changes are refus
 before any counter edit. Extend never bumps the game version. Repeat it after
 failure to reuse added destinations. Use the original checkout/state to distribute
 an older release instead of silently selecting newer source.
+
+Ordinary `extend` works only when each added destination was already declared in
+release.json when the release was prepared (or last migrated), and release.json is
+unchanged since.
+In every extension, each added destination's confirmed baseline must precede the
+release's original source commit, never a later settings commit.
+A store, or itch channel, first configured after preparation needs a configuration
+migration. Add it through setup (see [configuration](configuration.md#adding-a-store-to-a-prepared-release)),
+review the release.json diff with the user and commit it by itself. Then repeat
+`extend` with `-MigrateConfiguration`. Without the switch, extend refuses and
+names the destinations the change would add.
+
+Migration accepts only additions: new destination IDs with their baselines, export
+aliases, and standalone checks for presets that had none. It refuses all of the
+following, leaving state.json unchanged; prepare a new version instead:
+
+- an uncommitted change, any other changed file, or source that does not descend
+  from the prepared commit;
+- any change to an existing destination or its baseline, root `previousRelease`
+  (or the commit it resolves to), `verification.gate`, an existing standalone
+  check, `androidVersionCodePolicy` or `project`;
+- changed artifacts or published notes, as for any extension.
+
+Migration reads the prepared release.json back from Git and checks it against the
+recorded configuration hash; only line endings may differ. It appends the original
+plan and approval to `history` with a `configurationMigration` record of both heads,
+both configuration hashes and what was added. It then rebinds the original
+selection to the new commit with its frozen baselines, and verification runs again.
+An ordinary extension of the migrated release follows, including any counter
+reservation for a newly configured Android store. If interrupted, repeat the same
+command; it resumes from the last saved step. Publication needs approval of the
+expanded plan.
+
+## Approval, publication and recovery
 
 Review the returned state path, plan, staged artifact manifest and notes. Replace
 the raw commit draft in `notes.md` with reviewed player-facing text; retain its

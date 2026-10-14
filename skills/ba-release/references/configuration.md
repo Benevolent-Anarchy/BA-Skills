@@ -148,3 +148,15 @@ Writes require validated explicit answers and the inspected configuration hash.
 Invalid, secret or stale answers leave the file unchanged. `validate`, `plan` and
 `doctor` read the same structure. Plan makes no network calls and cannot claim
 remote permissions or publication have been checked.
+
+## Adding a store to a prepared release
+
+A version prepared before a store was configured can still ship there. Answer
+setup's `stores` with the complete retained list, such as `["itch", "steam",
+"notes"]`, plus the new store's inspected settings and its own confirmed
+`previousRelease`. Leave every existing setting as it is: a migration may only
+add stores or itch channels, export aliases, and standalone checks for presets
+that had none. Commit that release.json change by itself, then run `extend` with
+`-MigrateConfiguration`. [Execution](execution.md#extending-a-prepared-release)
+states exactly when ordinary `extend` is enough and what migration refuses.
+Anything else needs a new release.

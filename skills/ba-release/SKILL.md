@@ -125,6 +125,12 @@ variants. It builds only missing artifacts. A later first Android inclusion may
 require that artifact's counter-only source commit; the game version stays unchanged and
 existing artifacts retain their original commit. Previously submitted locale
 text is immutable through extension. Track live releases per actual store channel.
+Ordinary `extend` covers destinations declared in release.json when the release
+was prepared. For a store configured afterwards, add it through setup, have the
+user review that release.json change and commit it by itself, then pass
+`-MigrateConfiguration`. It adopts only added stores, channels, exports and
+checks with a confirmed baseline, and refuses any other change; read
+[extending a prepared release](references/execution.md#extending-a-prepared-release).
 
 Publish the exact approved canonical notes only after at least one store is live.
 The separate predictable availability record identifies live, held, submitted

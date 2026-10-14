@@ -194,6 +194,7 @@ param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Rest)
 $index = [Array]::IndexOf($Rest,'--export-release')
 if ($index -lt 0) { exit 3 }
 $output = $Rest[$index+2]
+if ($env:BA_FIXTURE_EXPORT_FAIL -and $Rest[$index+1] -ceq $env:BA_FIXTURE_EXPORT_FAIL) { exit 4 }
 if ($env:BA_FIXTURE_EXPORT_LOG) {Add-Content $env:BA_FIXTURE_EXPORT_LOG $Rest[$index+1]}
 New-Item -ItemType Directory (Split-Path $output -Parent) -Force | Out-Null
 'exported game' | Set-Content -LiteralPath $output
@@ -1042,6 +1043,7 @@ Test 'version operations are explicit and holding Play leaves Android counters u
 . (Join-Path $PSScriptRoot 'host-runtime-tests.ps1')
 . (Join-Path $PSScriptRoot 'publication-hold-tests.ps1')
 . (Join-Path $PSScriptRoot 'review-recovery-tests.ps1')
+. (Join-Path $PSScriptRoot 'configuration-migration-tests.ps1')
 Write-Output "Results: $script:Passed passed; $script:Failed failed. Fixture directory: $sandbox"
 if ($script:Passed + $script:Failed -eq 0) {throw 'No tests matched Filter.'}
 if ($script:Failed -gt 0) { exit 1 }
