@@ -1,12 +1,15 @@
 # Checks that the issues a merged pull request should have closed are closed, and for any
 # still open, finds out why instead of closing it. An issue is expected to close when
-# GitHub lists it as closing the pull request (a closing keyword, or a link made by hand)
-# or when the description names it with a closing keyword. For an open one it reports what
-# it can establish: the pull request has not merged; it merged into a branch that is not
-# the default, where GitHub closes nothing; the issue was reopened after this merge, and by
+# GitHub lists it as closing the pull request (a closing keyword, or a link made by hand),
+# or when the description or the message of a commit that landed names it with a closing
+# keyword; every page of the commits is read, and a count that falls short of GitHub's
+# total is an error, never an empty audit. For an open one it reports what it can
+# establish: the pull request has not merged; it merged into a branch that is not the
+# default, where GitHub closes nothing; the issue was reopened after this merge, and by
 # whom; the merge was so recent that GitHub may still be processing it; the description's
 # keyword is not one GitHub linked; or the issue lives in another repository. The pull
-# request is read from the repository the remote names. It changes nothing. Writes one JSON document, with an `error` member and exit code 1 on failure.
+# request is read from the repository the remote names. It changes nothing. Writes one
+# JSON document, with an `error` member and exit code 1 on failure.
 #requires -Version 7.2
 [CmdletBinding()]
 param(
@@ -56,6 +59,53 @@ function Resolve-IssueUrl([string]$Owner, [string]$Name, [string]$Number) {
     return "https://github.com/$Owner/$Name/issues/$Number"
 }
 
+# The issues $Text names with a closing keyword, as url, repository and number; a bare #N
+# is in this repository.
+function Get-KeywordReferences([string]$Text) {
+    $keyword = '(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+(?:https://github\.com/(?<o1>[\w.-]+)/(?<r1>[\w.-]+)/issues/(?<n1>\d+)|(?:(?<o2>[\w.-]+)/(?<r2>[\w.-]+))?#(?<n2>\d+))'
+    foreach ($match in [regex]::Matches($Text, $keyword)) {
+        $owner, $name = if ($match.Groups['o1'].Success) { $match.Groups['o1'].Value, $match.Groups['r1'].Value }
+            elseif ($match.Groups['o2'].Success) { $match.Groups['o2'].Value, $match.Groups['r2'].Value }
+            else { $here -split '/', 2 }
+        $number = if ($match.Groups['n1'].Success) { $match.Groups['n1'].Value } else { $match.Groups['n2'].Value }
+        [pscustomobject]@{ url = (Resolve-IssueUrl $owner $name $number); repository = "$owner/$name"; number = [int]$number }
+    }
+}
+
+# Every commit the pull request landed, as oid and message, read page by page. Falling short
+# of GitHub's own count is an error: an audit that missed commits must not pass as one
+# that found nothing.
+function Get-MergedCommits {
+    $owner, $name = $here -split '/', 2
+    $query = @'
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      commits(first: 100, after: $after) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { commit { oid message } }
+      }
+    }
+  }
+}
+'@
+    $commits = [Collections.Generic.List[object]]::new()
+    $after = $null
+    $total = $null
+    do {
+        $arguments = @('api', 'graphql', '-f', "query=$query", '-f', "owner=$owner", '-f', "name=$name", '-F', "number=$PullRequest")
+        if ($after) { $arguments += @('-f', "after=$after") }
+        $page = (Invoke-GitHub $arguments "the commits of #$PullRequest").data.repository.pullRequest.commits
+        $total = [int]$page.totalCount
+        foreach ($node in @($page.nodes)) { $commits.Add([pscustomobject]@{ oid = $node.commit.oid; message = $node.commit.message }) }
+        $after = if ($page.pageInfo.hasNextPage) { $page.pageInfo.endCursor } else { $null }
+        if ($page.pageInfo.hasNextPage -and -not $after) { throw "GitHub reported more commits on #$PullRequest without a cursor to read them." }
+    } while ($after)
+    if ($commits.Count -ne $total) { throw "Read $($commits.Count) of the $total commits on #$PullRequest, so the audit would be incomplete." }
+    return $commits.ToArray()
+}
+
 try {
     $Repository = (Resolve-Path -LiteralPath $Repository).Path
     $script:gh = if ($GitHubCli) { $GitHubCli } else { Get-GitHubCli }
@@ -65,22 +115,32 @@ try {
     $defaultBranch = $repo.defaultBranchRef.name
     $pr = Invoke-GitHub @('pr', 'view', "$PullRequest", '--repo', $here, '--json', 'number,url,state,mergedAt,baseRefName,body,closingIssuesReferences') "#$PullRequest"
 
-    # Expected issues: those GitHub links as closing, then any the description names with
-    # a closing keyword that GitHub did not link.
+    # Expected issues, each once by URL, with where it was named: linked by GitHub, named in
+    # the description, or named in the message of a commit that landed.
     $expected = [ordered]@{}
-    foreach ($ref in @($pr.closingIssuesReferences)) {
-        $url = Resolve-IssueUrl $ref.repository.owner.login $ref.repository.name $ref.number
-        $expected[$url] = [ordered]@{ url = $url; repository = "$($ref.repository.owner.login)/$($ref.repository.name)"; number = [int]$ref.number; linkedBy = 'manual link' }
+    function Add-Expected($Reference, [string]$Source) {
+        if (-not $expected.Contains($Reference.url)) {
+            $expected[$Reference.url] = [ordered]@{ url = $Reference.url; repository = $Reference.repository; number = $Reference.number; linked = $false; inDescription = $false; commits = @() }
+        }
+        $entry = $expected[$Reference.url]
+        if ($Source -eq 'linked') { $entry.linked = $true }
+        elseif ($Source -eq 'description') { $entry.inDescription = $true }
+        else { $entry.commits = @($entry.commits + $Source | Sort-Object -Unique) }
     }
-    $keyword = '(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+(?:https://github\.com/(?<o1>[\w.-]+)/(?<r1>[\w.-]+)/issues/(?<n1>\d+)|(?:(?<o2>[\w.-]+)/(?<r2>[\w.-]+))?#(?<n2>\d+))'
-    foreach ($match in [regex]::Matches("$($pr.body)", $keyword)) {
-        $owner, $name = if ($match.Groups['o1'].Success) { $match.Groups['o1'].Value, $match.Groups['r1'].Value }
-            elseif ($match.Groups['o2'].Success) { $match.Groups['o2'].Value, $match.Groups['r2'].Value }
-            else { $here -split '/', 2 }
-        $number = if ($match.Groups['n1'].Success) { $match.Groups['n1'].Value } else { $match.Groups['n2'].Value }
-        $url = Resolve-IssueUrl $owner $name $number
-        if ($expected.Contains($url)) { $expected[$url].linkedBy = 'keyword' }
-        else { $expected[$url] = [ordered]@{ url = $url; repository = "$owner/$name"; number = [int]$number; linkedBy = 'keyword GitHub did not link' } }
+    foreach ($ref in @($pr.closingIssuesReferences)) {
+        $repositoryName = "$($ref.repository.owner.login)/$($ref.repository.name)"
+        Add-Expected ([pscustomobject]@{ url = (Resolve-IssueUrl $ref.repository.owner.login $ref.repository.name $ref.number); repository = $repositoryName; number = [int]$ref.number }) 'linked'
+    }
+    foreach ($ref in @(Get-KeywordReferences "$($pr.body)")) { Add-Expected $ref 'description' }
+    foreach ($commit in @(Get-MergedCommits)) {
+        foreach ($ref in @(Get-KeywordReferences "$($commit.message)")) { Add-Expected $ref $commit.oid.Substring(0, 8) }
+    }
+    foreach ($entry in $expected.Values) {
+        $named = $entry.inDescription -or $entry.commits.Count -gt 0
+        $entry.linkedBy = if ($entry.linked -and $named) { 'keyword' }
+            elseif ($entry.linked) { 'manual link' }
+            elseif ($entry.inDescription) { 'keyword GitHub did not link' }
+            else { 'commit keyword' }
     }
 
     $mergedAgo = if ($pr.mergedAt) { [int]((Get-Date).ToUniversalTime() - ([datetime]$pr.mergedAt).ToUniversalTime()).TotalSeconds } else { $null }
@@ -121,6 +181,6 @@ try {
     } | ConvertTo-Json -Depth 6
     exit 0
 } catch {
-    [ordered]@{ pullRequest = $PullRequest; error = $_.Exception.Message } | ConvertTo-Json
+    [ordered]@{ pullRequest = $PullRequest; error = (Hide-UrlCredentials $_.Exception.Message) } | ConvertTo-Json
     exit 1
 }

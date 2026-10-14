@@ -13,7 +13,7 @@ A request to integrate a project authorizes the survey, the rehearsal and a scra
 
 Never mark a pull request ready, never merge a draft, and never rewrite history. Never rebase or force-push a pull-request branch: bring it up to date by merging the base into it. The scripts' pushes each name the exact value they replace and are fast-forwards of it, so a ref that moved in any direction fails its push. Leave review threads as they are. Never touch Cicely's main checkout beyond a fast-forward pull at the end, and only when it is clean.
 
-The scripts below run from this skill's directory with PowerShell 7.2+, Git 2.38+ and an authenticated GitHub CLI. Each writes one JSON document. Read it even after a nonzero exit: a failure carries an `error` member saying what was and was not changed. Each script takes the GitHub repository from its remote's configured URL and names it in every GitHub CLI call, so `GH_REPO` and the CLI's own default repository never redirect it. A remote that is not on github.com is refused.
+The scripts below run from this skill's directory with PowerShell 7.2+, Git 2.38+ and an authenticated GitHub CLI. Each writes one JSON document. Read it even after a nonzero exit: a failure carries an `error` member saying what was and was not changed. Each script takes the GitHub repository from its remote's configured URL and names it in every GitHub CLI call, so `GH_REPO` and the CLI's own default repository never redirect it. A remote that is not on github.com is refused, and so is one that pushes to more than one destination or that a URL rewrite sends to a different GitHub repository, since a push or deletion would then reach a repository the checks never read. Errors never repeat credentials from a remote's URL.
 
 ## 1. Prepare
 
@@ -130,7 +130,7 @@ Check each merged pull request's issues:
 pwsh -NoProfile -File scripts/check-issues.ps1 -Repository <root> -PullRequest <n>
 ```
 
-It covers the issues GitHub links as closing, whether by keyword or by hand, and any the description names with a closing keyword that GitHub did not link. Each is identified by its URL, since an issue can live in another repository. For an issue still open, its `findings` say why, from what it could establish:
+It covers the issues GitHub links as closing, whether by keyword or by hand, any the description names with a closing keyword that GitHub did not link, and any named with a closing keyword in the message of a commit the pull request landed. It reads every commit, and fails rather than report a partial audit. Each is identified by its URL, since an issue can live in another repository. For an issue still open, its `findings` say why, from what it could establish:
 - the pull request has not merged, or merged into a branch other than the default
 - the issue was reopened, and by whom
 - the merge was too recent for GitHub to have processed it

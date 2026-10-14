@@ -60,7 +60,7 @@ try {
     $result | ConvertTo-Json -Depth 6
     exit 0
 } catch {
-    $result.error = $_.Exception.Message
+    $result.error = (Hide-UrlCredentials $_.Exception.Message)
     $result | ConvertTo-Json -Depth 6
     exit 1
 }

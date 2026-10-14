@@ -160,7 +160,7 @@ try {
         $pending = & git -C $Worktree rev-parse --quiet --verify MERGE_HEAD 2>$null
         if ($pending) { & git -C $Worktree merge --abort 2>$null | Out-Null }
     }
-    $result.error = $_.Exception.Message
+    $result.error = (Hide-UrlCredentials $_.Exception.Message)
     $result | ConvertTo-Json -Depth 5
     exit 1
 }

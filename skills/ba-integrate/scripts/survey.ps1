@@ -265,6 +265,6 @@ try {
     } | ConvertTo-Json -Depth 8
     exit 0
 } catch {
-    [ordered]@{ error = $_.Exception.Message } | ConvertTo-Json
+    [ordered]@{ error = (Hide-UrlCredentials $_.Exception.Message) } | ConvertTo-Json
     exit 1
 }

@@ -773,7 +773,14 @@ function New-FakeGitHubCli([hashtable]$Responses) {
     $fake = Join-Path $sandbox ('gh-table-' + [guid]::NewGuid().ToString('N') + '.ps1')
     $text = $quoteGuard + "`n" + @'
 $responses = Get-Content -LiteralPath '__DATA__' -Raw | ConvertFrom-Json -AsHashtable
-$line = ($args | ForEach-Object { "$_" }) -join ' '
+$words = [string[]]@($args | ForEach-Object { "$_" })
+$line = $words -join ' '
+# A GraphQL call is keyed by its variables, in order, without the query text:
+# 'graphql owner=fixture name=repo number=7 after=c2'.
+if ($words[0] -eq 'api' -and $words[1] -eq 'graphql') {
+    $variables = for ($i = 2; $i + 1 -lt $words.Count; $i += 2) { if (-not $words[$i + 1].StartsWith('query=')) { $words[$i + 1] } }
+    $line = 'graphql ' + (@($variables) -join ' ')
+}
 $key = @($responses.Keys | Where-Object { $line.StartsWith($_) } | Sort-Object Length -Descending) | Select-Object -First 1
 if (-not $key) { "no stand-in response for: $line"; exit 1 }
 $value = "$($responses[$key])"
@@ -910,6 +917,53 @@ Test 'a remote that is not on GitHub is refused before anything is deleted' {
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'not a github.com repository' -and (Get-OriginBranch $f.Repository 'one') -eq $f.Head) "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
 }
 
+## Gives the fixture's origin a second destination, as $Kind says: a second push URL, or
+## a second URL with no push URLs, either one the bare repository at $Other.
+function Add-SecondDestination([string]$Repository, [string]$Kind, [string]$Other) {
+    if ($Kind -eq 'pushurl') {
+        Invoke-FixtureGit $Repository @('config', '--add', 'remote.origin.pushurl', 'https://github.com/fixture/repo.git') | Out-Null
+        Invoke-FixtureGit $Repository @('config', '--add', 'remote.origin.pushurl', $Other) | Out-Null
+    } else {
+        Invoke-FixtureGit $Repository @('config', '--add', 'remote.origin.url', $Other) | Out-Null
+    }
+}
+
+foreach ($kind in @('pushurl', 'url')) {
+    Test "a remote with a second $kind destination is refused before anything is deleted" {
+        # The reviewer's re-review case: git would delete the branch from both
+        # destinations while the checks read only the first.
+        $f = New-LandedFixture
+        $mirror = Join-Path $sandbox ('mirror-' + [guid]::NewGuid().ToString('N') + '.git')
+        Invoke-FixtureGit $sandbox @('init', '--quiet', '--bare', '--initial-branch=main', $mirror) | Out-Null
+        Invoke-FixtureGit $f.Repository @('push', '--quiet', $mirror, "$($f.Head):refs/heads/one") | Out-Null
+        Add-SecondDestination $f.Repository $kind $mirror.Replace('\', '/')
+        $run = Invoke-DeleteBranch $f.Repository $f.Head
+        Assert ($run.Code -eq 1 -and $run.Result.error -match 'pushes to 2 destinations') "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
+        Assert ((Get-OriginBranch $f.Repository 'one') -eq $f.Head) 'The branch was deleted from origin.'
+        Assert ((Invoke-FixtureGit $sandbox @('--git-dir', $mirror, 'rev-parse', 'refs/heads/one')).Trim() -eq $f.Head) 'The branch was deleted from the second destination.'
+    }
+}
+
+Test 'a push rewrite to another GitHub repository is refused before anything is deleted' {
+    $f = New-LandedFixture
+    # A dead proxy, so a regression fails here instead of reaching GitHub.
+    Invoke-FixtureGit $f.Repository @('config', 'http.proxy', 'http://127.0.0.1:9') | Out-Null
+    Invoke-FixtureGit $f.Repository @('config', 'url.https://github.com/mirror/repo.git.pushInsteadOf', 'https://github.com/fixture/repo.git') | Out-Null
+    $run = Invoke-DeleteBranch $f.Repository $f.Head
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'rewrite sends its pushes to mirror/repo') "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
+    Assert ((Get-OriginBranch $f.Repository 'one') -eq $f.Head) 'The branch was deleted.'
+}
+
+Test 'landing refuses a remote with two push destinations, pushing nothing' {
+    $f = New-LandingFixture
+    $mirror = Join-Path $sandbox ('mirror-' + [guid]::NewGuid().ToString('N') + '.git')
+    Invoke-FixtureGit $sandbox @('init', '--quiet', '--bare', '--initial-branch=main', $mirror) | Out-Null
+    Add-SecondDestination $f.Repository 'pushurl' $mirror.Replace('\', '/')
+    $run = Invoke-Step $f.Rehearsal 'one' $f.Head $f.Base $f.Step (New-FakePullRequest $f.Repository 'one')
+    Assert ($run.Land.Code -eq 1 -and $run.Land.Result.error -match 'pushes to 2 destinations' -and -not $run.Land.Result.branchPushed) "Expected a refusal: $($run.Land.Result | ConvertTo-Json -Compress)"
+    Assert ((Get-OriginBranch $f.Repository 'main') -eq $f.Base) 'Main changed.'
+}
+
 Test 'a GitHub error while listing dependents deletes nothing' {
     $f = New-LandedFixture
     $run = Invoke-DeleteBranch $f.Repository $f.Head @() @{ fail = $true }
@@ -967,16 +1021,31 @@ function New-GitHubCheckout {
     return $repo
 }
 
+## One page of a pull request's commits as GitHub's GraphQL API returns it: $Messages are
+## the commits' messages, $Total is the pull request's total, and $Next the cursor of the
+## following page, if any.
+function New-CommitPage([string[]]$Messages = @(), [int]$Total = -1, [string]$Next) {
+    if ($Total -lt 0) { $Total = $Messages.Count }
+    $nodes = @($Messages | ForEach-Object { @{ commit = @{ oid = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')).Substring(0, 40); message = $_ } } })
+    return ConvertTo-Json -Compress -Depth 8 -InputObject @{ data = @{ repository = @{ pullRequest = @{ commits = @{ totalCount = $Total; pageInfo = @{ hasNextPage = [bool]$Next; endCursor = $(if ($Next) { $Next } else { $null }) }; nodes = $nodes } } } } }
+}
+
 ## Runs check-issues for pull request 7 of fixture/repo, whose default branch is main.
 ## $PullRequest overrides the pull request's fields, $Issues gives each issue URL its
 ## `gh issue view` JSON, and $Timelines gives an issue URL the pages of its timeline, each
-## a JSON array; a missing timeline is one empty page.
-function Invoke-CheckIssues([hashtable]$PullRequest, [hashtable]$Issues, [hashtable]$Timelines = @{}) {
+## a JSON array; a missing timeline is one empty page. $Commits are the pages of the pull
+## request's commits, keyed by the cursor that reads them ('' for the first); none by
+## default.
+function Invoke-CheckIssues([hashtable]$PullRequest, [hashtable]$Issues, [hashtable]$Timelines = @{}, [hashtable]$Commits = @{ '' = (New-CommitPage) }) {
     $pr = [ordered]@{ number = 7; url = 'https://github.com/fixture/repo/pull/7'; state = 'MERGED'; mergedAt = '2026-01-01T00:00:00Z'; baseRefName = 'main'; body = ''; closingIssuesReferences = @() }
     foreach ($key in $PullRequest.Keys) { $pr[$key] = $PullRequest[$key] }
     $responses = @{
         'repo view fixture/repo' = '{"nameWithOwner":"fixture/repo","defaultBranchRef":{"name":"main"}}'
         'pr view 7 --repo fixture/repo' = ($pr | ConvertTo-Json -Depth 6 -Compress)
+    }
+    foreach ($cursor in $Commits.Keys) {
+        $key = 'graphql owner=fixture name=repo number=7' + $(if ($cursor) { " after=$cursor" })
+        $responses[$key] = $Commits[$cursor]
     }
     foreach ($url in $Issues.Keys) {
         $responses["issue view $url"] = $Issues[$url]
@@ -1093,9 +1162,71 @@ Test 'a warning from gh does not stop the issue check' {
         'repo view fixture/repo' = '!warn {"nameWithOwner":"fixture/repo","defaultBranchRef":{"name":"main"}}'
         'pr view 7 --repo fixture/repo' = '{"number":7,"url":"https://github.com/fixture/repo/pull/7","state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","baseRefName":"main","body":"Closes #5","closingIssuesReferences":[]}'
         'issue view https://github.com/fixture/repo/issues/5' = $closedIssue
+        'graphql owner=fixture name=repo number=7' = (New-CommitPage)
     }
     $run = Invoke-IntegrateScript 'check-issues' @{ Repository = (New-GitHubCheckout); PullRequest = 7; GitHubCli = $fake }
     Assert ($run.Code -eq 0 -and $run.Result.allClosed) "A gh warning broke the issue check: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'an issue named only in a merged commit''s message is audited, and its reopening found' {
+    # #26: an empty description and no linked issues; only the commit says Fixes #5.
+    $timeline = ConvertTo-Json -Compress -Depth 4 -InputObject @(
+        (New-TimelineEvent 'closed' '2026-01-01T00:00:02Z' 'github'),
+        (New-TimelineEvent 'reopened' '2026-01-05T00:00:00Z' 'someone'))
+    $run = Invoke-CheckIssues @{} @{ 'https://github.com/fixture/repo/issues/5' = $openIssue } @{ 'https://github.com/fixture/repo/issues/5' = $timeline } @{ '' = (New-CommitPage @('Tidy the cell', "Light the lamp`n`nFixes #5")) }
+    $issues = @($run.Result.issues)
+    Assert ($run.Code -eq 0 -and $issues.Count -eq 1 -and $issues[0].linkedBy -eq 'commit keyword' -and @($issues[0].commits).Count -eq 1) "Commit reference missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+    Assert ((@($issues[0].findings) -join ' ') -match 'reopened by someone at 2026-01-05') "Reopening not reported: $(@($issues[0].findings) -join ' | ')"
+}
+
+Test 'references in the description and commits are merged, and other repositories kept apart' {
+    $run = Invoke-CheckIssues @{ body = 'Closes #5'; closingIssuesReferences = @(New-ClosingReference 5) } @{
+        'https://github.com/fixture/repo/issues/5' = $closedIssue
+        'https://github.com/other/place/issues/5' = $openIssue
+    } @{} @{ '' = (New-CommitPage @('Fixes #5', 'Resolves other/place#5')) }
+    $issues = @($run.Result.issues)
+    $here = $issues | Where-Object url -EQ 'https://github.com/fixture/repo/issues/5'
+    $there = $issues | Where-Object url -EQ 'https://github.com/other/place/issues/5'
+    Assert ($run.Code -eq 0 -and $issues.Count -eq 2 -and $here.linkedBy -eq 'keyword' -and $here.inDescription -and @($here.commits).Count -eq 1) "Duplicates not merged: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+    Assert ($there.linkedBy -eq 'commit keyword' -and (@($there.findings) -join ' ') -match 'lives in other/place') "Other repository mishandled: $($there | ConvertTo-Json -Compress)"
+}
+
+Test 'commits on a second page are read' {
+    $run = Invoke-CheckIssues @{} @{ 'https://github.com/fixture/repo/issues/9' = $closedIssue } @{} @{
+        '' = (New-CommitPage @('First half') 2 'c2')
+        'c2' = (New-CommitPage @('Closes #9') 2)
+    }
+    Assert ($run.Code -eq 0 -and (@($run.Result.issues | ForEach-Object number) -join ',') -eq '9') "Second page missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'commits GitHub could not list fail the audit instead of passing it empty' {
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = '!fail HTTP 502' }
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'Could not read the commits of #7') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
+}
+
+Test 'fewer commits than GitHub counts fail the audit' {
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage @('Only one') 3) }
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'Read 1 of the 3 commits') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
+}
+
+Test 'a credential in a refused remote URL never reaches the output' {
+    # The reviewer's case: the refusal stays, but its message must not carry the secret.
+    $repo = New-GitHubCheckout
+    # The password holds an @, so a scrubber stopping at the first one would leak its end.
+    Invoke-FixtureGit $repo @('remote', 'set-url', 'origin', 'https://user:REVIEW_SENTINEL@NOT_A_CREDENTIAL@gitlab.example/fixture/repo.git') | Out-Null
+    $run = Invoke-IntegrateScript 'check-issues' @{ Repository = $repo; PullRequest = 7; GitHubCli = (New-FakeGitHubCli @{}) }
+    $text = $run.Result | ConvertTo-Json -Compress
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'not a github.com repository' -and $text -match '\*\*\*@gitlab.example' -and $text -notmatch 'REVIEW_SENTINEL|NOT_A_CREDENTIAL') "The secret leaked or the refusal is unclear: $text"
+}
+
+Test 'a credential in a GitHub remote URL is accepted and never reaches the output' {
+    $repo = New-GitHubCheckout
+    Invoke-FixtureGit $repo @('remote', 'set-url', 'origin', 'https://REVIEW_SENTINEL_NOT_A_CREDENTIAL@github.com/fixture/repo.git') | Out-Null
+    Invoke-FixtureGit $repo @('config', '--add', 'remote.origin.pushurl', 'https://REVIEW_SENTINEL_NOT_A_CREDENTIAL@github.com/fixture/repo.git') | Out-Null
+    Invoke-FixtureGit $repo @('config', '--add', 'remote.origin.pushurl', 'https://REVIEW_SENTINEL_NOT_A_CREDENTIAL@github.com/fixture/other.git') | Out-Null
+    $run = Invoke-IntegrateScript 'check-issues' @{ Repository = $repo; PullRequest = 7; GitHubCli = (New-FakeGitHubCli @{}) }
+    $text = $run.Result | ConvertTo-Json -Compress
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'pushes to 2 destinations' -and $text -match '\*\*\*@github.com' -and $text -notmatch 'REVIEW_SENTINEL') "The secret leaked: $text"
 }
 
 Test 'a GitHub error while checking issues fails without guessing' {

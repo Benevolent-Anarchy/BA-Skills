@@ -60,17 +60,39 @@ function Invoke-GitHubCli([string]$Gh, [string[]]$Arguments, [string]$Directory)
     return [pscustomobject]@{ Code = $code; Out = $out; Err = $err }
 }
 
-# The GitHub repository, as owner/name, that $Remote of $Repository pushes to. It comes
-# from the remote's configured push URL, or its URL, as written, so every gh call can name
-# the repository the scripts push to instead of leaving gh to choose one from GH_REPO or
-# its own default. A remote that is not on github.com is refused.
-function Get-GitHubRepository([string]$Repository, [string]$Remote = 'origin') {
-    $url = (Invoke-Git $Repository @('config', '--get', "remote.$Remote.pushurl") -Allowed 0, 1).Lines | Select-Object -First 1
-    if (-not $url) { $url = (Invoke-Git $Repository @('config', '--get', "remote.$Remote.url") -Allowed 0, 1).Lines | Select-Object -First 1 }
-    if (-not $url) { throw "$Remote has no URL, so its GitHub repository is unknown. Nothing was changed." }
-    $match = [regex]::Match($url, '^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)(?<owner>[\w.-]+)/(?<name>[\w.-]+?)(?:\.git)?/?$')
-    if (-not $match.Success) { throw "$Remote ($url) is not a github.com repository, so the scripts cannot tell GitHub which repository they act on. Nothing was changed." }
+# $Text with the credentials any URL in it carries replaced by ***, so a token in a remote's
+# URL never reaches an error message or a log.
+function Hide-UrlCredentials([string]$Text) {
+    return $Text -replace '(?<=[A-Za-z][A-Za-z0-9+.-]*://)[^\s/]+@', '***@'
+}
+
+# The owner/name of a github.com URL in https, ssh or scp form, credentials allowed, or
+# $null for anything else.
+function ConvertFrom-GitHubUrl([string]$Url) {
+    $match = [regex]::Match($Url, '^(?:https://(?:[^@/\s]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)(?<owner>[\w.-]+)/(?<name>[\w.-]+?)(?:\.git)?/?$')
+    if (-not $match.Success) { return $null }
     return "$($match.Groups['owner'].Value)/$($match.Groups['name'].Value)"
+}
+
+# The GitHub repository, as owner/name, that $Remote of $Repository pushes to, so every gh
+# call can name the repository the scripts push to instead of leaving gh to choose one from
+# GH_REPO or its own default. It is read from the remote's configured push URL, or its URL,
+# as written, and refused unless git pushes to exactly one destination: a remote with
+# several push URLs, or several URLs, would push or delete in repositories the checks never
+# read. A rewrite (pushInsteadOf or insteadOf) that sends the push to a different GitHub
+# repository is refused for the same reason. A remote not on github.com is refused too.
+function Get-GitHubRepository([string]$Repository, [string]$Remote = 'origin') {
+    $configured = @((Invoke-Git $Repository @('config', '--get-all', "remote.$Remote.pushurl") -Allowed 0, 1).Lines | Where-Object { $_ })
+    if ($configured.Count -eq 0) { $configured = @((Invoke-Git $Repository @('config', '--get-all', "remote.$Remote.url") -Allowed 0, 1).Lines | Where-Object { $_ }) }
+    if ($configured.Count -eq 0) { throw "$Remote has no URL, so its GitHub repository is unknown. Nothing was changed." }
+    if ($configured.Count -gt 1) { throw "$Remote pushes to $($configured.Count) destinations ($(Hide-UrlCredentials ($configured -join ', '))), so a push or deletion would reach repositories the checks never read. Give it one push URL. Nothing was changed." }
+    $named = ConvertFrom-GitHubUrl $configured[0]
+    if (-not $named) { throw "$Remote ($(Hide-UrlCredentials $configured[0])) is not a github.com repository, so the scripts cannot tell GitHub which repository they act on. Nothing was changed." }
+    $effective = @((Invoke-Git $Repository @('remote', 'get-url', '--push', '--all', $Remote)).Lines | Where-Object { $_ })
+    if ($effective.Count -ne 1) { throw "$Remote pushes to $($effective.Count) destinations after URL rewriting, so a push or deletion would reach repositories the checks never read. Nothing was changed." }
+    $rewritten = ConvertFrom-GitHubUrl $effective[0]
+    if ($rewritten -and $rewritten -ne $named) { throw "$Remote is configured as $named, but a URL rewrite sends its pushes to $rewritten, a repository the checks would not read. Nothing was changed." }
+    return $named
 }
 
 # Every open pull request in GitHub repository $GitHubRepository targeting $Branch, read
@@ -111,4 +133,4 @@ function Get-GitHubCli {
     return $gh
 }
 
-Export-ModuleMember -Function Invoke-Git, Resolve-Commit, Test-CommitExists, Test-Ancestor, Get-RemoteBranch, Test-CleanWorktree, Invoke-GitHubCli, Get-GitHubRepository, Get-PullRequestsTargeting, Get-GitHubCli
+Export-ModuleMember -Function Invoke-Git, Resolve-Commit, Test-CommitExists, Test-Ancestor, Get-RemoteBranch, Test-CleanWorktree, Invoke-GitHubCli, Hide-UrlCredentials, ConvertFrom-GitHubUrl, Get-GitHubRepository, Get-PullRequestsTargeting, Get-GitHubCli
