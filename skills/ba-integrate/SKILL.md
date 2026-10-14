@@ -111,7 +111,7 @@ When a run stops, report which pull requests merged, which did not, and what eac
 
 - `branchPushed: true, landed: false`: the branch holds the update (`branchTip`) and the base is unchanged. Fix what the error names. If the plan still holds, run `land.ps1` again; if not, the run needs a new plan.
 - `landed: true, merged: false`: the merge commit (`mergeCommit`) is on the base, but GitHub has not yet reported the pull request merged. Run `land.ps1` again to wait. Don't delete the branch, comment, or start the next step until it reports `merged: true`. Never land the pull request a second time.
-- Any other refusal pushed nothing. Report it and replan.
+- Any other refusal pushed nothing. If the cause was passing, such as a commit hook failing on the merge commit, the script has already abandoned the merge it started, so fix the cause and run it again with the same arguments. Otherwise, report it and replan.
 
 ## 6. Finish
 

@@ -680,6 +680,33 @@ Test 'a branch that vanishes after the checks is not recreated' {
     Assert (-not (Get-OriginBranch $f.Repository 'one') -and (Get-OriginBranch $f.Repository 'main') -eq $f.Base) 'The branch was recreated or main changed.'
 }
 
+Test 'a merge commit that fails once can be retried with the same arguments' {
+    # The reviewer's case: a commit hook fails transiently, after landing has started its
+    # merge and before any push. The retry must not find that merge still pending.
+    $f = New-LandingFixture
+    $marker = Join-Path $sandbox ('fail-once-' + [guid]::NewGuid().ToString('N'))
+    Write-FixtureText $marker 'fail'
+    $shellMarker = $marker.Replace('\', '/')
+    Set-PreCommitHook $f.Repository "if [ -f '$shellMarker' ]; then rm '$shellMarker'; echo 'transient hook failure' >&2; exit 1; fi"
+    $parameters = Get-LandParameters $f.Rehearsal 'one' $f.Head $f.Head $f.Base $f.Step (New-FakePullRequest $f.Repository 'one')
+    $first = Invoke-IntegrateScript 'land' $parameters
+    Assert ($first.Code -eq 1 -and $first.Result.error -match 'merge commit failed, so nothing was pushed' -and -not $first.Result.branchPushed) "Expected the commit to fail: $($first.Result | ConvertTo-Json -Compress)"
+    Assert (-not (Get-FixtureRef $f.Rehearsal 'MERGE_HEAD')) 'The failed merge was left pending.'
+    Assert ((Get-OriginBranch $f.Repository 'main') -eq $f.Base) 'Main changed.'
+    $again = Invoke-IntegrateScript 'land' $parameters
+    Assert ($again.Code -eq 0 -and $again.Result.landed -and $again.Result.merged) "The retry failed: $($again.Result | ConvertTo-Json -Compress)"
+}
+
+Test 'landing refuses a worktree with a merge in progress and keeps it' {
+    $f = New-LandingFixture
+    $other = Add-FixtureCommit $f.Repository 'other' 'main' @{ 'other.txt' = "o`n" }
+    & git -C $f.Rehearsal merge --no-ff --no-commit $other 2>&1 | Out-Null
+    $run = Invoke-IntegrateScript 'land' (Get-LandParameters $f.Rehearsal 'one' $f.Head $f.Head $f.Base $f.Step (New-FakePullRequest $f.Repository 'one'))
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'merge in progress') "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
+    Assert ((Get-FixtureRef $f.Rehearsal 'MERGE_HEAD') -eq $other) 'The merge that was in progress was abandoned.'
+    Assert ((Get-OriginBranch $f.Repository 'main') -eq $f.Base) 'Main changed.'
+}
+
 Test 'a GitHub error before landing pushes nothing' {
     $f = New-LandingFixture -Behind
     $run = Invoke-Step $f.Rehearsal 'one' $f.Head $f.Base $f.Step (New-FakePullRequest $f.Repository 'one' @{ fail = $true })

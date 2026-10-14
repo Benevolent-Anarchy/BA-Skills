@@ -34,6 +34,9 @@ $PSNativeCommandUseErrorActionPreference = $false
 Import-Module (Join-Path $PSScriptRoot 'Integrate.psm1') -Force
 
 $result = [ordered]@{ pullRequest = $PullRequest; branchPushed = $false; landed = $false; merged = $false }
+# Set once this run starts its own merge commit, so a failure abandons only that merge,
+# leaving the worktree ready for a retry, and never one that was already in progress.
+$startedMerge = $false
 
 # What GitHub shows for the pull request now, or $null when it could not be read.
 function Get-PullRequestView {
@@ -110,10 +113,12 @@ try {
         # The merge commit: on the expected base, merging the update, which already contains it.
         if (-not (Test-CleanWorktree $Worktree)) { throw 'The integration worktree has uncommitted changes or a merge in progress. Nothing was pushed.' }
         Invoke-Git $Worktree @('checkout', '--quiet', '--detach', $expected) | Out-Null
+        $startedMerge = $true
         Invoke-Git $Worktree @('merge', '--no-ff', '--no-commit', $updatedSha) | Out-Null
         $messageFile = Join-Path ([IO.Path]::GetTempPath()) ('ba-integrate-message-' + [guid]::NewGuid().ToString('N') + '.txt')
         [IO.File]::WriteAllText($messageFile, $Message, [Text.UTF8Encoding]::new($false))
         try { Invoke-Git $Worktree @('commit', '--quiet', '-F', $messageFile) | Out-Null }
+        catch { throw "Making the merge commit failed, so nothing was pushed: $($_.Exception.Message)" }
         finally { Remove-Item -LiteralPath $messageFile -Force -ErrorAction SilentlyContinue }
         $merge = (Invoke-Git $Worktree @('rev-parse', 'HEAD')).Lines[0]
         if ((Invoke-Git $Worktree @('rev-parse', 'HEAD^{tree}')).Lines[0] -ne $rehearsedTree) { throw 'The merge commit differs from the rehearsed step. Nothing was pushed.' }
@@ -149,6 +154,12 @@ try {
     $result | ConvertTo-Json -Depth 5
     exit 0
 } catch {
+    # A merge this run started and never committed is abandoned, so the same arguments can
+    # be run again once the cause is fixed.
+    if ($startedMerge -and $Worktree -and (Test-Path -LiteralPath $Worktree)) {
+        $pending = & git -C $Worktree rev-parse --quiet --verify MERGE_HEAD 2>$null
+        if ($pending) { & git -C $Worktree merge --abort 2>$null | Out-Null }
+    }
     $result.error = $_.Exception.Message
     $result | ConvertTo-Json -Depth 5
     exit 1
