@@ -9,11 +9,11 @@ Cicely keeps pull requests as drafts until all their reviews are in, then marks 
 
 ## Authority
 
-A request to integrate a project authorizes the survey, the rehearsal and a scratch worktree and branch of its own. Pushing to pull-request branches or the base, editing pull-request descriptions, commenting on pull requests and deleting merged branches all wait for Cicely's approval of the concrete plan. That approval covers exactly the pull requests, head commits and base commit in it. Anything that differs from the plan stops the run for a new approval.
+A request to integrate a project authorizes the survey, the rehearsal and a scratch worktree and branch of its own. Pushing to pull-request branches or the base, editing pull-request descriptions, retargeting pull requests, commenting on pull requests and deleting merged branches all wait for Cicely's approval of the concrete plan. That approval covers exactly the pull requests, head commits and base commit in it. Anything that differs from the plan stops the run for a new approval.
 
 Never mark a pull request ready, never merge a draft, and never rewrite history. Never rebase or force-push a pull-request branch: bring it up to date by merging the base into it. The scripts' pushes each name the exact value they replace and are fast-forwards of it, so a ref that moved in any direction fails its push. Leave review threads as they are. Never touch Cicely's main checkout beyond a fast-forward pull at the end, and only when it is clean.
 
-The scripts below run from this skill's directory with PowerShell 7.2+, Git 2.38+ and an authenticated GitHub CLI. Each writes one JSON document. Read it even after a nonzero exit: a failure carries an `error` member saying what was and was not changed.
+The scripts below run from this skill's directory with PowerShell 7.2+, Git 2.38+ and an authenticated GitHub CLI. Each writes one JSON document. Read it even after a nonzero exit: a failure carries an `error` member saying what was and was not changed. Each script takes the GitHub repository from its remote's configured URL and names it in every GitHub CLI call, so `GH_REPO` and the CLI's own default repository never redirect it. A remote that is not on github.com is refused, and so is one that pushes to more than one destination or that a URL rewrite sends to a different GitHub repository, since a push or deletion would then reach a repository the checks never read. Errors never repeat credentials from a remote's URL.
 
 ## 1. Prepare
 
@@ -67,6 +67,7 @@ Present the plan and wait for Cicely's approval:
 - questions only she can answer, such as two decisions that contradict each other, a resolution that needs new code, or a semantic doubt
 - follow-up corrections found on re-reading, which go into a new draft pull request after the run
 - what will happen to each pull request: a merge commit bringing it up to date where it is behind, a merge commit on the base, a comment recording any resolutions, and deletion of its branch if the project's notes ask for it
+- every open pull request that targets a branch this run merges, drafts and stacked ones included, each retargeted to the base once that branch merges. List them for each branch with `pwsh -NoProfile -File scripts/retarget.ps1 -Repository <root> -Branch <branch> -BaseBranch <base> -List`, which reads every page.
 
 If her answers change a resolution, redo the rehearsal from that step. Reset the rehearsal branch to the previous step's commit, merge again, and take earlier resolutions from the old step commits where they still apply. Show what changed.
 
@@ -74,15 +75,14 @@ If her answers change a resolution, redo the rehearsal from that step. Reset the
 
 The expected base starts as the rehearsal's base commit and becomes each landing's merge commit. For each pull request in the approved order:
 
-1. Check it is still open, still not a draft, and still at the approved head with `gh pr view <n> --json state,isDraft,headRefOid,baseRefName`. Otherwise stop.
-2. If it builds on another pull request that has now merged, retarget it first: `gh pr edit <n> --base <base>`.
-3. Bring it up to date in the rehearsal worktree. It must exit 0 with `matches: true`:
+1. Check it is still open, still not a draft, still at the approved head and targeting the base, with `gh pr view <n> --json state,isDraft,headRefOid,baseRefName`. A pull request stacked on another was retargeted when that one merged (step 5). Otherwise stop.
+2. Bring it up to date in the rehearsal worktree. It must exit 0 with `matches: true`:
 
    ```powershell
    pwsh -NoProfile -File scripts/update.ps1 -Worktree <rehearsal> -Head <approved head> -Base <expected base> -Rehearsed <step commit> -Message 'Merge <base> into <branch> for integration'
    ```
 
-4. Land it:
+3. Land it:
 
    ```powershell
    pwsh -NoProfile -File scripts/land.ps1 -Worktree <rehearsal> -PullRequest <n> -Branch <branch> -ApprovedHead <approved head> -Updated <update's commit> -BaseBranch <base> -ExpectedBase <expected base> -Rehearsed <step commit> -Message "Merge pull request #<n> from <owner>/<branch>`n`n<title>"
@@ -94,8 +94,15 @@ The expected base starts as the rehearsal's base commit and becomes each landing
    - GitHub shows the pull request open, not a draft, on that branch and targeting that base
 
    It makes the merge commit on the expected base and pushes the update to the branch. It reads GitHub again, then pushes the merge commit to the base. A ref that moved, a ruleset or a merge-queue requirement therefore fails the push instead of landing something unrehearsed. It then waits for GitHub to report the pull request `MERGED`. Its `mergeCommit` is the next step's expected base.
-5. Once it reports `MERGED`, comment on the pull request with any resolutions, using the project's author prefix. Update its description if it no longer describes the change.
-6. If the project's notes say merged branches are deleted, delete it. The script deletes only while the branch is still at the merged tip, and reports a branch someone has pushed to since as `moved`:
+4. Once it reports `MERGED`, comment on the pull request with any resolutions, using the project's author prefix. Update its description if it no longer describes the change.
+5. Retarget the pull requests the plan listed for the merged branch to the base. Do this before deleting the branch, because GitHub can close a pull request whose base branch is deleted. Do it even when branches are kept, so a stacked pull request lands on the base. The script reads every page of the pull requests targeting the branch. If they are not exactly the approved ones, for instance because one was opened since, it retargets none and the run stops for a new approval. Otherwise it retargets each and confirms none is left:
+
+   ```powershell
+   pwsh -NoProfile -File scripts/retarget.ps1 -Repository <root> -Branch <branch> -BaseBranch <base> -Approved '<n>,<m>'
+   ```
+
+   Pass `-Approved none` when the plan listed none.
+6. If the project's notes say merged branches are deleted, delete it. The script deletes only while the branch is still at the merged tip and no open pull request targets it. It reports a branch someone has pushed to since as `moved`, and refuses, naming them, while pull requests still target it:
 
    ```powershell
    pwsh -NoProfile -File scripts/delete-branch.ps1 -Repository <root> -Branch <branch> -MergedTip <land's branchTip> -BaseBranch <base>
@@ -115,6 +122,21 @@ When a run stops, report which pull requests merged, which did not, and what eac
 
 ## 6. Finish
 
-Fast-forward Cicely's main checkout with `git pull --ff-only` if it is clean and on the base. Otherwise say why you left it. Each landing's `closingIssues` gives every issue's URL and repository, since an issue can live in another repository. Check each one by its URL with `gh issue view <url> --json state`, never by its number alone. Close any still open with `gh issue close <url> --comment '<prefix> Closed by <merge commit>, which merged #<n>.'`.
+Fast-forward Cicely's main checkout with `git pull --ff-only` if it is clean and on the base. Otherwise say why you left it.
+
+Check each merged pull request's issues:
+
+```powershell
+pwsh -NoProfile -File scripts/check-issues.ps1 -Repository <root> -PullRequest <n>
+```
+
+It covers the issues GitHub links as closing, whether by keyword or by hand, any the description names with a closing keyword that GitHub did not link, and any named with a closing keyword in the message of one of its commits or of the commit that merged it, which carries the title when landing made it. It reads every commit, and fails rather than report a partial audit. Each is identified by its URL, since an issue can live in another repository. For an issue still open, its `findings` say why, from what it could establish:
+- the pull request has not merged, or merged into a branch other than the default
+- the issue was reopened, and by whom
+- the merge was too recent for GitHub to have processed it
+- the description's keyword did not resolve
+- the issue lives in another repository
+
+Close nothing yourself. Bring each open issue and its findings to Cicely, and close one only when she says to. If a finding says the merge was recent, run the check again a little later before reporting.
 
 Report the merges and their commits, the issues they closed, the comments posted, and each branch deletion's outcome. Put the follow-up corrections into a new draft pull request, or list them for Cicely if she prefers. List the worktrees, Claude sessions and Codex tasks still attached to the merged branches, and follow the project's handoff rule for them. Offer to clean those up, but don't do it unasked. Remove the rehearsal worktree and its `integration/<yyyymmdd>` branch, which are the skill's own.

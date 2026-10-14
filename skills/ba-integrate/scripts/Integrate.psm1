@@ -48,6 +48,82 @@ function Test-CleanWorktree([string]$Repository) {
     return -not $changes -and -not $merging
 }
 
+# Runs the GitHub CLI $Gh with $Arguments in $Directory and returns its exit code, its
+# standard output, and its error output kept apart. A warning gh prints, such as an update
+# notice, goes to its error output and so never corrupts the JSON on its standard output.
+function Invoke-GitHubCli([string]$Gh, [string[]]$Arguments, [string]$Directory) {
+    Push-Location -LiteralPath $Directory
+    try { $output = & $Gh @Arguments 2>&1; $code = $LASTEXITCODE }
+    finally { Pop-Location }
+    $out = @($output | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }) -join "`n"
+    $err = @($output | Where-Object { $_ -is [Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }) -join ' '
+    return [pscustomobject]@{ Code = $code; Out = $out; Err = $err }
+}
+
+# $Text with the credentials any URL in it carries replaced by ***, so a token in a remote's
+# URL never reaches an error message or a log.
+function Hide-UrlCredentials([string]$Text) {
+    return $Text -replace '(?<=[A-Za-z][A-Za-z0-9+.-]*://)[^\s/]+@', '***@'
+}
+
+# The owner/name of a github.com URL in https, ssh or scp form, credentials allowed, or
+# $null for anything else.
+function ConvertFrom-GitHubUrl([string]$Url) {
+    $match = [regex]::Match($Url, '^(?:https://(?:[^@/\s]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)(?<owner>[\w.-]+)/(?<name>[\w.-]+?)(?:\.git)?/?$')
+    if (-not $match.Success) { return $null }
+    return "$($match.Groups['owner'].Value)/$($match.Groups['name'].Value)"
+}
+
+# The GitHub repository, as owner/name, that $Remote of $Repository pushes to, so every gh
+# call can name the repository the scripts push to instead of leaving gh to choose one from
+# GH_REPO or its own default. It is read from the remote's configured push URL, or its URL,
+# as written, and refused unless git pushes to exactly one destination: a remote with
+# several push URLs, or several URLs, would push or delete in repositories the checks never
+# read. A rewrite (pushInsteadOf or insteadOf) that sends the push to a different GitHub
+# repository is refused for the same reason. A remote not on github.com is refused too.
+function Get-GitHubRepository([string]$Repository, [string]$Remote = 'origin') {
+    $configured = @((Invoke-Git $Repository @('config', '--get-all', "remote.$Remote.pushurl") -Allowed 0, 1).Lines | Where-Object { $_ })
+    if ($configured.Count -eq 0) { $configured = @((Invoke-Git $Repository @('config', '--get-all', "remote.$Remote.url") -Allowed 0, 1).Lines | Where-Object { $_ }) }
+    if ($configured.Count -eq 0) { throw "$Remote has no URL, so its GitHub repository is unknown. Nothing was changed." }
+    if ($configured.Count -gt 1) { throw "$Remote pushes to $($configured.Count) destinations ($(Hide-UrlCredentials ($configured -join ', '))), so a push or deletion would reach repositories the checks never read. Give it one push URL. Nothing was changed." }
+    $named = ConvertFrom-GitHubUrl $configured[0]
+    if (-not $named) { throw "$Remote ($(Hide-UrlCredentials $configured[0])) is not a github.com repository, so the scripts cannot tell GitHub which repository they act on. Nothing was changed." }
+    $effective = @((Invoke-Git $Repository @('remote', 'get-url', '--push', '--all', $Remote)).Lines | Where-Object { $_ })
+    if ($effective.Count -ne 1) { throw "$Remote pushes to $($effective.Count) destinations after URL rewriting, so a push or deletion would reach repositories the checks never read. Nothing was changed." }
+    $rewritten = ConvertFrom-GitHubUrl $effective[0]
+    if ($rewritten -and $rewritten -ne $named) { throw "$Remote is configured as $named, but a URL rewrite sends its pushes to $rewritten, a repository the checks would not read. Nothing was changed." }
+    return $named
+}
+
+# Every open pull request in GitHub repository $GitHubRepository targeting $Branch, read
+# page by page so none is left out, as number, url, title and isDraft.
+function Get-PullRequestsTargeting([string]$Gh, [string]$GitHubRepository, [string]$Branch, [string]$Directory) {
+    $owner, $name = $GitHubRepository -split '/', 2
+    $query = @'
+query($owner: String!, $name: String!, $branch: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, baseRefName: $branch, first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number url title isDraft }
+    }
+  }
+}
+'@
+    $found = [Collections.Generic.List[object]]::new()
+    $after = $null
+    do {
+        $arguments = @('api', 'graphql', '-f', "query=$query", '-f', "owner=$owner", '-f', "name=$name", '-f', "branch=$Branch")
+        if ($after) { $arguments += @('-f', "after=$after") }
+        $call = Invoke-GitHubCli $Gh $arguments $Directory
+        if ($call.Code -ne 0) { throw "Could not list the pull requests targeting $Branch in $GitHubRepository. gh said: $($call.Out) $($call.Err)" }
+        $page = ($call.Out | ConvertFrom-Json).data.repository.pullRequests
+        foreach ($node in @($page.nodes)) { $found.Add([ordered]@{ number = [int]$node.number; url = $node.url; title = $node.title; isDraft = [bool]$node.isDraft }) }
+        $after = if ($page.pageInfo.hasNextPage) { $page.pageInfo.endCursor } else { $null }
+        if ($page.pageInfo.hasNextPage -and -not $after) { throw "GitHub reported more pull requests targeting $Branch without a cursor to read them." }
+    } while ($after)
+    return $found.ToArray()
+}
+
 # The GitHub CLI executable. On Windows an extensionless shell shim named `gh` can shadow
 # gh.exe on PATH, and PowerShell cannot run it, so take the real executable.
 function Get-GitHubCli {
@@ -57,4 +133,4 @@ function Get-GitHubCli {
     return $gh
 }
 
-Export-ModuleMember -Function Invoke-Git, Resolve-Commit, Test-CommitExists, Test-Ancestor, Get-RemoteBranch, Test-CleanWorktree, Get-GitHubCli
+Export-ModuleMember -Function Invoke-Git, Resolve-Commit, Test-CommitExists, Test-Ancestor, Get-RemoteBranch, Test-CleanWorktree, Invoke-GitHubCli, Hide-UrlCredentials, ConvertFrom-GitHubUrl, Get-GitHubRepository, Get-PullRequestsTargeting, Get-GitHubCli

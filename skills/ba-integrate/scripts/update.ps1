@@ -67,7 +67,7 @@ try {
         $merging = & git -C $Worktree rev-parse --quiet --verify MERGE_HEAD 2>$null
         if ($merging) { & git -C $Worktree merge --abort 2>$null | Out-Null }
     }
-    $result.error = $_.Exception.Message
+    $result.error = (Hide-UrlCredentials $_.Exception.Message)
     $result | ConvertTo-Json -Depth 5
     exit 1
 }

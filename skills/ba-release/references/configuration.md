@@ -103,6 +103,16 @@ separate availability record. The repository must exist, be public and permit
 writing. Different existing content is not overwritten. Publish notes only after
 a selected storefront is verified live.
 
+## Single-store games
+
+Declare only the stores a game uses. An itch-only game omits `steam`; nothing
+Steam-specific is then planned, checked or required. Two itch rules still apply.
+The itch `ignore` list must keep the four Steam patterns above, or validation
+rejects it. Setup adds them, and when the export has no Steam files they match
+nothing: the standalone check withholds nothing and the Butler dry-run passes.
+Each selected itch desktop channel also needs a `verification.standalone` check
+with an inspected script, or the plan blocks; it runs on the export as built.
+
 ## Baselines and source metadata
 
 Each store may override `previousRelease`; an itch channel may override it again.
