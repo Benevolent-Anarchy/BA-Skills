@@ -22,9 +22,19 @@ foreach ($file in Get-SourceScripts $root) {
     }
 }
 if ($failed) {exit 1}
-foreach ($suite in @('tests/run-tests.ps1','tests/bootstrap/run-tests.ps1','tests/integrate/run-tests.ps1')) {
-    & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File (Join-Path $root $suite)
-    if ($LASTEXITCODE -ne 0) {$failed=$true}
+# Suites share nothing but the machine (each builds its own temporary sandbox), so they run at once;
+# each one's output and exit code are held until it finishes, then printed whole in this fixed order.
+$jobs=foreach ($suite in @('tests/run-tests.ps1','tests/bootstrap/run-tests.ps1','tests/integrate/run-tests.ps1')) {
+    Start-ThreadJob -ArgumentList (Join-Path $PSHOME 'pwsh.exe'),(Join-Path $root $suite) -ScriptBlock {
+        param([string]$Pwsh,[string]$Suite)
+        $output=& $Pwsh -NoProfile -File $Suite 2>&1 | ForEach-Object {"$_"}
+        @{output=$output;exitCode=$LASTEXITCODE}
+    }
+}
+foreach ($job in $jobs) {
+    $result=Receive-Job -Job $job -Wait -AutoRemoveJob
+    Write-Output $result.output
+    if ($result.exitCode -ne 0) {$failed=$true}
 }
 if ($failed) {exit 1}
 Write-Output 'Verification passed: BA-Skills.'
