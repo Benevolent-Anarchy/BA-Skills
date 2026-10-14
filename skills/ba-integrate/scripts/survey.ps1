@@ -1,101 +1,153 @@
 # Surveys a repository's open pull requests before integrating them: which are ready
-# (not drafts), what each changes, which build on others, which pairs conflict with each
-# other or with the base branch, and an order to merge them in. It changes nothing but
-# fetched objects; every merge it tries is computed by `git merge-tree`, without a
-# checkout. Writes one JSON document, with an `error` member and exit code 1 on failure.
+# (not drafts), what each changes, which build on others, which contain the unmerged work
+# of a pull request that is not ready, which pairs conflict with each other or with the
+# base branch, and an order to merge them in. It reads every page GitHub returns. It
+# changes nothing but fetched objects; every merge it tries is computed by
+# `git merge-tree`, without a checkout. Writes one JSON document, with an `error` member
+# and exit code 1 on failure.
 #requires -Version 7.2
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Repository,
     [string]$Base,
-    [string]$PullRequestsJson
+    [string]$PullRequestsJson,
+    # The GitHub CLI to run, gh on PATH by default; tests pass a stand-in script.
+    [string]$GitHubCli
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+Import-Module (Join-Path $PSScriptRoot 'Integrate.psm1') -Force
 
-# Runs git in the repository and returns its exit code and output lines; any exit code
-# outside $Allowed is an error carrying git's own message.
-function Invoke-Git([string[]]$Arguments, [int[]]$Allowed = @(0)) {
-    $output = & git -c core.quotePath=false -C $Repository @Arguments 2>&1
-    $code = $LASTEXITCODE
-    $lines = @($output | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] } | ForEach-Object { "$_" })
-    if ($code -notin $Allowed) {
-        $message = @($output | ForEach-Object { "$_" }) -join ' '
-        throw "git $($Arguments -join ' ') failed ($code): $message"
-    }
-    return [pscustomobject]@{ Code = $code; Lines = $lines }
-}
-
-# The open pull requests of the repository's GitHub remote, as the records the rest of
-# the survey reads.
-function Get-GitHubPullRequests {
-    # On Windows an extensionless shell shim named `gh` can shadow gh.exe on PATH, and
-    # PowerShell cannot run it; take the real executable.
-    $gh = @(Get-Command gh -CommandType Application -All -ErrorAction SilentlyContinue |
-        Where-Object { -not $IsWindows -or $_.Extension -eq '.exe' } | Select-Object -First 1).Source
-    if (-not $gh) { throw 'The GitHub CLI (gh) is not installed or not on PATH.' }
-    Push-Location -LiteralPath $Repository
-    try {
-        $identity = & $gh repo view --json owner,name | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0) { throw 'gh could not identify the repository; is it authenticated?' }
-        $query = @'
-query($owner: String!, $name: String!) {
+$pullRequestsQuery = @'
+query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
-    pullRequests(states: OPEN, first: 100, orderBy: {field: CREATED_AT, direction: ASC}) {
+    pullRequests(states: OPEN, first: 100, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) {
+      pageInfo { hasNextPage endCursor }
       nodes {
         number title url isDraft isCrossRepository createdAt
         headRefName headRefOid baseRefName mergeable reviewDecision
-        reviewThreads(first: 100) { nodes { isResolved } }
+        reviewThreads(first: 100) { pageInfo { hasNextPage endCursor } nodes { isResolved } }
       }
     }
   }
 }
 '@
-        $response = & $gh api graphql -f "query=$query" -F "owner=$($identity.owner.login)" -F "name=$($identity.name)" | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0) { throw 'gh could not list the open pull requests.' }
-    } finally { Pop-Location }
-    foreach ($node in $response.data.repository.pullRequests.nodes) {
-        [pscustomobject]@{
-            number = $node.number; title = $node.title; url = $node.url
-            isDraft = $node.isDraft; isCrossRepository = $node.isCrossRepository
-            headRefName = $node.headRefName; headRefOid = $node.headRefOid; baseRefName = $node.baseRefName
-            mergeable = $node.mergeable; reviewDecision = $node.reviewDecision
-            unresolvedReviewThreads = @($node.reviewThreads.nodes | Where-Object { -not $_.isResolved }).Count
-        }
+$reviewThreadsQuery = @'
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { isResolved } }
     }
+  }
+}
+'@
+
+# Runs a GraphQL query through the GitHub CLI and returns its `data`. Integer variables go
+# as typed fields and strings as raw ones; a $null variable is left out.
+function Invoke-GitHubQuery([string]$Gh, [string]$Query, [hashtable]$Variables) {
+    $arguments = @('api', 'graphql', '-f', "query=$Query")
+    foreach ($key in $Variables.Keys) {
+        $value = $Variables[$key]
+        if ($null -eq $value) { continue }
+        $arguments += if ($value -is [int]) { @('-F', "$key=$value") } else { @('-f', "$key=$value") }
+    }
+    $output = & $Gh @arguments
+    if ($LASTEXITCODE -ne 0) { throw "gh api graphql failed: $output" }
+    return (($output | Out-String) | ConvertFrom-Json).data
+}
+
+# The cursor of the next page of $Connection, or $null when it was the last page.
+function Get-NextCursor($Connection, [string]$What) {
+    if (-not $Connection.pageInfo.hasNextPage) { return $null }
+    if (-not $Connection.pageInfo.endCursor) { throw "GitHub reported more $What without a cursor to read them; the survey would be incomplete." }
+    return $Connection.pageInfo.endCursor
+}
+
+# The open pull requests of the repository's GitHub remote, every page of them, as the
+# records the rest of the survey reads. The unresolved review threads of each pull request
+# that is not a draft are counted across every page too.
+function Get-GitHubPullRequests {
+    $gh = if ($GitHubCli) { $GitHubCli } else { Get-GitHubCli }
+    Push-Location -LiteralPath $Repository
+    try {
+        $identity = & $gh repo view --json owner,name | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0) { throw 'gh could not identify the repository; is it authenticated?' }
+        $owner = $identity.owner.login; $name = $identity.name
+        $nodes = [Collections.Generic.List[object]]::new()
+        $after = $null
+        do {
+            $page = (Invoke-GitHubQuery $gh $pullRequestsQuery @{ owner = $owner; name = $name; after = $after }).repository.pullRequests
+            foreach ($node in @($page.nodes)) { $nodes.Add($node) }
+            $after = Get-NextCursor $page 'open pull requests'
+        } while ($after)
+
+        foreach ($node in $nodes) {
+            $threads = $node.reviewThreads
+            $unresolved = @($threads.nodes | Where-Object { -not $_.isResolved }).Count
+            $after = if ($node.isDraft) { $null } else { Get-NextCursor $threads "review threads on #$($node.number)" }
+            while ($after) {
+                $threads = (Invoke-GitHubQuery $gh $reviewThreadsQuery @{ owner = $owner; name = $name; number = [int]$node.number; after = $after }).repository.pullRequest.reviewThreads
+                $unresolved += @($threads.nodes | Where-Object { -not $_.isResolved }).Count
+                $after = Get-NextCursor $threads "review threads on #$($node.number)"
+            }
+            [pscustomobject]@{
+                number = $node.number; title = $node.title; url = $node.url
+                isDraft = $node.isDraft; isCrossRepository = $node.isCrossRepository
+                headRefName = $node.headRefName; headRefOid = $node.headRefOid; baseRefName = $node.baseRefName
+                mergeable = $node.mergeable; reviewDecision = $node.reviewDecision
+                unresolvedReviewThreads = $unresolved
+            }
+        }
+    } finally { Pop-Location }
+}
+
+# Makes every pull request's head available locally: one fetch for them all, or one each
+# if that fails because a pull request closed meanwhile. A head still missing is left for
+# the caller to report.
+function Get-PullRequestHeads([object[]]$PullRequests) {
+    if ($PullRequests.Count -eq 0) { return }
+    $refspecs = @($PullRequests | ForEach-Object { "refs/pull/$($_.number)/head" })
+    $all = Invoke-Git $Repository (@('fetch', '--quiet', '--no-tags', 'origin') + $refspecs) -Allowed 0, 1, 128
+    if ($all.Code -eq 0) { return }
+    foreach ($refspec in $refspecs) { Invoke-Git $Repository @('fetch', '--quiet', '--no-tags', 'origin', $refspec) -Allowed 0, 1, 128 | Out-Null }
+}
+
+# True when commit $Sha is available in the repository.
+function Test-Commit([string]$Sha) {
+    return (Invoke-Git $Repository @('cat-file', '-e', "$Sha^{commit}") -Allowed 0, 1, 128).Code -eq 0
 }
 
 # The paths a three-way merge of two commits leaves in conflict; empty when it is clean.
 function Get-MergeConflicts([string]$Left, [string]$Right) {
-    $result = Invoke-Git @('merge-tree', '--write-tree', '--name-only', '--no-messages', $Left, $Right) -Allowed 0, 1
+    $result = Invoke-Git $Repository @('merge-tree', '--write-tree', '--name-only', '--no-messages', $Left, $Right) -Allowed 0, 1
     if ($result.Code -eq 0) { return @() }
     return @($result.Lines | Select-Object -Skip 1 | Where-Object { $_ } | Sort-Object -Unique)
-}
-
-# True when commit $Ancestor is reachable from commit $Descendant.
-function Test-Ancestor([string]$Ancestor, [string]$Descendant) {
-    return (Invoke-Git @('merge-base', '--is-ancestor', $Ancestor, $Descendant) -Allowed 0, 1).Code -eq 0
 }
 
 try {
     $Repository = (Resolve-Path -LiteralPath $Repository).Path
     $fromGitHub = -not $PullRequestsJson
-    if ($fromGitHub) { Invoke-Git @('fetch', '--quiet', '--no-tags', 'origin') | Out-Null }
+    if ($fromGitHub) { Invoke-Git $Repository @('fetch', '--quiet', '--no-tags', 'origin') | Out-Null }
     if (-not $Base) {
-        $remoteHead = (Invoke-Git @('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD') -Allowed 0, 1).Lines
+        $remoteHead = (Invoke-Git $Repository @('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD') -Allowed 0, 1).Lines
         $Base = if ($remoteHead) { $remoteHead[0] } else { 'origin/main' }
     }
     $baseBranch = $Base -replace '^origin/', ''
-    $baseSha = (Invoke-Git @('rev-parse', '--verify', "$Base^{commit}")).Lines[0]
+    $baseSha = (Invoke-Git $Repository @('rev-parse', '--verify', "$Base^{commit}")).Lines[0]
 
     $all = if ($fromGitHub) { @(Get-GitHubPullRequests) } else { @(Get-Content -LiteralPath $PullRequestsJson -Raw | ConvertFrom-Json) }
     $skipped = [Collections.Generic.List[object]]::new()
+    $unready = [Collections.Generic.List[object]]::new()
     $ready = [Collections.Generic.List[object]]::new()
     foreach ($pr in ($all | Sort-Object { [int]$_.number })) {
         # JSON numbers arrive as Int64; every table below is keyed by Int32.
         $pr.number = [int]$pr.number
-        if ($pr.isDraft) { $skipped.Add([ordered]@{ number = $pr.number; reason = 'draft' }); continue }
-        if ($pr.isCrossRepository) { $skipped.Add([ordered]@{ number = $pr.number; reason = 'from a fork' }); continue }
+        $reason = if ($pr.isDraft) { 'draft' } elseif ($pr.isCrossRepository) { 'from a fork' } else { $null }
+        if ($reason) {
+            $skipped.Add([ordered]@{ number = $pr.number; reason = $reason })
+            $unready.Add([pscustomobject]@{ pr = $pr; reason = $reason })
+            continue
+        }
         $ready.Add($pr)
     }
     # A PR must target the base branch or another ready PR's branch; dropping one can strand
@@ -104,28 +156,35 @@ try {
         $heads = @($ready | ForEach-Object headRefName)
         $stranded = @($ready | Where-Object { $_.baseRefName -ne $baseBranch -and $_.baseRefName -notin $heads })
         foreach ($pr in $stranded) {
-            $skipped.Add([ordered]@{ number = $pr.number; reason = "targets $($pr.baseRefName), which is neither $baseBranch nor a ready PR's branch" })
+            $reason = "targets $($pr.baseRefName), which is neither $baseBranch nor a ready PR's branch"
+            $skipped.Add([ordered]@{ number = $pr.number; reason = $reason })
+            $unready.Add([pscustomobject]@{ pr = $pr; reason = $reason })
             [void]$ready.Remove($pr)
         }
     } while ($stranded.Count -gt 0)
 
+    if ($fromGitHub) { Get-PullRequestHeads @(@($ready) + @($unready | ForEach-Object pr)) }
     foreach ($pr in $ready) {
-        if ($fromGitHub) { Invoke-Git @('fetch', '--quiet', '--no-tags', 'origin', "refs/pull/$($pr.number)/head") | Out-Null }
-        $known = Invoke-Git @('cat-file', '-e', "$($pr.headRefOid)^{commit}") -Allowed 0, 1, 128
-        if ($known.Code -ne 0) { throw "PR #$($pr.number)'s head $($pr.headRefOid) is not available locally; it may have moved while surveying. Run the survey again." }
+        if (-not (Test-Commit $pr.headRefOid)) { throw "PR #$($pr.number)'s head $($pr.headRefOid) is not available locally; it may have moved while surveying. Run the survey again." }
     }
+    # Work that is not ready can still reach the base inside a ready PR built on it, so
+    # each skipped head that the base lacks is looked for in every ready head.
+    $pending = @($unready | Where-Object { (Test-Commit $_.pr.headRefOid) -and -not (Test-Ancestor $Repository $_.pr.headRefOid $baseSha) })
+    $unchecked = @($unready | Where-Object { -not (Test-Commit $_.pr.headRefOid) } | ForEach-Object { $_.pr.number })
 
     $facts = @{}
     foreach ($pr in $ready) {
         $head = $pr.headRefOid
-        $mergeBase = (Invoke-Git @('merge-base', $baseSha, $head)).Lines[0]
+        $mergeBase = (Invoke-Git $Repository @('merge-base', $baseSha, $head)).Lines[0]
         $facts[$pr.number] = [ordered]@{
             number = $pr.number; title = $pr.title; url = $pr.url
             head = $pr.headRefName; headSha = $head; baseRef = $pr.baseRefName
             dependsOn = @()
-            commits = [int](Invoke-Git @('rev-list', '--count', "$baseSha..$head")).Lines[0]
-            behindBase = [int](Invoke-Git @('rev-list', '--count', "$head..$baseSha")).Lines[0]
-            files = @((Invoke-Git @('diff', '--name-only', $mergeBase, $head)).Lines | Where-Object { $_ })
+            includesUnready = @($pending | Where-Object { Test-Ancestor $Repository $_.pr.headRefOid $head } |
+                ForEach-Object { [ordered]@{ number = $_.pr.number; reason = $_.reason } })
+            commits = [int](Invoke-Git $Repository @('rev-list', '--count', "$baseSha..$head")).Lines[0]
+            behindBase = [int](Invoke-Git $Repository @('rev-list', '--count', "$head..$baseSha")).Lines[0]
+            files = @((Invoke-Git $Repository @('diff', '--name-only', $mergeBase, $head)).Lines | Where-Object { $_ })
             conflictsWithBase = @(Get-MergeConflicts $baseSha $head)
             reviewDecision = $pr.reviewDecision
             unresolvedReviewThreads = $pr.unresolvedReviewThreads
@@ -140,7 +199,7 @@ try {
         foreach ($b in $ready) {
             if ($a.number -eq $b.number -or $a.headRefOid -eq $b.headRefOid) { continue }
             $stacked = $b.baseRefName -eq $a.headRefName
-            $contains = $facts[$a.number].commits -gt 0 -and (Test-Ancestor $a.headRefOid $b.headRefOid)
+            $contains = $facts[$a.number].commits -gt 0 -and (Test-Ancestor $Repository $a.headRefOid $b.headRefOid)
             if ($stacked -or $contains) { $facts[$b.number].dependsOn = @($facts[$b.number].dependsOn + $a.number | Sort-Object -Unique) }
         }
     }
@@ -173,6 +232,7 @@ try {
         else { $why.Add("conflicts with #$(@($partners[$pick] | Sort-Object) -join ', #')") }
         if ($facts[$pick].conflictsWithBase.Count -gt 0) { $why.Add("conflicts with $baseBranch in $($facts[$pick].conflictsWithBase.Count) file(s)") }
         if ($facts[$pick].commits -eq 0) { $why.Add("has no commits that $baseBranch lacks") }
+        if ($facts[$pick].includesUnready.Count -gt 0) { $why.Add("contains the unmerged work of $(@($facts[$pick].includesUnready | ForEach-Object { "#$($_.number) ($($_.reason))" }) -join ', ')") }
         $facts[$pick].reason = $why -join '; '
         $order.Add($pick); [void]$remaining.Remove($pick)
     }
@@ -184,6 +244,8 @@ try {
         pullRequests = @($order | ForEach-Object { $facts[$_] })
         conflicts = @($conflicts)
         skipped = @($skipped)
+        # Skipped PRs whose heads could not be fetched, so no ready head was checked for them.
+        uncheckedSkipped = @($unchecked)
     } | ConvertTo-Json -Depth 8
     exit 0
 } catch {

@@ -19,7 +19,7 @@ A map such as `NEXT.md` tells the next session where things are, so it has to be
 
 - Keep every item either side adds.
 - When both sides changed the same item, write one item that is true of the combined code. Check each name, path and citation in it against the tree, not against either side's wording.
-- Once the last pull request is in, re-read the whole file against the combined tree, and fix any claim that is no longer true.
+- Once the last pull request is in, re-read the whole file against the combined tree. A step can carry a correction only in a path it had in conflict, because the merge step replays exactly the conflicted paths. List any other claim that is no longer true as a correction for a follow-up draft pull request.
 
 ## Code
 
@@ -36,6 +36,12 @@ Two pull requests can merge cleanly and still break each other. After each step,
 - Check claims of exclusivity, such as "the only", "the one" or "nothing else", in prose the step added or kept. Another pull request may have added the second thing.
 
 The gate catches only what it tests, so a clean gate does not settle a semantic doubt. Raise the doubt as a question in the plan.
+
+## Corrections the checks find
+
+A correction belongs to the rehearsal only when the step had that path in conflict, because the merge step replays exactly the conflicted paths from the step's commit. Make it part of the step's resolution and its commit, show it in the plan, and redo every later step. Any other correction goes into a follow-up draft pull request after the run. Including it would leave a tree that `update.ps1` cannot reproduce, and it reports the mismatch.
+
+For example, #1 renames `Campaign.reading` to `Campaign.page`, and #2 adds a `NEXT.md` bullet citing `Campaign.reading`. They merge cleanly, so `NEXT.md` was in no conflict, and only the re-read after the last step finds the stale citation. The fix goes into a follow-up draft pull request. Had `NEXT.md` been in conflict at #2's step, the corrected bullet would have been part of that step's resolution.
 
 ## Recording a resolution
 
