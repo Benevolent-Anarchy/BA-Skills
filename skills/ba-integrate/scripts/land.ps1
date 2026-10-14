@@ -40,11 +40,9 @@ $startedMerge = $false
 
 # What GitHub shows for the pull request now, or $null when it could not be read.
 function Get-PullRequestView {
-    Push-Location -LiteralPath $Worktree
-    try { $output = & $script:gh pr view $PullRequest --json state,isDraft,headRefOid,headRefName,baseRefName,closingIssuesReferences 2>&1 }
-    finally { Pop-Location }
-    if ($LASTEXITCODE -ne 0) { $script:lastGitHubError = "$output"; return $null }
-    try { return ($output | Out-String) | ConvertFrom-Json } catch { $script:lastGitHubError = "$output"; return $null }
+    $call = Invoke-GitHubCli $script:gh @('pr', 'view', "$PullRequest", '--repo', $script:gitHubRepository, '--json', 'state,isDraft,headRefOid,headRefName,baseRefName,closingIssuesReferences') $Worktree
+    if ($call.Code -ne 0) { $script:lastGitHubError = "$($call.Out) $($call.Err)"; return $null }
+    try { return $call.Out | ConvertFrom-Json } catch { $script:lastGitHubError = "$($call.Out) $($call.Err)"; return $null }
 }
 
 # Refuses unless GitHub shows the pull request open, ready, on $Branch, targeting
@@ -82,6 +80,8 @@ function Get-PushedSoFar { if ($result.branchPushed) { "$Branch now holds the up
 try {
     $script:gh = if ($GitHubCli) { $GitHubCli } else { Get-GitHubCli }
     $Worktree = (Resolve-Path -LiteralPath $Worktree).Path
+    # The pull request is read from the repository the pushes go to, never one gh picks.
+    $script:gitHubRepository = Get-GitHubRepository $Worktree $Remote
     $approved = Resolve-Commit $Worktree $ApprovedHead 'Approved head'
     $updatedSha = Resolve-Commit $Worktree $Updated 'Updated head'
     $expected = Resolve-Commit $Worktree $ExpectedBase 'Expected base'
@@ -160,7 +160,7 @@ try {
         $pending = & git -C $Worktree rev-parse --quiet --verify MERGE_HEAD 2>$null
         if ($pending) { & git -C $Worktree merge --abort 2>$null | Out-Null }
     }
-    $result.error = $_.Exception.Message
+    $result.error = (Hide-UrlCredentials $_.Exception.Message)
     $result | ConvertTo-Json -Depth 5
     exit 1
 }
