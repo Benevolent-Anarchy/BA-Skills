@@ -1021,13 +1021,18 @@ function New-GitHubCheckout {
     return $repo
 }
 
+## The merge commit every page from New-CommitPage reports, unless told otherwise.
+$mergeOid = 'feedface' + ('0' * 32)
+
 ## One page of a pull request's commits as GitHub's GraphQL API returns it: $Messages are
 ## the commits' messages, $Total is the pull request's total, and $Next the cursor of the
-## following page, if any.
-function New-CommitPage([string[]]$Messages = @(), [int]$Total = -1, [string]$Next) {
+## following page, if any. The pull request's merge commit, $mergeOid, has $MergeMessage;
+## -NoMergeCommit leaves it out, as GitHub does for one not merged.
+function New-CommitPage([string[]]$Messages = @(), [int]$Total = -1, [string]$Next, [string]$MergeMessage = 'Merge pull request #7 from fixture/fix', [switch]$NoMergeCommit) {
     if ($Total -lt 0) { $Total = $Messages.Count }
     $nodes = @($Messages | ForEach-Object { @{ commit = @{ oid = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')).Substring(0, 40); message = $_ } } })
-    return ConvertTo-Json -Compress -Depth 8 -InputObject @{ data = @{ repository = @{ pullRequest = @{ commits = @{ totalCount = $Total; pageInfo = @{ hasNextPage = [bool]$Next; endCursor = $(if ($Next) { $Next } else { $null }) }; nodes = $nodes } } } } }
+    $merge = if ($NoMergeCommit) { $null } else { @{ oid = $mergeOid; message = $MergeMessage } }
+    return ConvertTo-Json -Compress -Depth 8 -InputObject @{ data = @{ repository = @{ pullRequest = @{ mergeCommit = $merge; commits = @{ totalCount = $Total; pageInfo = @{ hasNextPage = [bool]$Next; endCursor = $(if ($Next) { $Next } else { $null }) }; nodes = $nodes } } } } }
 }
 
 ## Runs check-issues for pull request 7 of fixture/repo, whose default branch is main.
@@ -1189,6 +1194,32 @@ Test 'references in the description and commits are merged, and other repositori
     $there = $issues | Where-Object url -EQ 'https://github.com/other/place/issues/5'
     Assert ($run.Code -eq 0 -and $issues.Count -eq 2 -and $here.linkedBy -eq 'keyword' -and $here.inDescription -and @($here.commits).Count -eq 1) "Duplicates not merged: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
     Assert ($there.linkedBy -eq 'commit keyword' -and (@($there.findings) -join ' ') -match 'lives in other/place') "Other repository mishandled: $($there | ConvertTo-Json -Compress)"
+}
+
+Test 'an issue named only in the merge commit''s message is audited, and its reopening found' {
+    # #31: landing writes the title into the merge commit, which GitHub lists apart from
+    # the pull request's commits; nothing else names #5.
+    $timeline = ConvertTo-Json -Compress -Depth 4 -InputObject @(
+        (New-TimelineEvent 'closed' '2026-01-01T00:00:02Z' 'github'),
+        (New-TimelineEvent 'reopened' '2026-01-05T00:00:00Z' 'someone'))
+    $page = New-CommitPage @('Implement retry') -MergeMessage "Merge pull request #7 from fixture/fix`n`nFixes #5: implement retry"
+    $run = Invoke-CheckIssues @{} @{ 'https://github.com/fixture/repo/issues/5' = $openIssue } @{ 'https://github.com/fixture/repo/issues/5' = $timeline } @{ '' = $page }
+    $issues = @($run.Result.issues)
+    Assert ($run.Code -eq 0 -and -not $run.Result.allClosed -and $run.Result.mergeCommit -eq $mergeOid -and $issues.Count -eq 1) "Merge commit reference missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+    Assert ($issues[0].linkedBy -eq 'merge commit keyword' -and $issues[0].inMergeCommit -and @($issues[0].commits).Count -eq 0) "Not attributed to the merge commit: $($issues[0] | ConvertTo-Json -Compress)"
+    Assert ((@($issues[0].findings) -join ' ') -match 'reopened by someone at 2026-01-05') "Reopening not reported: $(@($issues[0].findings) -join ' | ')"
+}
+
+Test 'an issue named in the description, a commit and the merge commit is reported once' {
+    $page = New-CommitPage @('Fixes #5') -MergeMessage "Merge pull request #7 from fixture/fix`n`nFixes #5: implement retry"
+    $run = Invoke-CheckIssues @{ body = 'Closes #5'; closingIssuesReferences = @(New-ClosingReference 5) } @{ 'https://github.com/fixture/repo/issues/5' = $closedIssue } @{} @{ '' = $page }
+    $issues = @($run.Result.issues)
+    Assert ($run.Code -eq 0 -and $issues.Count -eq 1 -and $issues[0].linkedBy -eq 'keyword' -and $issues[0].inDescription -and $issues[0].inMergeCommit -and @($issues[0].commits).Count -eq 1) "Not reported once with every source: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'a merged pull request whose merge commit GitHub does not give fails the audit' {
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage -NoMergeCommit) }
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'not the commit that merged it') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
 }
 
 Test 'commits on a second page are read' {

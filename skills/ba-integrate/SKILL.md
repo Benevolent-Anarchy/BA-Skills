@@ -130,7 +130,7 @@ Check each merged pull request's issues:
 pwsh -NoProfile -File scripts/check-issues.ps1 -Repository <root> -PullRequest <n>
 ```
 
-It covers the issues GitHub links as closing, whether by keyword or by hand, any the description names with a closing keyword that GitHub did not link, and any named with a closing keyword in the message of a commit the pull request landed. It reads every commit, and fails rather than report a partial audit. Each is identified by its URL, since an issue can live in another repository. For an issue still open, its `findings` say why, from what it could establish:
+It covers the issues GitHub links as closing, whether by keyword or by hand, any the description names with a closing keyword that GitHub did not link, and any named with a closing keyword in the message of one of its commits or of the commit that merged it, which carries the title when landing made it. It reads every commit, and fails rather than report a partial audit. Each is identified by its URL, since an issue can live in another repository. For an issue still open, its `findings` say why, from what it could establish:
 - the pull request has not merged, or merged into a branch other than the default
 - the issue was reopened, and by whom
 - the merge was too recent for GitHub to have processed it
