@@ -103,6 +103,16 @@ separate availability record. The repository must exist, be public and permit
 writing. Different existing content is not overwritten. Publish notes only after
 a selected storefront is verified live.
 
+## Single-store games
+
+Declare only the stores a game uses. An itch-only game omits `steam`; nothing
+Steam-specific is then planned, checked or required. Two itch rules still apply.
+The itch `ignore` list must keep the four Steam patterns above, or validation
+rejects it. Setup adds them, and when the export has no Steam files they match
+nothing: the standalone check withholds nothing and the Butler dry-run passes.
+Each selected itch desktop channel also needs a `verification.standalone` check
+with an inspected script, or the plan blocks; it runs on the export as built.
+
 ## Baselines and source metadata
 
 Each store may override `previousRelease`; an itch channel may override it again.
@@ -139,8 +149,9 @@ Answer keys use public dotted paths: `previousRelease`, `verification.gate.scrip
 `distributions.steam.depots`, `distributions.google-play.track` or
 `distributions.itch.channels.linux.previousRelease`. Whole `exports` and
 `distributions` objects are accepted. `stores` is an array of `itch`, `steam`,
-`google-play` and/or `notes`. Objects and arrays use JSON, not shell commands.
-Changing stores preserves retained store objects, custom aliases, hooks and policy.
+`google-play` and/or `notes`; to change it later, see
+[adding or removing stores](#adding-or-removing-stores). Objects and arrays use
+JSON, not shell commands.
 
 Before first configuring an itch game, or changing to another game, explicitly
 confirm `distributions.itch.channels`; proposed mappings are not established facts.
@@ -148,6 +159,50 @@ Writes require validated explicit answers and the inspected configuration hash.
 Invalid, secret or stale answers leave the file unchanged. `validate`, `plan` and
 `doctor` read the same structure. Plan makes no network calls and cannot claim
 remote permissions or publication have been checked.
+
+## Adding or removing stores
+
+Which stores `release.json` configures is a setup choice; which configured
+destinations a release includes is chosen for each release. Setup reports the
+configured stores as `stores.configured`, apart from the release `selection`.
+Inspection never adds a store or selects a destination by itself. Asked about a
+destination of a store the file does not configure, such as `-Destination steam`
+for an itch-only game, it returns a `stores` question instead.
+
+Interactive setup of an existing configuration starts with its stores:
+
+```powershell
+-Mode setup -Repository <root> -Interactive
+```
+
+Enter a store to add it, or a configured store with a leading `-`, such as
+`-notes`, to remove it and its settings. A blank answer keeps the stores, and
+adding one never removes another. After a change, setup asks for every missing
+fact, including the new store's settings and its own baseline, then validates
+the whole configuration and writes it once. For an itch-only game, answering
+`steam` keeps itch and asks for Steam's `appId`, `branch`, `depots` and
+`previousRelease`.
+
+In an answers file, `stores` replaces the store list: name every store to keep
+as well as the new ones, because `["steam"]` alone removes itch. This adds Steam
+to a game that publishes on itch with notes:
+
+```json
+{
+  "stores": ["itch", "notes", "steam"],
+  "distributions.steam.appId": 1234560,
+  "distributions.steam.branch": "default",
+  "distributions.steam.depots": {"1234561": "windows", "1234562": "linux"},
+  "distributions.steam.previousRelease": "v1.4.0"
+}
+```
+
+Retained stores keep their whole settings, including channel overrides and
+explicit `null` baselines. Existing export aliases, verification hooks and
+`androidVersionCodePolicy` stay as they are, also when a store is removed. A
+new store's facts start unknown (`null`), apart from proposed itch channels that
+still need confirming, and it gets its own `null` baseline, which never falls
+back to the shared one. Leave a fact blank to keep it unknown.
 
 ## Adding a store to a prepared release
 

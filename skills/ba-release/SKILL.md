@@ -14,8 +14,9 @@ in any agent; do not substitute model-generated shell operations for the scripts
 
 1. Read the game's repository instructions and current status. Inspect its
    project, presets, verification tools, origin and actual release history.
-   Run `scripts/release.ps1 -Mode setup -Repository <game-root>` on first use or
-   when configuration is incomplete. Ask its missing-fact questions, then apply
+   Run `scripts/release.ps1 -Mode setup -Repository <game-root>` on first use,
+   when configuration is incomplete or to add or remove a store; a `stores`
+   answer lists every store to keep. Ask its missing-fact questions, then apply
    explicit answers using its configuration hash. Read
    [configuration and setup](references/configuration.md). Unknown publication
    facts stay null; do not invent presets, paths, commands, channels or baselines.

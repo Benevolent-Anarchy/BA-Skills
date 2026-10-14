@@ -68,11 +68,11 @@ function Get-NextCursor($Connection, [string]$What) {
 # that is not a draft are counted across every page too.
 function Get-GitHubPullRequests {
     $gh = if ($GitHubCli) { $GitHubCli } else { Get-GitHubCli }
+    # The pull requests come from the repository origin names, the one the heads are
+    # fetched from, never one gh picks from GH_REPO or its own default.
+    $owner, $name = (Get-GitHubRepository $Repository 'origin') -split '/', 2
     Push-Location -LiteralPath $Repository
     try {
-        $identity = & $gh repo view --json owner,name | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0) { throw 'gh could not identify the repository; is it authenticated?' }
-        $owner = $identity.owner.login; $name = $identity.name
         $nodes = [Collections.Generic.List[object]]::new()
         $after = $null
         do {
@@ -265,6 +265,6 @@ try {
     } | ConvertTo-Json -Depth 8
     exit 0
 } catch {
-    [ordered]@{ error = $_.Exception.Message } | ConvertTo-Json
+    [ordered]@{ error = (Hide-UrlCredentials $_.Exception.Message) } | ConvertTo-Json
     exit 1
 }
