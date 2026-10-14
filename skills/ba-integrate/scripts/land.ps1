@@ -40,11 +40,9 @@ $startedMerge = $false
 
 # What GitHub shows for the pull request now, or $null when it could not be read.
 function Get-PullRequestView {
-    Push-Location -LiteralPath $Worktree
-    try { $output = & $script:gh pr view $PullRequest --json state,isDraft,headRefOid,headRefName,baseRefName,closingIssuesReferences 2>&1 }
-    finally { Pop-Location }
-    if ($LASTEXITCODE -ne 0) { $script:lastGitHubError = "$output"; return $null }
-    try { return ($output | Out-String) | ConvertFrom-Json } catch { $script:lastGitHubError = "$output"; return $null }
+    $call = Invoke-GitHubCli $script:gh @('pr', 'view', "$PullRequest", '--json', 'state,isDraft,headRefOid,headRefName,baseRefName,closingIssuesReferences') $Worktree
+    if ($call.Code -ne 0) { $script:lastGitHubError = "$($call.Out) $($call.Err)"; return $null }
+    try { return $call.Out | ConvertFrom-Json } catch { $script:lastGitHubError = "$($call.Out) $($call.Err)"; return $null }
 }
 
 # Refuses unless GitHub shows the pull request open, ready, on $Branch, targeting

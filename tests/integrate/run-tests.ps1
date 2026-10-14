@@ -159,7 +159,7 @@ function New-FakePullRequest([string]$Repository, [string]$Branch, [hashtable]$S
     $remote = (Invoke-FixtureGit $Repository @('remote', 'get-url', 'origin')).Trim()
     $fields = @{
         remote = $remote; branch = $Branch; base = 'main'; headRefName = $Branch; baseRefName = 'main'
-        isDraft = $false; closing = @(); neverMerge = $false; mergeDelayCalls = 0; fail = $false
+        isDraft = $false; closing = @(); neverMerge = $false; mergeDelayCalls = 0; fail = $false; warn = $false
         calls = 0; lastHead = $null; overrides = $Overrides
     }
     foreach ($key in $State.Keys) { $fields[$key] = $State[$key] }
@@ -180,6 +180,7 @@ if ($s.neverMerge) { $merged = $false }
 elseif ($merged -and [int]$s.mergeDelayCalls -gt 0) { $s.mergeDelayCalls = [int]$s.mergeDelayCalls - 1; $merged = $false }
 Set-Content -LiteralPath $statePath -Value ($s | ConvertTo-Json -Depth 8)
 if ($s.fail) { 'HTTP 502: Bad Gateway'; exit 1 }
+if ($s.warn) { Write-Error -Message 'A new release of gh is available: 9.9.9' -ErrorAction Continue }
 [ordered]@{
     state = if ($merged) { 'MERGED' } else { 'OPEN' }; isDraft = [bool]$s.isDraft
     headRefOid = $s.lastHead; headRefName = $s.headRefName; baseRefName = $s.baseRefName
@@ -754,7 +755,8 @@ function New-LandedFixture {
 
 ## A stand-in for the GitHub CLI that answers from $Responses: the longest key its joined
 ## arguments start with picks the response, printed as given. A response starting with
-## '!fail' makes it exit 1, printing that text.
+## '!fail' makes it exit 1, printing that text; one starting with '!warn ' prints the rest
+## after writing a warning to its error output, as gh does with an update notice.
 function New-FakeGitHubCli([hashtable]$Responses) {
     $data = Join-Path $sandbox ('gh-responses-' + [guid]::NewGuid().ToString('N') + '.json')
     Write-FixtureText $data ($Responses | ConvertTo-Json -Depth 3)
@@ -766,6 +768,10 @@ $key = @($responses.Keys | Where-Object { $line.StartsWith($_) } | Sort-Object L
 if (-not $key) { "no stand-in response for: $line"; exit 1 }
 $value = "$($responses[$key])"
 if ($value.StartsWith('!fail')) { $value; exit 1 }
+if ($value.StartsWith('!warn ')) {
+    Write-Error -Message 'A new release of gh is available: 9.9.9' -ErrorAction Continue
+    $value = $value.Substring(6)
+}
 $value
 exit 0
 '@
@@ -905,6 +911,29 @@ Test 'an open issue with no cause found says to look by hand' {
     $run = Invoke-CheckIssues @{ closingIssuesReferences = @(New-ClosingReference 5) } @{ 'https://github.com/fixture/repo/issues/5' = $openIssue }
     $issue = @($run.Result.issues)[0]
     Assert ($run.Code -eq 0 -and $issue.linkedBy -eq 'manual link' -and (@($issue.findings) -join ' ') -match 'No cause found') "Wrong report: $($issue | ConvertTo-Json -Compress)"
+}
+
+Test 'a warning from gh does not stop landing' {
+    $f = New-LandingFixture
+    $run = Invoke-Step $f.Rehearsal 'one' $f.Head $f.Base $f.Step (New-FakePullRequest $f.Repository 'one' @{ warn = $true })
+    Assert ($run.Land.Code -eq 0 -and $run.Land.Result.merged) "A gh warning broke landing: $($run.Land.Result | ConvertTo-Json -Compress)"
+}
+
+Test 'a warning from gh does not stop the dependents check' {
+    $f = New-LandedFixture
+    $run = Invoke-DeleteBranch $f.Repository $f.Head '!warn []'
+    Assert ($run.Code -eq 0 -and $run.Result.outcome -eq 'deleted') "A gh warning broke deletion: $($run.Result | ConvertTo-Json -Compress)"
+}
+
+Test 'a warning from gh does not stop the issue check' {
+    $fake = New-FakeGitHubCli @{
+        'repo view' = '!warn {"nameWithOwner":"fixture/repo","defaultBranchRef":{"name":"main"}}'
+        'pr view 7' = '{"number":7,"url":"https://github.com/fixture/repo/pull/7","state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","baseRefName":"main","body":"Closes #5","closingIssuesReferences":[]}'
+        'issue view https://github.com/fixture/repo/issues/5' = $closedIssue
+    }
+    $folder = Join-Path $sandbox ('check-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $folder | Out-Null
+    $run = Invoke-IntegrateScript 'check-issues' @{ Repository = $folder; PullRequest = 7; GitHubCli = $fake }
+    Assert ($run.Code -eq 0 -and $run.Result.allClosed) "A gh warning broke the issue check: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
 }
 
 Test 'a GitHub error while checking issues fails without guessing' {

@@ -33,11 +33,9 @@ try {
 
     $current = Get-RemoteBranch $Repository $Remote $Branch
     if ($current -eq $tip) {
-        Push-Location -LiteralPath $Repository
-        try { $listed = & $gh pr list --base $Branch --state open --limit 100 --json number,url 2>&1 }
-        finally { Pop-Location }
-        if ($LASTEXITCODE -ne 0) { throw "Could not ask GitHub which pull requests target $Branch, so nothing was deleted. gh said: $listed" }
-        $dependents = @(($listed | Out-String) | ConvertFrom-Json)
+        $listed = Invoke-GitHubCli $gh @('pr', 'list', '--base', $Branch, '--state', 'open', '--limit', '100', '--json', 'number,url') $Repository
+        if ($listed.Code -ne 0) { throw "Could not ask GitHub which pull requests target $Branch, so nothing was deleted. gh said: $($listed.Out) $($listed.Err)" }
+        $dependents = @($listed.Out | ConvertFrom-Json)
         if ($dependents.Count -gt 0) {
             $result.dependents = @($dependents | ForEach-Object { [ordered]@{ number = $_.number; url = $_.url } })
             throw "Open pull requests still target ${Branch}: $(@($dependents | ForEach-Object { "#$($_.number)" }) -join ', '). Retarget them to $BaseBranch first; nothing was deleted."

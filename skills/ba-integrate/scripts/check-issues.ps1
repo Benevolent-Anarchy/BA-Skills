@@ -24,12 +24,10 @@ Import-Module (Join-Path $PSScriptRoot 'Integrate.psm1') -Force
 # Runs the GitHub CLI in the repository and returns its output parsed as JSON, or as one
 # JSON document per line with -Lines; an error names $What.
 function Invoke-GitHub([string[]]$Arguments, [string]$What, [switch]$Lines) {
-    Push-Location -LiteralPath $Repository
-    try { $output = & $script:gh @Arguments 2>&1 }
-    finally { Pop-Location }
-    if ($LASTEXITCODE -ne 0) { throw "Could not read $What from GitHub. gh said: $output" }
-    if ($Lines) { return @($output | ForEach-Object { "$_" -split '\r?\n' } | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json }) }
-    return ($output | Out-String) | ConvertFrom-Json
+    $call = Invoke-GitHubCli $script:gh $Arguments $Repository
+    if ($call.Code -ne 0) { throw "Could not read $What from GitHub. gh said: $($call.Out) $($call.Err)" }
+    if ($Lines) { return @($call.Out -split '\r?\n' | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json }) }
+    return $call.Out | ConvertFrom-Json
 }
 
 # The canonical URL of an issue reference in a description: owner/repo#N, #N in this

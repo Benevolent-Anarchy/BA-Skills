@@ -48,6 +48,18 @@ function Test-CleanWorktree([string]$Repository) {
     return -not $changes -and -not $merging
 }
 
+# Runs the GitHub CLI $Gh with $Arguments in $Directory and returns its exit code, its
+# standard output, and its error output kept apart. A warning gh prints, such as an update
+# notice, goes to its error output and so never corrupts the JSON on its standard output.
+function Invoke-GitHubCli([string]$Gh, [string[]]$Arguments, [string]$Directory) {
+    Push-Location -LiteralPath $Directory
+    try { $output = & $Gh @Arguments 2>&1; $code = $LASTEXITCODE }
+    finally { Pop-Location }
+    $out = @($output | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }) -join "`n"
+    $err = @($output | Where-Object { $_ -is [Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }) -join ' '
+    return [pscustomobject]@{ Code = $code; Out = $out; Err = $err }
+}
+
 # The GitHub CLI executable. On Windows an extensionless shell shim named `gh` can shadow
 # gh.exe on PATH, and PowerShell cannot run it, so take the real executable.
 function Get-GitHubCli {
@@ -57,4 +69,4 @@ function Get-GitHubCli {
     return $gh
 }
 
-Export-ModuleMember -Function Invoke-Git, Resolve-Commit, Test-CommitExists, Test-Ancestor, Get-RemoteBranch, Test-CleanWorktree, Get-GitHubCli
+Export-ModuleMember -Function Invoke-Git, Resolve-Commit, Test-CommitExists, Test-Ancestor, Get-RemoteBranch, Test-CleanWorktree, Invoke-GitHubCli, Get-GitHubCli

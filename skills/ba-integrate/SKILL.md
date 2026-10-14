@@ -9,7 +9,7 @@ Cicely keeps pull requests as drafts until all their reviews are in, then marks 
 
 ## Authority
 
-A request to integrate a project authorizes the survey, the rehearsal and a scratch worktree and branch of its own. Pushing to pull-request branches or the base, editing pull-request descriptions, commenting on pull requests and deleting merged branches all wait for Cicely's approval of the concrete plan. That approval covers exactly the pull requests, head commits and base commit in it. Anything that differs from the plan stops the run for a new approval.
+A request to integrate a project authorizes the survey, the rehearsal and a scratch worktree and branch of its own. Pushing to pull-request branches or the base, editing pull-request descriptions, retargeting pull requests, commenting on pull requests and deleting merged branches all wait for Cicely's approval of the concrete plan. That approval covers exactly the pull requests, head commits and base commit in it. Anything that differs from the plan stops the run for a new approval.
 
 Never mark a pull request ready, never merge a draft, and never rewrite history. Never rebase or force-push a pull-request branch: bring it up to date by merging the base into it. The scripts' pushes each name the exact value they replace and are fast-forwards of it, so a ref that moved in any direction fails its push. Leave review threads as they are. Never touch Cicely's main checkout beyond a fast-forward pull at the end, and only when it is clean.
 
@@ -75,7 +75,7 @@ If her answers change a resolution, redo the rehearsal from that step. Reset the
 
 The expected base starts as the rehearsal's base commit and becomes each landing's merge commit. For each pull request in the approved order:
 
-1. Check it is still open, still not a draft, still at the approved head and targeting the base, with `gh pr view <n> --json state,isDraft,headRefOid,baseRefName`. A pull request stacked on another was retargeted when that one merged (step 6). Otherwise stop.
+1. Check it is still open, still not a draft, still at the approved head and targeting the base, with `gh pr view <n> --json state,isDraft,headRefOid,baseRefName`. A pull request stacked on another was retargeted when that one merged (step 5). Otherwise stop.
 2. Bring it up to date in the rehearsal worktree. It must exit 0 with `matches: true`:
 
    ```powershell
