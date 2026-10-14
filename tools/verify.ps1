@@ -32,7 +32,9 @@ $jobs=foreach ($suite in @('tests/run-tests.ps1','tests/bootstrap/run-tests.ps1'
     }
 }
 foreach ($job in $jobs) {
-    $result=Receive-Job -Job $job -Wait -AutoRemoveJob
+    # Wait, receive and remove separately: Receive-Job -Wait -AutoRemoveJob sometimes fails to find a finished thread job.
+    $result=Receive-Job -Job (Wait-Job -Job $job)
+    Remove-Job -Job $job
     Write-Output $result.output
     if ($result.exitCode -ne 0) {$failed=$true}
 }

@@ -15,17 +15,17 @@ Test 'aggregate gate preserves failed stages and rejects syntax errors' {
     Write-FixtureText "$fixture/tests/bootstrap/run-tests.ps1" "Write-Output 'later stage passed'; exit 0"
     Write-FixtureText "$fixture/tests/integrate/run-tests.ps1" "Write-Output 'integrate stage passed'; exit 0"
     $output=& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File "$fixture/tools/verify.ps1" 2>&1
-    Assert ($LASTEXITCODE -eq 1 -and ($output -join "`n") -match 'later stage passed') 'Later success hid earlier failure.'
+    Assert ($LASTEXITCODE -eq 1 -and ($output -join "`n") -match 'later stage passed') "Later success hid earlier failure (exit $LASTEXITCODE): $($output -join ' | ')"
     Write-FixtureText "$fixture/tests/run-tests.ps1" "Write-Output 'first stage passed'; exit 0"
     Write-FixtureText "$fixture/tests/integrate/run-tests.ps1" "throw 'integrate stage crashed'"
     $output=& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File "$fixture/tools/verify.ps1" 2>&1
-    Assert ($LASTEXITCODE -eq 1 -and ($output -join "`n") -match 'integrate stage crashed') 'Earlier successes hid a later crash or lost its error output.'
+    Assert ($LASTEXITCODE -eq 1 -and ($output -join "`n") -match 'integrate stage crashed') "Earlier successes hid a later crash or lost its error output (exit $LASTEXITCODE): $($output -join ' | ')"
     Write-FixtureText "$fixture/tests/integrate/run-tests.ps1" "Write-Output 'integrate stage passed'; exit 0"
     $output=& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File "$fixture/tools/verify.ps1" 2>&1
-    Assert ($LASTEXITCODE -eq 0 -and ($output -join "`n") -match 'Verification passed') 'Both passing stages failed.'
+    Assert ($LASTEXITCODE -eq 0 -and ($output -join "`n") -match 'Verification passed') "Both passing stages failed (exit $LASTEXITCODE): $($output -join ' | ')"
     Write-FixtureText "$fixture/broken.psm1" 'function Broken {'
     $output=& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File "$fixture/tools/verify.ps1" 2>&1
-    Assert ($LASTEXITCODE -eq 1 -and ($output -join "`n") -match 'broken.psm1:1') 'Syntax error escaped gate.'
+    Assert ($LASTEXITCODE -eq 1 -and ($output -join "`n") -match 'broken.psm1:1') "Syntax error escaped gate (exit $LASTEXITCODE): $($output -join ' | ')"
     Assert (($output -join "`n") -notmatch 'stage passed') 'Suites ran despite a syntax error.'
     Write-FixtureText "$fixture/broken.psm1" ''
     Write-FixtureText "$fixture/.test-results/broken.ps1" 'function Broken {'
