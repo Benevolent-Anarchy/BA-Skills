@@ -1,7 +1,8 @@
 # Deletes a merged pull request's branch on the remote, only while it still points at the
 # commit that merged and no open pull request targets it. GitHub can close a pull request
 # whose base branch is deleted, so one stacked on this branch must be retargeted first;
-# the deletion refuses and names them until then. A branch someone pushed to since is
+# the deletion refuses and names them until then. The pull requests are read, every page
+# of them, from the GitHub repository the remote's URL names, never one gh picks itself. A branch someone pushed to since is
 # preserved and reported, and an already deleted one is left alone. The deletion is a push
 # with an expected value, so a push landing between the check and the deletion makes the
 # deletion fail instead of discarding unmerged work. Writes one JSON document whose
@@ -26,6 +27,9 @@ $result = [ordered]@{ branch = $Branch; deleted = $false }
 try {
     $Repository = (Resolve-Path -LiteralPath $Repository).Path
     $gh = if ($GitHubCli) { $GitHubCli } else { Get-GitHubCli }
+    # The pull requests are looked up in the repository this deletion pushes to.
+    $gitHubRepository = Get-GitHubRepository $Repository $Remote
+    $result.repository = $gitHubRepository
     $tip = Resolve-Commit $Repository $MergedTip 'Merged tip'
     Invoke-Git $Repository @('fetch', '--quiet', '--no-tags', $Remote, "refs/heads/$BaseBranch") | Out-Null
     $base = Resolve-Commit $Repository 'FETCH_HEAD' "$Remote's $BaseBranch"
@@ -33,9 +37,8 @@ try {
 
     $current = Get-RemoteBranch $Repository $Remote $Branch
     if ($current -eq $tip) {
-        $listed = Invoke-GitHubCli $gh @('pr', 'list', '--base', $Branch, '--state', 'open', '--limit', '100', '--json', 'number,url') $Repository
-        if ($listed.Code -ne 0) { throw "Could not ask GitHub which pull requests target $Branch, so nothing was deleted. gh said: $($listed.Out) $($listed.Err)" }
-        $dependents = @($listed.Out | ConvertFrom-Json)
+        try { $dependents = @(Get-PullRequestsTargeting $gh $gitHubRepository $Branch $Repository) }
+        catch { throw "Could not ask GitHub which pull requests target $Branch, so nothing was deleted. $($_.Exception.Message)" }
         if ($dependents.Count -gt 0) {
             $result.dependents = @($dependents | ForEach-Object { [ordered]@{ number = $_.number; url = $_.url } })
             throw "Open pull requests still target ${Branch}: $(@($dependents | ForEach-Object { "#$($_.number)" }) -join ', '). Retarget them to $BaseBranch first; nothing was deleted."

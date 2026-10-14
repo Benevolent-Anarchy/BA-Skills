@@ -40,7 +40,7 @@ $startedMerge = $false
 
 # What GitHub shows for the pull request now, or $null when it could not be read.
 function Get-PullRequestView {
-    $call = Invoke-GitHubCli $script:gh @('pr', 'view', "$PullRequest", '--json', 'state,isDraft,headRefOid,headRefName,baseRefName,closingIssuesReferences') $Worktree
+    $call = Invoke-GitHubCli $script:gh @('pr', 'view', "$PullRequest", '--repo', $script:gitHubRepository, '--json', 'state,isDraft,headRefOid,headRefName,baseRefName,closingIssuesReferences') $Worktree
     if ($call.Code -ne 0) { $script:lastGitHubError = "$($call.Out) $($call.Err)"; return $null }
     try { return $call.Out | ConvertFrom-Json } catch { $script:lastGitHubError = "$($call.Out) $($call.Err)"; return $null }
 }
@@ -80,6 +80,8 @@ function Get-PushedSoFar { if ($result.branchPushed) { "$Branch now holds the up
 try {
     $script:gh = if ($GitHubCli) { $GitHubCli } else { Get-GitHubCli }
     $Worktree = (Resolve-Path -LiteralPath $Worktree).Path
+    # The pull request is read from the repository the pushes go to, never one gh picks.
+    $script:gitHubRepository = Get-GitHubRepository $Worktree $Remote
     $approved = Resolve-Commit $Worktree $ApprovedHead 'Approved head'
     $updatedSha = Resolve-Commit $Worktree $Updated 'Updated head'
     $expected = Resolve-Commit $Worktree $ExpectedBase 'Expected base'

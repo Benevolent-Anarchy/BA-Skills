@@ -13,7 +13,7 @@ A request to integrate a project authorizes the survey, the rehearsal and a scra
 
 Never mark a pull request ready, never merge a draft, and never rewrite history. Never rebase or force-push a pull-request branch: bring it up to date by merging the base into it. The scripts' pushes each name the exact value they replace and are fast-forwards of it, so a ref that moved in any direction fails its push. Leave review threads as they are. Never touch Cicely's main checkout beyond a fast-forward pull at the end, and only when it is clean.
 
-The scripts below run from this skill's directory with PowerShell 7.2+, Git 2.38+ and an authenticated GitHub CLI. Each writes one JSON document. Read it even after a nonzero exit: a failure carries an `error` member saying what was and was not changed.
+The scripts below run from this skill's directory with PowerShell 7.2+, Git 2.38+ and an authenticated GitHub CLI. Each writes one JSON document. Read it even after a nonzero exit: a failure carries an `error` member saying what was and was not changed. Each script takes the GitHub repository from its remote's configured URL and names it in every GitHub CLI call, so `GH_REPO` and the CLI's own default repository never redirect it. A remote that is not on github.com is refused.
 
 ## 1. Prepare
 
@@ -67,7 +67,7 @@ Present the plan and wait for Cicely's approval:
 - questions only she can answer, such as two decisions that contradict each other, a resolution that needs new code, or a semantic doubt
 - follow-up corrections found on re-reading, which go into a new draft pull request after the run
 - what will happen to each pull request: a merge commit bringing it up to date where it is behind, a merge commit on the base, a comment recording any resolutions, and deletion of its branch if the project's notes ask for it
-- every open pull request that targets a branch this run merges, stacked ones included, each retargeted to the base once that branch merges
+- every open pull request that targets a branch this run merges, drafts and stacked ones included, each retargeted to the base once that branch merges. List them for each branch with `pwsh -NoProfile -File scripts/retarget.ps1 -Repository <root> -Branch <branch> -BaseBranch <base> -List`, which reads every page.
 
 If her answers change a resolution, redo the rehearsal from that step. Reset the rehearsal branch to the previous step's commit, merge again, and take earlier resolutions from the old step commits where they still apply. Show what changed.
 
@@ -95,7 +95,13 @@ The expected base starts as the rehearsal's base commit and becomes each landing
 
    It makes the merge commit on the expected base and pushes the update to the branch. It reads GitHub again, then pushes the merge commit to the base. A ref that moved, a ruleset or a merge-queue requirement therefore fails the push instead of landing something unrehearsed. It then waits for GitHub to report the pull request `MERGED`. Its `mergeCommit` is the next step's expected base.
 4. Once it reports `MERGED`, comment on the pull request with any resolutions, using the project's author prefix. Update its description if it no longer describes the change.
-5. Retarget every open pull request that targets the merged branch to the base, as the plan lists: `gh pr list --base <branch> --state open`, then `gh pr edit <m> --base <base>` for each. Do this before deleting the branch, because GitHub can close a pull request whose base branch is deleted, and do it even when branches are kept, so a stacked pull request lands on the base.
+5. Retarget the pull requests the plan listed for the merged branch to the base. Do this before deleting the branch, because GitHub can close a pull request whose base branch is deleted. Do it even when branches are kept, so a stacked pull request lands on the base. The script reads every page of the pull requests targeting the branch. If they are not exactly the approved ones, for instance because one was opened since, it retargets none and the run stops for a new approval. Otherwise it retargets each and confirms none is left:
+
+   ```powershell
+   pwsh -NoProfile -File scripts/retarget.ps1 -Repository <root> -Branch <branch> -BaseBranch <base> -Approved '<n>,<m>'
+   ```
+
+   Pass `-Approved none` when the plan listed none.
 6. If the project's notes say merged branches are deleted, delete it. The script deletes only while the branch is still at the merged tip and no open pull request targets it. It reports a branch someone has pushed to since as `moved`, and refuses, naming them, while pull requests still target it:
 
    ```powershell

@@ -3,10 +3,10 @@
 # GitHub lists it as closing the pull request (a closing keyword, or a link made by hand)
 # or when the description names it with a closing keyword. For an open one it reports what
 # it can establish: the pull request has not merged; it merged into a branch that is not
-# the default, where GitHub closes nothing; the issue was closed and then reopened, and by
+# the default, where GitHub closes nothing; the issue was reopened after this merge, and by
 # whom; the merge was so recent that GitHub may still be processing it; the description's
-# keyword is not one GitHub linked; or the issue lives in another repository. It changes
-# nothing. Writes one JSON document, with an `error` member and exit code 1 on failure.
+# keyword is not one GitHub linked; or the issue lives in another repository. The pull
+# request is read from the repository the remote names. It changes nothing. Writes one JSON document, with an `error` member and exit code 1 on failure.
 #requires -Version 7.2
 [CmdletBinding()]
 param(
@@ -14,6 +14,7 @@ param(
     [Parameter(Mandatory)][int]$PullRequest,
     # A merge newer than this may not have been processed by GitHub yet.
     [int]$RecentSeconds = 120,
+    [string]$Remote = 'origin',
     # The GitHub CLI to run, gh on PATH by default; tests pass a stand-in script.
     [string]$GitHubCli
 )
@@ -21,14 +22,33 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 Import-Module (Join-Path $PSScriptRoot 'Integrate.psm1') -Force
 
-# Runs the GitHub CLI in the repository and returns its output parsed as JSON, or as one
-# JSON document per line with -Lines; an error names $What.
-function Invoke-GitHub([string[]]$Arguments, [string]$What, [switch]$Lines) {
+# Runs the GitHub CLI in the repository and returns its output parsed as JSON; an error
+# names $What.
+function Invoke-GitHub([string[]]$Arguments, [string]$What) {
     $call = Invoke-GitHubCli $script:gh $Arguments $Repository
     if ($call.Code -ne 0) { throw "Could not read $What from GitHub. gh said: $($call.Out) $($call.Err)" }
-    if ($Lines) { return @($call.Out -split '\r?\n' | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json }) }
     return $call.Out | ConvertFrom-Json
 }
+
+# The closed and reopened events in an issue's timeline, oldest first, read a page at a
+# time and filtered here rather than by a gh filter expression, whose quotes PowerShell
+# before 7.3 would strip from the native argument.
+function Get-ClosingEvents([string]$IssueRepository, [int]$Number) {
+    $events = [Collections.Generic.List[object]]::new()
+    for ($page = 1; ; $page++) {
+        $items = @(Invoke-GitHub @('api', "repos/$IssueRepository/issues/$Number/timeline?per_page=100&page=$page") "page $page of the timeline of $IssueRepository#$Number")
+        foreach ($item in $items) {
+            if ($item.event -in @('closed', 'reopened')) {
+                $events.Add([pscustomobject]@{ event = $item.event; at = ([datetime]$item.created_at).ToUniversalTime(); actor = $item.actor.login })
+            }
+        }
+        if ($items.Count -lt 100) { break }
+    }
+    return $events.ToArray()
+}
+
+# A UTC time as text.
+function Format-Time([datetime]$Time) { return $Time.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
 
 # The canonical URL of an issue reference in a description: owner/repo#N, #N in this
 # repository, or a full issue URL.
@@ -39,10 +59,11 @@ function Resolve-IssueUrl([string]$Owner, [string]$Name, [string]$Number) {
 try {
     $Repository = (Resolve-Path -LiteralPath $Repository).Path
     $script:gh = if ($GitHubCli) { $GitHubCli } else { Get-GitHubCli }
-    $repo = Invoke-GitHub @('repo', 'view', '--json', 'nameWithOwner,defaultBranchRef') 'the repository'
+    # The repository the remote names, never one gh picks from GH_REPO or its own default.
+    $here = Get-GitHubRepository $Repository $Remote
+    $repo = Invoke-GitHub @('repo', 'view', $here, '--json', 'nameWithOwner,defaultBranchRef') $here
     $defaultBranch = $repo.defaultBranchRef.name
-    $here = $repo.nameWithOwner
-    $pr = Invoke-GitHub @('pr', 'view', "$PullRequest", '--json', 'number,url,state,mergedAt,baseRefName,body,closingIssuesReferences') "#$PullRequest"
+    $pr = Invoke-GitHub @('pr', 'view', "$PullRequest", '--repo', $here, '--json', 'number,url,state,mergedAt,baseRefName,body,closingIssuesReferences') "#$PullRequest"
 
     # Expected issues: those GitHub links as closing, then any the description names with
     # a closing keyword that GitHub did not link.
@@ -73,11 +94,17 @@ try {
             elseif ($pr.baseRefName -ne $defaultBranch) { $findings.Add("#$PullRequest merged into $($pr.baseRefName), not the default branch $defaultBranch, and GitHub closes issues only for pull requests merged into the default branch.") }
             if ($entry.linkedBy -eq 'keyword GitHub did not link') { $findings.Add('The description names it with a closing keyword, but GitHub does not list it as closing this pull request, so the reference did not resolve or was written in a form GitHub does not read.') }
             if ($entry.repository -ne $here) { $findings.Add("It lives in $($entry.repository), not $here.") }
-            $events = Invoke-GitHub @('api', "repos/$($entry.repository)/issues/$($entry.number)/timeline", '--paginate', '--jq', '.[] | select(.event == "closed" or .event == "reopened") | {event, created_at, actor: .actor.login}') "the timeline of $($entry.url)" -Lines
-            $reopened = @($events | Where-Object event -EQ 'reopened') | Select-Object -Last 1
-            if ($reopened) {
-                $when = if ($reopened.created_at -is [datetime]) { $reopened.created_at.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') } else { "$($reopened.created_at)" }
-                $findings.Add("It was reopened by $($reopened.actor) at $when after being closed.")
+            # Only a reopening after this merge can explain why the merge left it open;
+            # older history is no cause and must not hide that none was found.
+            if ($pr.state -eq 'MERGED' -and $pr.mergedAt) {
+                $merged = ([datetime]$pr.mergedAt).ToUniversalTime()
+                $since = @(Get-ClosingEvents $entry.repository $entry.number | Where-Object { $_.at -ge $merged })
+                $reopened = @($since | Where-Object event -EQ 'reopened') | Select-Object -Last 1
+                if ($reopened) {
+                    $closed = @($since | Where-Object { $_.event -eq 'closed' -and $_.at -le $reopened.at }) | Select-Object -Last 1
+                    $findings.Add($(if ($closed) { "It was closed at $(Format-Time $closed.at), after this merge, and reopened by $($reopened.actor) at $(Format-Time $reopened.at)." }
+                        else { "It was reopened by $($reopened.actor) at $(Format-Time $reopened.at), after this merge." }))
+                }
             }
             if ($pr.state -eq 'MERGED' -and $null -ne $mergedAgo -and $mergedAgo -lt $RecentSeconds) { $findings.Add("#$PullRequest merged only $mergedAgo seconds ago, so GitHub may still be processing it; check again shortly.") }
             if ($findings.Count -eq 0) { $findings.Add('No cause found: GitHub should have closed it. Look at the issue and the pull request by hand.') }
