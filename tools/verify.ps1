@@ -36,10 +36,11 @@ try {
             foreach ($argument in '-NoProfile','-File',$Suite) {$start.ArgumentList.Add($argument)}
             $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
             $start.StandardOutputEncoding=[Console]::OutputEncoding;$start.StandardErrorEncoding=[Console]::OutputEncoding
-            $process=$null
+            $process=$null;$finished=$false
             try {
                 $process=[Diagnostics.Process]::Start($start)
-                # Keep both streams' lines in arrival order, as 2>&1 does; the short waits let a stop request through.
+                # Keep both streams' lines in arrival order, as 2>&1 does. Every wait here is short, so a stop request
+                # gets through even while a suite's child holds its output open or a suite runs on after closing it.
                 $streams=@($process.StandardOutput,$process.StandardError)
                 $reads=@($streams[0].ReadLineAsync(),$streams[1].ReadLineAsync())
                 $output=[Collections.Generic.List[string]]::new()
@@ -50,11 +51,12 @@ try {
                         if ($null -eq $reads[$i].Result) {$reads[$i]=$null} else {$output.Add($reads[$i].Result);$reads[$i]=$streams[$i].ReadLineAsync()}
                     }
                 }
-                $process.WaitForExit()
+                while (-not $process.WaitForExit(200)) {}
+                $finished=$true
                 @{output=$output;exitCode=$process.ExitCode}
             } finally {
-                # A stopped job ends its suite and every process the suite started, which may hold its output open.
-                if ($process -and -not $process.HasExited) {$process.Kill($true)}
+                # Unless the suite finished, end it and every process it started, also when the suite itself has exited.
+                if ($process -and -not $finished) {$process.Kill($true)}
             }
         }))
     }

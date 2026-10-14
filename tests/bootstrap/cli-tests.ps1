@@ -94,6 +94,40 @@ $state=@{codePage=[Console]::OutputEncoding.CodePage;output=$output;errors=@($pi
     Assert ("unicode:$snow" -cin $lines -and "error:$snow" -cin $lines -and 'exit 0' -cin $lines) "Suite output lost characters under code page 850: $shown"
     Assert ($result.codePage -eq 850) "The gate left the console code page at $($result.codePage)."
 }
+## Runs the gate copy in $Fixture from a persistent runspace that already holds an unrelated job. Once every
+## $Markers process-ID file and every $Heartbeats file exists, runs $BeforeStop on those processes and cancels
+## the gate with Stop(), which must take under 10 seconds, end each of them, freeze the heartbeats and remove
+## only the gate's own jobs.
+function Assert-GateCancellation([string]$Fixture,[string[]]$Markers,[string[]]$Heartbeats,[scriptblock]$BeforeStop={}) {
+    $runspace=[RunspaceFactory]::CreateRunspace();$runspace.Open()
+    $invoke={param([string]$Script) $shell=[PowerShell]::Create();$shell.Runspace=$runspace;try {@($shell.AddScript($Script).Invoke())} finally {$shell.Dispose()}}
+    $processes=@();$pipeline=$null
+    try {
+        $null=& $invoke 'Start-ThreadJob -Name unrelated -ScriptBlock {Start-Sleep -Seconds 60}'
+        $pipeline=[PowerShell]::Create();$pipeline.Runspace=$runspace
+        $null=$pipeline.AddCommand("$Fixture/tools/verify.ps1").BeginInvoke()
+        $waiting={@($Markers+$Heartbeats | Where-Object {-not (Test-Path -LiteralPath $_)})}
+        $deadline=[DateTime]::UtcNow.AddSeconds(30)
+        while ((& $waiting).Count -and [DateTime]::UtcNow -lt $deadline) {Start-Sleep -Milliseconds 100}
+        Assert ((& $waiting).Count -eq 0) "The suites did not all start: $((& $waiting) -join ', ')"
+        $processes=@(foreach ($marker in $Markers) {[Diagnostics.Process]::GetProcessById([int][IO.File]::ReadAllText($marker))})
+        & $BeforeStop $processes
+        $watch=[Diagnostics.Stopwatch]::StartNew();$pipeline.Stop();$watch.Stop()
+        Assert ($watch.Elapsed.TotalSeconds -lt 10) "Cancelling the gate took $($watch.Elapsed.TotalSeconds) seconds."
+        $survivors=@(for ($i=0; $i -lt $Markers.Count; $i++) {if (-not $processes[$i].WaitForExit(10000)) {$Markers[$i]}})
+        Assert ($survivors.Count -eq 0) "Processes kept running after the gate was cancelled: $($survivors -join ', ')"
+        $beats={@($Heartbeats | ForEach-Object {Get-Content -Raw -LiteralPath $_}) -join ','}
+        $before=& $beats;Start-Sleep -Milliseconds 300
+        Assert ((& $beats) -eq $before) 'Heartbeats continued after the gate was cancelled.'
+        $left=@(& $invoke 'Get-Job | ForEach-Object Name')
+        Assert (($left -join ',') -eq 'unrelated') "The gate left the wrong jobs in its session: $($left -join ', ')"
+    } finally {
+        foreach ($process in $processes) {if (-not $process.HasExited) {$process.Kill($true)}}
+        if ($pipeline) {$pipeline.Dispose()}
+        $null=& $invoke 'Get-Job | Remove-Job -Force'
+        $runspace.Dispose()
+    }
+}
 Test 'aggregate gate stops its suites and removes only its own jobs when its host cancels it' {
     $fixture=New-BootstrapFixture 'cancelled gate'
     Write-FixtureText "$fixture/tools/verify.ps1" ([IO.File]::ReadAllText((Join-Path $root 'tools/verify.ps1')))
@@ -117,31 +151,40 @@ $marker=Join-Path $PSScriptRoot 'child.pid'
 Start-Sleep -Seconds 30
 '@
     $suites=@('tests','tests/bootstrap','tests/integrate' | ForEach-Object {Join-Path $fixture $_})
-    $markers=@($suites | ForEach-Object {Join-Path $_ 'started.pid'})+(Join-Path $fixture 'tests/integrate/child.pid')
-    $beats={@($suites | ForEach-Object {[IO.File]::ReadAllText((Join-Path $_ 'heartbeat'))}) -join ','}
-    $runspace=[RunspaceFactory]::CreateRunspace();$runspace.Open()
-    function Invoke-InRunspace([string]$Script) {$shell=[PowerShell]::Create();$shell.Runspace=$runspace;try {@($shell.AddScript($Script).Invoke())} finally {$shell.Dispose()}}
-    $processes=@();$pipeline=$null
-    try {
-        $null=Invoke-InRunspace 'Start-ThreadJob -Name unrelated -ScriptBlock {Start-Sleep -Seconds 60}'
-        $pipeline=[PowerShell]::Create();$pipeline.Runspace=$runspace
-        $null=$pipeline.AddCommand("$fixture/tools/verify.ps1").BeginInvoke()
-        $waiting={@($markers+@($suites | ForEach-Object {Join-Path $_ 'heartbeat'}) | Where-Object {-not (Test-Path -LiteralPath $_)})}
-        $deadline=[DateTime]::UtcNow.AddSeconds(30)
-        while ((& $waiting).Count -and [DateTime]::UtcNow -lt $deadline) {Start-Sleep -Milliseconds 100}
-        Assert ((& $waiting).Count -eq 0) "The suites did not all start: $((& $waiting) -join ', ')"
-        $processes=@(foreach ($marker in $markers) {[Diagnostics.Process]::GetProcessById([int][IO.File]::ReadAllText($marker))})
-        $watch=[Diagnostics.Stopwatch]::StartNew();$pipeline.Stop();$watch.Stop()
-        Assert ($watch.Elapsed.TotalSeconds -lt 10) "Cancelling the gate took $($watch.Elapsed.TotalSeconds) seconds."
-        Assert (@($processes | Where-Object {-not $_.WaitForExit(10000)}).Count -eq 0) 'A suite or a process it started kept running after the gate was cancelled.'
-        $before=& $beats;Start-Sleep -Milliseconds 300
-        Assert ((& $beats) -eq $before) 'Suite heartbeats continued after the gate was cancelled.'
-        $left=@(Invoke-InRunspace 'Get-Job | ForEach-Object Name')
-        Assert (($left -join ',') -eq 'unrelated') "The gate left the wrong jobs in its session: $($left -join ', ')"
-    } finally {
-        foreach ($process in $processes) {if (-not $process.HasExited) {$process.Kill($true)}}
-        if ($pipeline) {$pipeline.Dispose()}
-        $null=Invoke-InRunspace 'Get-Job | Remove-Job -Force'
-        $runspace.Dispose()
+    Assert-GateCancellation $fixture (@($suites | ForEach-Object {Join-Path $_ 'started.pid'})+(Join-Path $fixture 'tests/integrate/child.pid')) @($suites | ForEach-Object {Join-Path $_ 'heartbeat'})
+}
+Test 'aggregate gate cancellation also ends a suite that closed its output and the child of one that exited' {
+    $fixture=New-BootstrapFixture 'cancelled transitions'
+    Write-FixtureText "$fixture/tools/verify.ps1" ([IO.File]::ReadAllText((Join-Path $root 'tools/verify.ps1')))
+    $record=@'
+$marker=Join-Path $PSScriptRoot ([IO.Path]::GetFileNameWithoutExtension($PSCommandPath)+'.pid')
+[IO.File]::WriteAllText("$marker.tmp",[string]$PID); [IO.File]::Move("$marker.tmp",$marker)
+'@
+    $beat=@'
+for ($beat=1; $beat -le 300; $beat++) {[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'heartbeat'),[string]$beat); Start-Sleep -Milliseconds 100}
+'@
+    # Release closes its output and runs on, so its job's reads end before the suite does.
+    Write-FixtureText "$fixture/tests/run-tests.ps1" (($record,@'
+Add-Type -Namespace Fixture -Name Std -MemberDefinition '[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n); [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);'
+foreach ($stream in -11,-12) {$null=[Fixture.Std]::CloseHandle([Fixture.Std]::GetStdHandle($stream))}
+'@,$beat) -join "`n")
+    # Bootstrap starts a child that shares its output, then exits 37 when told to, leaving the child beating.
+    Write-FixtureText "$fixture/tests/bootstrap/run-tests.ps1" (($record,@'
+$start=[Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'))
+foreach ($argument in '-NoProfile','-File',(Join-Path $PSScriptRoot 'child.ps1')) {$start.ArgumentList.Add($argument)}
+$null=[Diagnostics.Process]::Start($start)
+while (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'exit-now'))) {Start-Sleep -Milliseconds 50}
+exit 37
+'@) -join "`n")
+    Write-FixtureText "$fixture/tests/bootstrap/child.ps1" (($record,$beat) -join "`n")
+    Write-FixtureText "$fixture/tests/integrate/run-tests.ps1" (($record,$beat) -join "`n")
+    $suites=@('tests','tests/bootstrap','tests/integrate' | ForEach-Object {Join-Path $fixture $_})
+    $markers=@("$($suites[0])/run-tests.pid","$($suites[1])/run-tests.pid","$($suites[1])/child.pid","$($suites[2])/run-tests.pid")
+    Assert-GateCancellation $fixture $markers @($suites | ForEach-Object {Join-Path $_ 'heartbeat'}) {
+        param($Processes)
+        Write-FixtureText "$($suites[1])/exit-now" ''
+        Assert ($Processes[1].WaitForExit(10000)) 'The bootstrap stub did not exit before the cancellation.'
+        # Gives release's job time to see its closed output and reach its final wait for the process.
+        Start-Sleep -Milliseconds 500
     }
 }
