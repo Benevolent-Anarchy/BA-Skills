@@ -10,6 +10,20 @@ function Save-MigrationCommit([string]$Repo, [string]$Message) {
     Invoke-FixtureGit $Repo @('add','--all') | Out-Null
     Invoke-FixtureGit $Repo @('commit','--quiet','-m',$Message) | Out-Null
 }
+# Runs $Inject once inside the release module, just before it plans $Selection against a baseline snapshot.
+function Set-PlannerCommitProbe([string]$Selection, [scriptblock]$Inject) {
+    & (Get-Module Release) {param($selection,$inject)
+        $script:PlannerProbe=@{planner=${function:Get-ReleasePlan};selection=$selection;inject=$inject}
+        function script:Get-ReleasePlan([string]$Repository, [string[]]$Destination=@(), $BaselineSnapshot=$null, [string]$StateRoot, [string]$VersionChange='current') {
+            $probe=$script:PlannerProbe
+            if ($probe.inject -and $null -ne $BaselineSnapshot -and ($Destination -join ',') -ceq $probe.selection) {$run=$probe.inject;$probe.inject=$null;& $run}
+            & $probe.planner -Repository $Repository -Destination $Destination -BaselineSnapshot $BaselineSnapshot -StateRoot $StateRoot -VersionChange $VersionChange
+        }
+    } $Selection $Inject
+}
+function Clear-PlannerCommitProbe {
+    & (Get-Module Release) {Set-Item function:script:Get-ReleasePlan $script:PlannerProbe.planner}
+}
 
 Test 'itch-only release adds Steam configured later through an explicit, resumable migration without repeating itch work' {
     $repo=New-Fixture 'migration-steam'
@@ -114,4 +128,53 @@ Test 'a store configured later with its own Android counter migrates once and re
     $desktop=@($state.artifacts | Where-Object preset -NE 'Android existing AAB');$aab=@($state.artifacts | Where-Object preset -EQ 'Android existing AAB')[0]
     Assert ($result.status -eq 'prepared' -and (Get-ReleaseConfiguration $repo).version -eq '1.2.3') 'Migrated Play extension did not prepare at the same version.'
     Assert ((ConvertTo-Json $desktop -Depth 20 -Compress) -ceq (ConvertTo-Json @($original.artifacts) -Depth 20 -Compress) -and $aab.sourceCommit -ceq $state.plan.head -and $aab.sourceCommit -cne $original.plan.head) 'Later Play rebuilt desktops or concealed the AAB source commit.'
+}
+
+Test 'migration refuses an unselected added store until its baseline is confirmed, then lets it catch up' {
+    $repo=New-StoreFixture 'migration-unselected'
+    Change-Config $repo {param($c) $c.distributions.Remove('steam');$c.distributions.Remove('google-play');$c.exports.Remove('aab')}
+    Save-MigrationCommit $repo 'Release on itch only'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows') (Join-Path $sandbox 'migration-unselected-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json';$before=Get-Content $stateFile -Raw
+    $itchOnly=Invoke-FixtureGit $repo @('rev-parse','HEAD')
+    foreach ($case in @(@{baseline=$null;pattern='google-play: Confirm its last live'},@{baseline='HEAD';pattern='baseline for google-play must precede'},@{baseline='v1.2.2';pattern=$null})) {
+        Invoke-FixtureGit $repo @('reset','--quiet','--hard',$itchOnly) | Out-Null
+        Change-Config $repo {param($c)
+            $c.exports.aab='Android existing AAB'
+            $c.distributions.steam=@{appId=100;branch='default';exclude=@('*.pdb');depots=[ordered]@{'101'='windows';'102'='linux'}}
+            $c.distributions['google-play']=@{export='aab';track='production';releaseStatus='completed';language='en-US';retainVersionCodes=@('11');previousRelease=$case.baseline}
+        }
+        Save-MigrationCommit $repo 'Configure Steam and Play, selecting only Steam'
+        if ($case.pattern) {
+            Expect-Error {Expand-ReleaseDestinations $prepared.statePath @('steam') $engine -MigrateConfiguration} $case.pattern
+            Assert ((Get-Content $stateFile -Raw) -ceq $before) "An unready unselected store was adopted: $($case.pattern)"
+        }
+    }
+    $migrated=Expand-ReleaseDestinations $prepared.statePath @('steam') $engine -MigrateConfiguration
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    Assert ($migrated.status -eq 'prepared' -and $state.history[0].configurationMigration.addedDestinations -contains 'google-play' -and $state.destinations['google-play'].status -eq 'not-selected') 'Confirmed unselected store was not adopted.'
+    $play=Expand-ReleaseDestinations $prepared.statePath @('google-play') $engine
+    Assert ($play.status -eq 'prepared') "Adopted store could not catch up through ordinary extend: $($play.status)"
+}
+
+Test 'extension saves nothing when a commit lands between validation and planning' {
+    $repo=New-Fixture 'migration-concurrent'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows') (Join-Path $sandbox 'migration-concurrent-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan) | Out-Null
+    $before=Get-Content $stateFile -Raw
+    Add-MigrationSteam $repo
+    Save-MigrationCommit $repo 'Configure Steam'
+    Set-PlannerCommitProbe 'itch-windows' {Change-Config $repo {param($c) $c.distributions.itch.game='example/other-game'};Save-MigrationCommit $repo 'Concurrent itch game change'}
+    try {Expect-Error {Expand-ReleaseDestinations $prepared.statePath @('steam') $engine -MigrateConfiguration} 'changed during migration'}
+    finally {Clear-PlannerCommitProbe}
+    Assert ((Get-Content $stateFile -Raw) -ceq $before) 'A commit that skipped migration validation was saved.'
+    $repo=New-StoreFixture 'extension-concurrent'
+    $prepared=Invoke-ReleasePrepare $repo @('steam') (Join-Path $sandbox 'extension-concurrent-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json';$before=Get-Content $stateFile -Raw
+    Set-PlannerCommitProbe 'itch-windows,steam' {Change-Config $repo {param($c) $c.distributions.itch.game='example/other-game'};Save-MigrationCommit $repo 'Concurrent itch game change'}
+    try {Expect-Error {Expand-ReleaseDestinations $prepared.statePath @('itch-windows') $engine} 'changed during extension'}
+    finally {Clear-PlannerCommitProbe}
+    Assert ((Get-Content $stateFile -Raw) -ceq $before) 'Ordinary extension saved a plan for a commit it never checked.'
 }

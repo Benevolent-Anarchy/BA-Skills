@@ -156,7 +156,9 @@ setup's `stores` with the complete retained list, such as `["itch", "steam",
 "notes"]`, plus the new store's inspected settings and its own confirmed
 `previousRelease`. Leave every existing setting as it is: a migration may only
 add stores or itch channels, export aliases, and standalone checks for presets
-that had none. Commit that release.json change by itself, then run `extend` with
-`-MigrateConfiguration`. [Execution](execution.md#extending-a-prepared-release)
-states exactly when ordinary `extend` is enough and what migration refuses.
-Anything else needs a new release.
+that had none. Every added store is adopted, selected or not, so add only stores
+whose settings and baseline are confirmed. Commit that release.json change by
+itself, then run `extend` with `-MigrateConfiguration`.
+[Execution](execution.md#extending-a-prepared-release) states exactly when
+ordinary `extend` is enough and what migration refuses. Anything else needs a
+new release.

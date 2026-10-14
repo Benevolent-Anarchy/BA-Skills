@@ -169,15 +169,21 @@ review the release.json diff with the user and commit it by itself. Then repeat
 names the destinations the change would add.
 
 Migration accepts only additions: new destination IDs with their baselines, export
-aliases, and standalone checks for presets that had none. It refuses all of the
-following, leaving state.json unchanged; prepare a new version instead:
+aliases, and standalone checks for presets that had none. It adopts every added
+destination, selected or not, and freezes it with the release, so each one must
+already be complete: a confirmed baseline that precedes the original source commit
+and every setting its store needs. Leave a store that is not ready out of the
+committed change and migrate it later. Migration refuses all of the following,
+leaving state.json unchanged; prepare a new version instead:
 
 - an uncommitted change, any other changed file, or source that does not descend
   from the prepared commit;
 - any change to an existing destination or its baseline, root `previousRelease`
   (or the commit it resolves to), `verification.gate`, an existing standalone
   check, `androidVersionCodePolicy` or `project`;
-- changed artifacts or published notes, as for any extension.
+- changed artifacts or published notes, as for any extension;
+- a source or release.json change that arrives while migration runs: the saved
+  plans must come from the exact commit and configuration it validated.
 
 Migration reads the prepared release.json back from Git and checks it against the
 recorded configuration hash; only line endings may differ. It appends the original

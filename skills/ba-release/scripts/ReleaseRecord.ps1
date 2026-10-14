@@ -161,15 +161,24 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
         Assert-ReleaseArtifacts $StatePath $state
         Assert-ReleaseSubmittedNotes $state $StatePath
         if ($state.Contains('canonicalNotesSha256') -and $state.canonicalNotesSha256 -cne (Get-FileHash (Join-Path $StatePath 'notes.md')).Hash.ToLowerInvariant()) {throw 'Canonical notes changed after publication.'}
+        # Every introduced destination is frozen with the release, selected or not, so each must be complete now.
+        $adopted=@(@($selected)+@($migration.addedDestinations) | Sort-Object -Unique -CaseSensitive)
+        $introduced=@($adopted | Where-Object {$_ -cnotin $state.plan.selectedDestinations})
+        $observed=Get-ReleasePlan $settings.repository $adopted $null $stateRoot
+        Assert-ReleaseAddedBaselines $state $observed.baselines $introduced
         $snapshot=[ordered]@{}
         foreach ($id in $state.plan.baselines.Keys) {$snapshot[$id]=$state.plan.baselines[$id]}
-        foreach ($id in $added) {if ($fresh.baselines.Contains($id)) {$snapshot[$id]=$fresh.baselines[$id]}}
-        $expanded=Get-ReleasePlan $settings.repository $selected $snapshot $stateRoot
-        if (-not $expanded.ready) {throw "Extension plan is blocked: $($expanded.blockers -join ' ')"}
+        foreach ($id in $introduced) {if ($observed.baselines.Contains($id)) {$snapshot[$id]=$observed.baselines[$id]}}
+        $expanded=Get-ReleasePlan $settings.repository $adopted $snapshot $stateRoot
+        if (-not $expanded.ready) {throw "Configuration migration adopts every added destination, selected or not; complete them or leave them out of the committed change. Plan is blocked: $($expanded.blockers -join ' ')"}
         # Phase one rebinds only the original selection, keeping its frozen baselines and notes boundary.
         $migrated=Get-ReleasePlan $settings.repository $state.plan.selectedDestinations $state.plan.baselines $stateRoot
         if (-not $migrated.ready) {throw "Migrated release plan is blocked: $($migrated.blockers -join ' ')"}
         if ($migrated.previousCommit -cne $state.plan.previousCommit) {throw 'Configuration migration cannot move the previous-release boundary of the prepared release.'}
+        # Planning rereads HEAD and release.json, so save only plans built from the snapshot that passed validation.
+        foreach ($candidate in @($fresh,$observed,$expanded,$migrated)) {
+            if ($candidate.head -cne $migration.toHead -or $candidate.configSha256 -cne $migration.toConfigSha256) {throw 'Source or release.json changed during migration; nothing was saved. Review the new change, then retry.'}
+        }
         if (-not $MigrateConfiguration) {
             $what=if ($migration.addedDestinations.Count) {'adding '+($migration.addedDestinations -join ', ')} else {'adding no destinations'}
             throw "release.json changed since preparation, $what. Review that committed change, then repeat extend with -MigrateConfiguration."
@@ -221,6 +230,7 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
     foreach ($id in $added) {if ($observed.baselines.Contains($id)) {$snapshot[$id]=$observed.baselines[$id]}}
     $plan=Get-ReleasePlan $settings.repository $selected $snapshot
     if (-not $plan.ready) {throw "Extension plan is blocked: $($plan.blockers -join ' ')"}
+    if ($plan.head -cne $head -or $plan.configSha256 -cne $state.plan.configSha256) {throw 'Source or release.json changed during extension; nothing was saved. Inspect the change, then retry.'}
         $current=[IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable
         if ($current.plan.planId -cne $state.plan.planId) {throw 'Release changed during extension; inspect current state before retrying.'}
         Assert-ReleaseArtifacts $StatePath $state
