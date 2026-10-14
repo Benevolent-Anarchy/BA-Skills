@@ -113,15 +113,6 @@ nothing: the standalone check withholds nothing and the Butler dry-run passes.
 Each selected itch desktop channel also needs a `verification.standalone` check
 with an inspected script, or the plan blocks; it runs on the export as built.
 
-To add Steam later, apply setup answers whose `stores` array keeps `itch` and
-adds `steam`, with Steam's `appId`, `branch`, `depots` and confirmed
-`previousRelease`. The array replaces the store selection, so `["steam"]` alone
-removes itch; interactive setup cannot yet add a store to an existing
-configuration. The new store applies to later preparations. Ordinary `extend`
-adds only destinations declared in the unchanged configuration that prepared a
-release, so it cannot ship an already prepared itch-only release to newly
-configured Steam.
-
 ## Baselines and source metadata
 
 Each store may override `previousRelease`; an itch channel may override it again.
