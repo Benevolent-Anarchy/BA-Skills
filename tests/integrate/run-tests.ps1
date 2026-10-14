@@ -149,16 +149,80 @@ function Push-ElsewhereCommit([string]$Repository, [string]$Branch) {
     return (Invoke-FixtureGit $other @('rev-parse', 'HEAD')).Trim()
 }
 
+## A stand-in for the GitHub CLI's `gh pr view` of one pull request. Like GitHub, it
+## reads the head from the branch on the fixture's bare origin, keeping the last one seen
+## once the branch is gone, and reports MERGED once origin's main contains it. $State
+## overrides its fields (isDraft, headRefName, baseRefName, closing, neverMerge,
+## mergeDelayCalls, fail), and $Overrides changes them from a given call on, keyed by the
+## call's number. Returns the script and its state file.
+function New-FakePullRequest([string]$Repository, [string]$Branch, [hashtable]$State = @{}, [hashtable]$Overrides = @{}) {
+    $remote = (Invoke-FixtureGit $Repository @('remote', 'get-url', 'origin')).Trim()
+    $fields = @{
+        remote = $remote; branch = $Branch; base = 'main'; headRefName = $Branch; baseRefName = 'main'
+        isDraft = $false; closing = @(); neverMerge = $false; mergeDelayCalls = 0; fail = $false
+        calls = 0; lastHead = $null; overrides = $Overrides
+    }
+    foreach ($key in $State.Keys) { $fields[$key] = $State[$key] }
+    $statePath = Join-Path $sandbox ('pr-state-' + [guid]::NewGuid().ToString('N') + '.json')
+    Write-FixtureText $statePath ($fields | ConvertTo-Json -Depth 8)
+    $fake = Join-Path $sandbox ('gh-pr-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    $text = @'
+$statePath = '__STATE__'
+$s = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -AsHashtable
+$s.calls = [int]$s.calls + 1
+$key = "$($s.calls)"
+if ($s.overrides -and $s.overrides.ContainsKey($key)) { foreach ($k in @($s.overrides[$key].Keys)) { $s[$k] = $s.overrides[$key][$k] } }
+$tip = & git -C $s.remote rev-parse --verify --quiet "refs/heads/$($s.branch)" 2>$null
+if ($tip) { $s.lastHead = "$tip".Trim() }
+$merged = $false
+if ($s.lastHead) { & git -C $s.remote merge-base --is-ancestor $s.lastHead "refs/heads/$($s.base)" 2>$null; $merged = $LASTEXITCODE -eq 0 }
+if ($s.neverMerge) { $merged = $false }
+elseif ($merged -and [int]$s.mergeDelayCalls -gt 0) { $s.mergeDelayCalls = [int]$s.mergeDelayCalls - 1; $merged = $false }
+Set-Content -LiteralPath $statePath -Value ($s | ConvertTo-Json -Depth 8)
+if ($s.fail) { 'HTTP 502: Bad Gateway'; exit 1 }
+[ordered]@{
+    state = if ($merged) { 'MERGED' } else { 'OPEN' }; isDraft = [bool]$s.isDraft
+    headRefOid = $s.lastHead; headRefName = $s.headRefName; baseRefName = $s.baseRefName
+    closingIssuesReferences = @($s.closing)
+} | ConvertTo-Json -Depth 8
+exit 0
+'@
+    Write-FixtureText $fake $text.Replace('__STATE__', $statePath.Replace("'", "''"))
+    return [pscustomobject]@{ Path = $fake; State = $statePath }
+}
+
+## Changes fields of a stand-in pull request's state from now on.
+function Set-FakePullRequest($Fake, [hashtable]$Fields) {
+    $state = Get-Content -LiteralPath $Fake.State -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($key in $Fields.Keys) { $state[$key] = $Fields[$key] }
+    Write-FixtureText $Fake.State ($state | ConvertTo-Json -Depth 8)
+}
+
+## The parameters landing $Head as step $Rehearsed of pull request $Number takes.
+function Get-LandParameters([string]$Rehearsal, [string]$Branch, [string]$Head, [string]$Updated, [string]$Base, [string]$Rehearsed, $Fake, [int]$Number = 1) {
+    return @{
+        Worktree = $Rehearsal; PullRequest = $Number; Branch = $Branch; ApprovedHead = $Head; Updated = $Updated
+        BaseBranch = 'main'; ExpectedBase = $Base; Rehearsed = $Rehearsed; Message = "Merge pull request #$Number from $Branch`n`n$Branch"
+        GitHubCli = $Fake.Path; PollSeconds = 1; TimeoutSeconds = 6
+    }
+}
+
 ## Lands $Head as step $Rehearsed in $Rehearsal: updates it against $Base, then lands it
-## on origin's main; returns both scripts' results.
-function Invoke-Step([string]$Rehearsal, [string]$Branch, [string]$Head, [string]$Base, [string]$Rehearsed) {
+## on origin's main with $Fake standing in for GitHub; returns both scripts' results.
+function Invoke-Step([string]$Rehearsal, [string]$Branch, [string]$Head, [string]$Base, [string]$Rehearsed, $Fake, [int]$Number = 1) {
     $update = Invoke-IntegrateScript 'update' @{ Worktree = $Rehearsal; Head = $Head; Base = $Base; Rehearsed = $Rehearsed }
     if ($update.Code -ne 0) { return [pscustomobject]@{ Update = $update; Land = $null } }
-    $land = Invoke-IntegrateScript 'land' @{
-        Worktree = $Rehearsal; Branch = $Branch; ApprovedHead = $Head; Updated = $update.Result.commit
-        BaseBranch = 'main'; ExpectedBase = $Base; Rehearsed = $Rehearsed; Message = "Merge pull request from $Branch`n`n$Branch"
-    }
+    $land = Invoke-IntegrateScript 'land' (Get-LandParameters $Rehearsal $Branch $Head $update.Result.commit $Base $Rehearsed $Fake $Number)
     return [pscustomobject]@{ Update = $update; Land = $land }
+}
+
+## Installs a pre-commit hook in $Repository, shared by its worktrees, that runs $Command
+## there: a way to move a remote ref between landing's checks and its pushes, since
+## landing makes its merge commit after checking and before pushing.
+function Set-PreCommitHook([string]$Repository, [string]$Command) {
+    $hooks = (Invoke-FixtureGit $Repository @('rev-parse', '--git-common-dir')).Trim()
+    if (-not [IO.Path]::IsPathRooted($hooks)) { $hooks = Join-Path $Repository $hooks }
+    Write-FixtureText (Join-Path $hooks 'hooks/pre-commit') "#!/bin/sh`n$Command`n"
 }
 
 ## The survey's record for PR $Number.
@@ -268,6 +332,30 @@ Test 'a ready pull request built on a draft names the draft work it contains' {
     $included = @($pr.includesUnready)
     Assert ($included.Count -eq 1 -and $included[0].number -eq 1 -and $included[0].reason -eq 'draft') "Draft work not named: $($pr | ConvertTo-Json -Compress)"
     Assert ($pr.reason -match 'unmerged work of #1 \(draft\)') "Reason does not say so: $($pr.reason)"
+}
+
+Test 'draft work is found after the draft moves on past where the ready branch forked' {
+    # The reviewer's re-review case: the draft's later commit is not in the ready branch,
+    # but the commit the ready branch forked from still is.
+    $repo = New-FixtureRepository @{ 'a.txt' = "a`n" }
+    Add-FixtureCommit $repo 'draft-work' 'main' @{ 'unready.txt' = "u`n" } | Out-Null
+    $ready = Add-FixtureCommit $repo 'ready-work' 'draft-work' @{ 'ready.txt' = "r`n" }
+    $advanced = Add-FixtureCommit $repo 'draft-work' 'main' @{ 'unready.txt' = "u2`n" }
+    $run = Invoke-Survey $repo @((New-PullRequest 1 'draft-work' $advanced -Draft), (New-PullRequest 2 'ready-work' $ready))
+    Assert ($run.Code -eq 0) "Survey failed: $($run.Result.error)"
+    $included = @((Get-SurveyPullRequest $run.Result 2).includesUnready)
+    Assert ($included.Count -eq 1 -and $included[0].number -eq 1 -and $included[0].sharedCommits -eq 1) "Advanced draft missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'a draft stacked on a ready pull request is not counted against it' {
+    # The draft shares only the ready pull request's own commits, even after the ready one
+    # moves on.
+    $repo = New-FixtureRepository @{ 'a.txt' = "a`n" }
+    Add-FixtureCommit $repo 'ready-work' 'main' @{ 'ready.txt' = "r`n" } | Out-Null
+    $draft = Add-FixtureCommit $repo 'draft-work' 'ready-work' @{ 'later.txt' = "l`n" }
+    $ready = Add-FixtureCommit $repo 'ready-work' 'main' @{ 'ready.txt' = "r2`n" }
+    $run = Invoke-Survey $repo @((New-PullRequest 1 'ready-work' $ready), (New-PullRequest 2 'draft-work' $draft 'ready-work' -Draft))
+    Assert ($run.Code -eq 0 -and @((Get-SurveyPullRequest $run.Result 1).includesUnready).Count -eq 0) "Stacked draft counted: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
 }
 
 Test 'unready work already in the base is not reported' {
@@ -444,6 +532,23 @@ Test 'an update refuses a worktree with uncommitted changes' {
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'uncommitted') "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
 }
 
+Test 'an update refuses a merge already in progress and keeps its resolution' {
+    # The reviewer's case: someone's resolution of a conflicted merge, staged and not yet
+    # committed, must survive an update that refuses to start.
+    $repo = New-FixtureRepository @{ 'log.md' = "entry 0`n" }
+    $one = Add-FixtureCommit $repo 'one' 'main' @{ 'log.md' = "entry 0`nentry 1`n" }
+    $two = Add-FixtureCommit $repo 'two' 'main' @{ 'log.md' = "entry 0`nentry 2`n" }
+    $rehearsal = New-Rehearsal $repo $one
+    & git -C $rehearsal merge --no-ff --no-commit $two 2>&1 | Out-Null
+    Write-FixtureText (Join-Path $rehearsal 'log.md') "careful manual resolution`n"
+    Invoke-FixtureGit $rehearsal @('add', 'log.md') | Out-Null
+    $run = Invoke-IntegrateScript 'update' @{ Worktree = $rehearsal; Head = $two; Base = $one; Rehearsed = $one }
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'merge in progress') "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
+    Assert ((Get-FixtureRef $rehearsal 'MERGE_HEAD') -eq $two) 'The merge in progress was abandoned.'
+    Assert ((Get-Content -LiteralPath (Join-Path $rehearsal 'log.md') -Raw) -eq "careful manual resolution`n") 'The resolution was lost.'
+    Assert ((Invoke-FixtureGit $rehearsal @('show', ':log.md')).Trim() -eq 'careful manual resolution') 'The staged resolution was lost.'
+}
+
 Test 'two pull requests land in order, each as a merge commit holding the rehearsed tree' {
     $repo = New-RemoteFixture @{ 'a.txt' = "a`n"; 'b.txt' = "b`n" }
     $one = Add-FixtureCommit $repo 'one' 'main' @{ 'a.txt' = "a1`n" }
@@ -454,16 +559,16 @@ Test 'two pull requests land in order, each as a merge commit holding the rehear
     $stepOne = Add-RehearsalStep $rehearsal $one
     $stepTwo = Add-RehearsalStep $rehearsal $two
 
-    $first = Invoke-Step $rehearsal 'one' $one $base $stepOne
-    Assert ($first.Land.Code -eq 0 -and $first.Land.Result.landed -and -not $first.Land.Result.branchPushed) "First landing failed: $($first.Update.Result.error) $($first.Land.Result.error)"
+    $first = Invoke-Step $rehearsal 'one' $one $base $stepOne (New-FakePullRequest $repo 'one') 1
+    Assert ($first.Land.Code -eq 0 -and $first.Land.Result.landed -and $first.Land.Result.merged -and -not $first.Land.Result.branchPushed) "First landing failed: $($first.Update.Result.error) $($first.Land.Result.error)"
     $mergeOne = $first.Land.Result.mergeCommit
     Assert ((Get-OriginBranch $repo 'main') -eq $mergeOne) 'Origin main is not the first merge commit.'
     $parents = (Invoke-FixtureGit $repo @('rev-list', '--parents', '-n', '1', $mergeOne)).Trim() -split ' '
     Assert ($parents[1] -eq $base -and $parents[2] -eq $one) "Wrong parents: $($parents -join ' ')"
-    Assert ((Invoke-FixtureGit $repo @('log', '-1', '--format=%s', $mergeOne)).Trim() -eq 'Merge pull request from one') 'Wrong merge message.'
+    Assert ((Invoke-FixtureGit $repo @('log', '-1', '--format=%s', $mergeOne)).Trim() -eq 'Merge pull request #1 from one') 'Wrong merge message.'
 
-    $second = Invoke-Step $rehearsal 'two' $two $mergeOne $stepTwo
-    Assert ($second.Land.Code -eq 0 -and $second.Land.Result.branchPushed) "Second landing failed: $($second.Update.Result.error) $($second.Land.Result.error)"
+    $second = Invoke-Step $rehearsal 'two' $two $mergeOne $stepTwo (New-FakePullRequest $repo 'two') 2
+    Assert ($second.Land.Code -eq 0 -and $second.Land.Result.branchPushed -and $second.Land.Result.merged) "Second landing failed: $($second.Update.Result.error) $($second.Land.Result.error)"
     Assert ((Get-OriginBranch $repo 'two') -eq $second.Update.Result.commit) 'The update was not pushed to the branch.'
     $tree = (Invoke-FixtureGit $repo @('rev-parse', "$(Get-OriginBranch $repo 'main')^{tree}")).Trim()
     Assert ($tree -eq (Invoke-FixtureGit $repo @('rev-parse', "$stepTwo^{tree}")).Trim()) 'Origin main does not hold the rehearsed tree.'
@@ -479,7 +584,7 @@ Test 'landing refuses a base that moved after the rehearsal and pushes nothing' 
     $rehearsal = New-Rehearsal $repo $base
     $step = Add-RehearsalStep $rehearsal $one
     $moved = Push-ElsewhereCommit $repo 'main'
-    $run = Invoke-Step $rehearsal 'one' $one $base $step
+    $run = Invoke-Step $rehearsal 'one' $one $base $step (New-FakePullRequest $repo 'one')
     Assert ($run.Land.Code -eq 1 -and $run.Land.Result.error -match 'main has moved' -and -not $run.Land.Result.branchPushed) "Expected a refusal: $($run.Land.Result | ConvertTo-Json -Compress)"
     Assert ((Get-OriginBranch $repo 'main') -eq $moved -and (Get-OriginBranch $repo 'one') -eq $one) 'Something was pushed.'
 }
@@ -492,7 +597,7 @@ Test 'landing refuses a branch that moved after approval and pushes nothing' {
     $rehearsal = New-Rehearsal $repo $base
     $step = Add-RehearsalStep $rehearsal $one
     $moved = Push-ElsewhereCommit $repo 'one'
-    $run = Invoke-Step $rehearsal 'one' $one $base $step
+    $run = Invoke-Step $rehearsal 'one' $one $base $step (New-FakePullRequest $repo 'one')
     Assert ($run.Land.Code -eq 1 -and $run.Land.Result.error -match 'one has moved') "Expected a refusal: $($run.Land.Result | ConvertTo-Json -Compress)"
     Assert ((Get-OriginBranch $repo 'main') -eq $base -and (Get-OriginBranch $repo 'one') -eq $moved) 'Something was pushed.'
 }
@@ -509,22 +614,115 @@ Test 'a base push the remote rejects lands nothing and says the branch holds the
     $base = Get-FixtureRef $repo 'main'
     $rehearsal = New-Rehearsal $repo $base
     $step = Add-RehearsalStep $rehearsal $one
-    $run = Invoke-Step $rehearsal 'one' $one $base $step
-    Assert ($run.Land.Code -eq 1 -and -not $run.Land.Result.landed -and $run.Land.Result.branchPushed) "Expected a rejected landing after the branch push: $($run.Land.Result | ConvertTo-Json -Compress)"
-    Assert ($run.Land.Result.error -match 'Pushing main was rejected' -and $run.Land.Result.error -match 'now holds the update') "Unclear error: $($run.Land.Result.error)"
+    $run = Invoke-Step $rehearsal 'one' $one $base $step (New-FakePullRequest $repo 'one')
+    Assert ($run.Land.Code -eq 1 -and -not $run.Land.Result.landed -and $run.Land.Result.branchPushed) "Expected a refused landing after the branch push: $($run.Land.Result | ConvertTo-Json -Compress)"
+    Assert ($run.Land.Result.error -match 'Pushing main was refused' -and $run.Land.Result.error -match 'now holds the update') "Unclear error: $($run.Land.Result.error)"
     Assert ((Get-OriginBranch $repo 'main') -eq $base -and (Get-OriginBranch $repo 'one') -eq $run.Update.Result.commit) 'Origin is not as reported.'
+}
+
+## A remote fixture with branch 'one' pushed and rehearsed on main; with -Behind, main
+## moves on first, so landing must push an update to the branch.
+function New-LandingFixture([switch]$Behind) {
+    $repo = New-RemoteFixture @{ 'a.txt' = "a`n"; 'b.txt' = "b`n" }
+    $one = Add-FixtureCommit $repo 'one' 'main' @{ 'a.txt' = "a1`n" }
+    if ($Behind) { Add-FixtureCommit $repo 'main' 'main' @{ 'b.txt' = "b1`n" } | Out-Null }
+    Invoke-FixtureGit $repo @('push', '--quiet', 'origin', 'main', 'one') | Out-Null
+    $base = Get-FixtureRef $repo 'main'
+    $rehearsal = New-Rehearsal $repo $base
+    $step = Add-RehearsalStep $rehearsal $one
+    return [pscustomobject]@{ Repository = $repo; Head = $one; Base = $base; Rehearsal = $rehearsal; Step = $step }
+}
+
+Test 'landing refuses a pull request turned back into a draft, pushing nothing' {
+    # The reviewer's re-review case: the skill's own check passed, then the pull request
+    # became a draft while its git branches stayed exactly as approved.
+    $f = New-LandingFixture
+    $run = Invoke-Step $f.Rehearsal 'one' $f.Head $f.Base $f.Step (New-FakePullRequest $f.Repository 'one' @{ isDraft = $true })
+    Assert ($run.Land.Code -eq 1 -and $run.Land.Result.error -match 'draft again' -and $run.Land.Result.error -match 'nothing was pushed') "Expected a refusal: $($run.Land.Result | ConvertTo-Json -Compress)"
+    Assert ((Get-OriginBranch $f.Repository 'main') -eq $f.Base -and -not $run.Land.Result.landed) 'Main changed.'
+}
+
+Test 'landing refuses a pull request retargeted to another base, pushing nothing' {
+    $f = New-LandingFixture
+    $run = Invoke-Step $f.Rehearsal 'one' $f.Head $f.Base $f.Step (New-FakePullRequest $f.Repository 'one' @{ baseRefName = 'release' })
+    Assert ($run.Land.Code -eq 1 -and $run.Land.Result.error -match 'now targets release') "Expected a refusal: $($run.Land.Result | ConvertTo-Json -Compress)"
+    Assert ((Get-OriginBranch $f.Repository 'main') -eq $f.Base) 'Main changed.'
+}
+
+Test 'a pull request turned into a draft after the branch push does not land' {
+    # GitHub is read again just before the base push: the second read sees a draft.
+    $f = New-LandingFixture -Behind
+    $fake = New-FakePullRequest $f.Repository 'one' @{} @{ '2' = @{ isDraft = $true } }
+    $run = Invoke-Step $f.Rehearsal 'one' $f.Head $f.Base $f.Step $fake
+    Assert ($run.Land.Code -eq 1 -and $run.Land.Result.branchPushed -and -not $run.Land.Result.landed) "Expected the base push withheld: $($run.Land.Result | ConvertTo-Json -Compress)"
+    Assert ($run.Land.Result.error -match 'draft again' -and $run.Land.Result.error -match 'now holds the update') "Unclear error: $($run.Land.Result.error)"
+    Assert ((Get-OriginBranch $f.Repository 'main') -eq $f.Base) 'Main changed.'
+}
+
+Test 'a base moved back after the checks is not restored' {
+    # #18: another session resets main to its parent after landing has checked it. A plain
+    # push would fast-forward from the parent and restore the discarded commit.
+    $f = New-LandingFixture -Behind
+    $update = Invoke-IntegrateScript 'update' @{ Worktree = $f.Rehearsal; Head = $f.Head; Base = $f.Base; Rehearsed = $f.Step }
+    $parent = (Invoke-FixtureGit $f.Repository @('rev-parse', "$($f.Base)~1")).Trim()
+    Set-PreCommitHook $f.Repository "git push --quiet --force origin ${parent}:refs/heads/main"
+    $run = Invoke-IntegrateScript 'land' (Get-LandParameters $f.Rehearsal 'one' $f.Head $update.Result.commit $f.Base $f.Step (New-FakePullRequest $f.Repository 'one'))
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'Pushing main was refused' -and -not $run.Result.landed) "Expected the base push refused: $($run.Result | ConvertTo-Json -Compress)"
+    Assert ((Get-OriginBranch $f.Repository 'main') -eq $parent) 'The discarded commit was restored to main.'
+}
+
+Test 'a branch that vanishes after the checks is not recreated' {
+    $f = New-LandingFixture -Behind
+    $update = Invoke-IntegrateScript 'update' @{ Worktree = $f.Rehearsal; Head = $f.Head; Base = $f.Base; Rehearsed = $f.Step }
+    Set-PreCommitHook $f.Repository 'git push --quiet origin :refs/heads/one'
+    $run = Invoke-IntegrateScript 'land' (Get-LandParameters $f.Rehearsal 'one' $f.Head $update.Result.commit $f.Base $f.Step (New-FakePullRequest $f.Repository 'one'))
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'Pushing one was refused' -and -not $run.Result.branchPushed) "Expected the branch push refused: $($run.Result | ConvertTo-Json -Compress)"
+    Assert (-not (Get-OriginBranch $f.Repository 'one') -and (Get-OriginBranch $f.Repository 'main') -eq $f.Base) 'The branch was recreated or main changed.'
+}
+
+Test 'a GitHub error before landing pushes nothing' {
+    $f = New-LandingFixture -Behind
+    $run = Invoke-Step $f.Rehearsal 'one' $f.Head $f.Base $f.Step (New-FakePullRequest $f.Repository 'one' @{ fail = $true })
+    Assert ($run.Land.Code -eq 1 -and $run.Land.Result.error -match 'Could not read #1' -and -not $run.Land.Result.branchPushed) "Expected a refusal: $($run.Land.Result | ConvertTo-Json -Compress)"
+    Assert ((Get-OriginBranch $f.Repository 'one') -eq $f.Head -and (Get-OriginBranch $f.Repository 'main') -eq $f.Base) 'Something was pushed.'
+}
+
+Test 'a merge GitHub reports late is waited for' {
+    $f = New-LandingFixture
+    $run = Invoke-Step $f.Rehearsal 'one' $f.Head $f.Base $f.Step (New-FakePullRequest $f.Repository 'one' @{ mergeDelayCalls = 2 })
+    Assert ($run.Land.Code -eq 0 -and $run.Land.Result.merged -and $run.Land.Result.state -eq 'MERGED') "Expected the wait to succeed: $($run.Land.Result | ConvertTo-Json -Compress)"
+}
+
+Test 'GitHub not reporting the merge in time stops the run, and running again resumes' {
+    $f = New-LandingFixture -Behind
+    $fake = New-FakePullRequest $f.Repository 'one' @{ neverMerge = $true }
+    $first = Invoke-Step $f.Rehearsal 'one' $f.Head $f.Base $f.Step $fake
+    Assert ($first.Land.Code -eq 1 -and $first.Land.Result.landed -and -not $first.Land.Result.merged -and $first.Land.Result.error -match 'Run this again') "Expected a landed, unconfirmed stop: $($first.Land.Result | ConvertTo-Json -Compress)"
+    $merge = $first.Land.Result.mergeCommit
+    Set-FakePullRequest $fake @{ neverMerge = $false }
+    $again = Invoke-IntegrateScript 'land' (Get-LandParameters $f.Rehearsal 'one' $f.Head $first.Update.Result.commit $f.Base $f.Step $fake)
+    Assert ($again.Code -eq 0 -and $again.Result.resumed -and $again.Result.merged -and $again.Result.mergeCommit -eq $merge) "Expected a resumed confirmation: $($again.Result | ConvertTo-Json -Compress)"
+    Assert ((Get-OriginBranch $f.Repository 'main') -eq $merge) 'Main changed on resuming.'
+}
+
+Test 'closing issues keep their repository and URL' {
+    # The reviewer's case: two issues numbered 7 in different repositories.
+    $f = New-LandingFixture
+    $closing = @(
+        @{ number = 7; url = 'https://github.com/fixture/project/issues/7'; repository = @{ name = 'project'; owner = @{ login = 'fixture' } } },
+        @{ number = 7; url = 'https://github.com/fixture/public-issues/issues/7'; repository = @{ name = 'public-issues'; owner = @{ login = 'fixture' } } })
+    $run = Invoke-Step $f.Rehearsal 'one' $f.Head $f.Base $f.Step (New-FakePullRequest $f.Repository 'one' @{ closing = $closing })
+    Assert ($run.Land.Code -eq 0) "Landing failed: $($run.Land.Result.error)"
+    $issues = @($run.Land.Result.closingIssues)
+    Assert ($issues.Count -eq 2 -and (@($issues | ForEach-Object url) -join ' ') -eq 'https://github.com/fixture/project/issues/7 https://github.com/fixture/public-issues/issues/7' -and (@($issues | ForEach-Object repository) -join ' ') -eq 'fixture/project fixture/public-issues') "Identities lost: $($issues | ConvertTo-Json -Compress)"
 }
 
 ## Lands branch 'one' of a new remote fixture and returns the repository and its head.
 function New-LandedFixture {
-    $repo = New-RemoteFixture @{ 'a.txt' = "a`n" }
-    $one = Add-FixtureCommit $repo 'one' 'main' @{ 'a.txt' = "a1`n" }
-    Invoke-FixtureGit $repo @('push', '--quiet', 'origin', 'one') | Out-Null
-    $base = Get-FixtureRef $repo 'main'
-    $rehearsal = New-Rehearsal $repo $base
-    $run = Invoke-Step $rehearsal 'one' $one $base (Add-RehearsalStep $rehearsal $one)
+    $f = New-LandingFixture
+    $run = Invoke-Step $f.Rehearsal 'one' $f.Head $f.Base $f.Step (New-FakePullRequest $f.Repository 'one')
     if ($run.Land.Code -ne 0) { throw "Landing the fixture failed: $($run.Land.Result.error)" }
-    return [pscustomobject]@{ Repository = $repo; Head = $one }
+    return [pscustomobject]@{ Repository = $f.Repository; Head = $f.Head }
 }
 
 Test 'deleting a merged branch at its merged tip removes it' {

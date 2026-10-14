@@ -22,6 +22,11 @@ function Resolve-Commit([string]$Repository, [string]$Revision, [string]$What) {
     return $result.Lines[0]
 }
 
+# True when commit $Sha is available in $Repository.
+function Test-CommitExists([string]$Repository, [string]$Sha) {
+    return (Invoke-Git $Repository @('cat-file', '-e', "$Sha^{commit}") -Allowed 0, 1, 128).Code -eq 0
+}
+
 # True when commit $Ancestor is reachable from commit $Descendant.
 function Test-Ancestor([string]$Repository, [string]$Ancestor, [string]$Descendant) {
     return (Invoke-Git $Repository @('merge-base', '--is-ancestor', $Ancestor, $Descendant) -Allowed 0, 1).Code -eq 0
@@ -52,4 +57,4 @@ function Get-GitHubCli {
     return $gh
 }
 
-Export-ModuleMember -Function Invoke-Git, Resolve-Commit, Test-Ancestor, Get-RemoteBranch, Test-CleanWorktree, Get-GitHubCli
+Export-ModuleMember -Function Invoke-Git, Resolve-Commit, Test-CommitExists, Test-Ancestor, Get-RemoteBranch, Test-CleanWorktree, Get-GitHubCli

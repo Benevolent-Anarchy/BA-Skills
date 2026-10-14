@@ -117,6 +117,20 @@ function Test-Commit([string]$Sha) {
     return (Invoke-Git $Repository @('cat-file', '-e', "$Sha^{commit}") -Allowed 0, 1, 128).Code -eq 0
 }
 
+# How many commits the base lacks that the skipped pull request and the ready one share:
+# the unready history merging the ready one would land. It counts from where they
+# diverge, so a draft that moved on after the ready branch forked from it still counts.
+# A skipped pull request built on the ready one shares only the ready one's own commits,
+# so one that targets the ready branch, or contains its whole head, counts nothing.
+function Get-SharedUnmergedCommits($Skipped, $ReadyPr) {
+    if ($Skipped.baseRefName -eq $ReadyPr.headRefName) { return 0 }
+    $mergeBase = Invoke-Git $Repository @('merge-base', $Skipped.headRefOid, $ReadyPr.headRefOid) -Allowed 0, 1
+    if ($mergeBase.Code -ne 0 -or -not $mergeBase.Lines) { return 0 }
+    $shared = $mergeBase.Lines[0]
+    if ($shared -eq $ReadyPr.headRefOid) { return 0 }
+    return [int](Invoke-Git $Repository @('rev-list', '--count', "$baseSha..$shared")).Lines[0]
+}
+
 # The paths a three-way merge of two commits leaves in conflict; empty when it is clean.
 function Get-MergeConflicts([string]$Left, [string]$Right) {
     $result = Invoke-Git $Repository @('merge-tree', '--write-tree', '--name-only', '--no-messages', $Left, $Right) -Allowed 0, 1
@@ -180,8 +194,10 @@ try {
             number = $pr.number; title = $pr.title; url = $pr.url
             head = $pr.headRefName; headSha = $head; baseRef = $pr.baseRefName
             dependsOn = @()
-            includesUnready = @($pending | Where-Object { Test-Ancestor $Repository $_.pr.headRefOid $head } |
-                ForEach-Object { [ordered]@{ number = $_.pr.number; reason = $_.reason } })
+            includesUnready = @(foreach ($skippedPr in $pending) {
+                $shared = Get-SharedUnmergedCommits $skippedPr.pr $pr
+                if ($shared -gt 0) { [ordered]@{ number = $skippedPr.pr.number; reason = $skippedPr.reason; sharedCommits = $shared } }
+            })
             commits = [int](Invoke-Git $Repository @('rev-list', '--count', "$baseSha..$head")).Lines[0]
             behindBase = [int](Invoke-Git $Repository @('rev-list', '--count', "$head..$baseSha")).Lines[0]
             files = @((Invoke-Git $Repository @('diff', '--name-only', $mergeBase, $head)).Lines | Where-Object { $_ })

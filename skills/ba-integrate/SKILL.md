@@ -11,7 +11,7 @@ Cicely keeps pull requests as drafts until all their reviews are in, then marks 
 
 A request to integrate a project authorizes the survey, the rehearsal and a scratch worktree and branch of its own. Pushing to pull-request branches or the base, editing pull-request descriptions, commenting on pull requests and deleting merged branches all wait for Cicely's approval of the concrete plan. That approval covers exactly the pull requests, head commits and base commit in it. Anything that differs from the plan stops the run for a new approval.
 
-Never mark a pull request ready, never merge a draft, never force-push, and never rebase or rewrite a pull-request branch: bring it up to date by merging the base into it. Leave review threads as they are. Never touch Cicely's main checkout beyond a fast-forward pull at the end, and only when it is clean.
+Never mark a pull request ready, never merge a draft, and never rewrite history. Never rebase or force-push a pull-request branch: bring it up to date by merging the base into it. The scripts' pushes each name the exact value they replace and are fast-forwards of it, so a ref that moved in any direction fails its push. Leave review threads as they are. Never touch Cicely's main checkout beyond a fast-forward pull at the end, and only when it is clean.
 
 The scripts below run from this skill's directory with PowerShell 7.2+, Git 2.38+ and an authenticated GitHub CLI. Each writes one JSON document. Read it even after a nonzero exit: a failure carries an `error` member saying what was and was not changed.
 
@@ -27,7 +27,7 @@ pwsh -NoProfile -File scripts/survey.ps1 -Repository 'C:\Users\cicel\Dev\<projec
 
 It fetches and reads every open pull request, across all of GitHub's pages. It skips drafts, forks and anything targeting neither the base nor another ready pull request. For each ready one it reports its head commit, files, commits, how far it is behind the base, conflicts with the base, review decision and unresolved review threads. It also reports which pairs conflict and in which files, which pull requests build on others, and an order: those it builds on first, then the fewest conflicts, oldest first. The order is a starting point: change it when the content says so, such as one pull request's decision relying on another's, and say why in the plan.
 
-A ready pull request built on one that is not ready would land that work too. The survey names it in `includesUnready`, with why it was skipped. Leave such a pull request out of the run unless Cicely explicitly approves including that work, and put both, prominently, in the plan. `uncheckedSkipped` lists skipped pull requests whose heads could not be fetched, so nothing was checked against them. Say so in the plan if it is not empty.
+A ready pull request built on one that is not ready would land that work too. The survey names it in `includesUnready`, with why it was skipped and how many unmerged commits they share. It counts shared history, so it also catches a draft that moved on after the ready branch forked from it. It may also flag a draft built on the ready pull request that targets the base rather than the ready branch. In that case, look at which pull request the shared commits belong to. Leave such a pull request out of the run unless Cicely explicitly approves including that work, and put both, prominently, in the plan. `uncheckedSkipped` lists skipped pull requests whose heads could not be fetched, so nothing was checked against them. Say so in the plan if it is not empty.
 
 With nothing ready, report the skipped ones and stop. One ready pull request still goes through the rehearsal.
 
@@ -82,13 +82,18 @@ The expected base starts as the rehearsal's base commit and becomes each landing
    pwsh -NoProfile -File scripts/update.ps1 -Worktree <rehearsal> -Head <approved head> -Base <expected base> -Rehearsed <step commit> -Message 'Merge <base> into <branch> for integration'
    ```
 
-4. Land it. It refuses, before pushing anything, when the update does not hold the rehearsed tree, or when the remote base or branch is not where the plan expects. It pushes the update to the branch, makes the merge commit on the expected base, and pushes that to the base without force. So a base that moved, a ruleset or a merge-queue requirement fails the push instead of landing something unrehearsed. It then waits for GitHub to report the pull request `MERGED`:
+4. Land it:
 
    ```powershell
-   pwsh -NoProfile -File scripts/land.ps1 -Worktree <rehearsal> -Branch <branch> -ApprovedHead <approved head> -Updated <update's commit> -BaseBranch <base> -ExpectedBase <expected base> -Rehearsed <step commit> -Message "Merge pull request #<n> from <owner>/<branch>`n`n<title>" -PullRequest <n>
+   pwsh -NoProfile -File scripts/land.ps1 -Worktree <rehearsal> -PullRequest <n> -Branch <branch> -ApprovedHead <approved head> -Updated <update's commit> -BaseBranch <base> -ExpectedBase <expected base> -Rehearsed <step commit> -Message "Merge pull request #<n> from <owner>/<branch>`n`n<title>"
    ```
 
-   Its `mergeCommit` is the next step's expected base.
+   It refuses before pushing anything unless all of these hold:
+   - the update holds the rehearsed tree
+   - the remote base and branch are exactly where the plan expects
+   - GitHub shows the pull request open, not a draft, on that branch and targeting that base
+
+   It makes the merge commit on the expected base and pushes the update to the branch. It reads GitHub again, then pushes the merge commit to the base. A ref that moved, a ruleset or a merge-queue requirement therefore fails the push instead of landing something unrehearsed. It then waits for GitHub to report the pull request `MERGED`. Its `mergeCommit` is the next step's expected base.
 5. Once it reports `MERGED`, comment on the pull request with any resolutions, using the project's author prefix. Update its description if it no longer describes the change.
 6. If the project's notes say merged branches are deleted, delete it. The script deletes only while the branch is still at the merged tip, and reports a branch someone has pushed to since as `moved`:
 
@@ -100,8 +105,16 @@ The expected base starts as the rehearsal's base commit and becomes each landing
 
 When a run stops, report which pull requests merged, which did not, and what each script's JSON says was pushed. Nothing should be left half done without a word.
 
+### Resuming a stopped landing
+
+`land.ps1`'s JSON says how far it got, and running it again with the same arguments carries on from there. It accepts a branch already holding this update and a base already holding this merge, and refuses anything else. Never push by hand to finish a landing.
+
+- `branchPushed: true, landed: false`: the branch holds the update (`branchTip`) and the base is unchanged. Fix what the error names. If the plan still holds, run `land.ps1` again; if not, the run needs a new plan.
+- `landed: true, merged: false`: the merge commit (`mergeCommit`) is on the base, but GitHub has not yet reported the pull request merged. Run `land.ps1` again to wait. Don't delete the branch, comment, or start the next step until it reports `merged: true`. Never land the pull request a second time.
+- Any other refusal pushed nothing. Report it and replan.
+
 ## 6. Finish
 
-Fast-forward Cicely's main checkout with `git pull --ff-only` if it is clean and on the base. Otherwise say why you left it. Check that the issues in each landing's `closingIssues` are closed. Close any that are still open, with a comment naming the merge.
+Fast-forward Cicely's main checkout with `git pull --ff-only` if it is clean and on the base. Otherwise say why you left it. Each landing's `closingIssues` gives every issue's URL and repository, since an issue can live in another repository. Check each one by its URL with `gh issue view <url> --json state`, never by its number alone. Close any still open with `gh issue close <url> --comment '<prefix> Closed by <merge commit>, which merged #<n>.'`.
 
 Report the merges and their commits, the issues they closed, the comments posted, and each branch deletion's outcome. Put the follow-up corrections into a new draft pull request, or list them for Cicely if she prefers. List the worktrees, Claude sessions and Codex tasks still attached to the merged branches, and follow the project's handoff rule for them. Offer to clean those up, but don't do it unasked. Remove the rehearsal worktree and its `integration/<yyyymmdd>` branch, which are the skill's own.

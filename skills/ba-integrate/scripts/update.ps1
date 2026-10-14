@@ -20,6 +20,9 @@ $PSNativeCommandUseErrorActionPreference = $false
 Import-Module (Join-Path $PSScriptRoot 'Integrate.psm1') -Force
 
 $result = [ordered]@{}
+# Set once this run starts its own merge, so a failure abandons only that merge and never
+# one that was already in progress, with someone's resolution in it.
+$startedMerge = $false
 try {
     $Worktree = (Resolve-Path -LiteralPath $Worktree).Path
     $headSha = Resolve-Commit $Worktree $Head 'Head'
@@ -32,6 +35,7 @@ try {
     $replayed = @()
     $upToDate = Test-Ancestor $Worktree $baseSha $headSha
     if (-not $upToDate) {
+        $startedMerge = $true
         Invoke-Git $Worktree @('merge', '--no-ff', '--no-commit', '--no-edit', $baseSha) -Allowed 0, 1 | Out-Null
         $replayed = @((Invoke-Git $Worktree @('diff', '--name-only', '--diff-filter=U')).Lines | Where-Object { $_ } | Sort-Object -Unique)
         foreach ($path in $replayed) {
@@ -58,8 +62,8 @@ try {
     $result | ConvertTo-Json -Depth 5
     exit 0
 } catch {
-    # Leave the worktree usable: abandon a merge this run left half done.
-    if ($Worktree -and (Test-Path -LiteralPath $Worktree)) {
+    # Leave the worktree usable: abandon a merge this run started and left half done.
+    if ($startedMerge -and $Worktree -and (Test-Path -LiteralPath $Worktree)) {
         $merging = & git -C $Worktree rev-parse --quiet --verify MERGE_HEAD 2>$null
         if ($merging) { & git -C $Worktree merge --abort 2>$null | Out-Null }
     }
