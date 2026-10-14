@@ -752,9 +752,37 @@ function New-LandedFixture {
     return [pscustomobject]@{ Repository = $f.Repository; Head = $f.Head }
 }
 
+## A stand-in for the GitHub CLI that answers from $Responses: the longest key its joined
+## arguments start with picks the response, printed as given. A response starting with
+## '!fail' makes it exit 1, printing that text.
+function New-FakeGitHubCli([hashtable]$Responses) {
+    $data = Join-Path $sandbox ('gh-responses-' + [guid]::NewGuid().ToString('N') + '.json')
+    Write-FixtureText $data ($Responses | ConvertTo-Json -Depth 3)
+    $fake = Join-Path $sandbox ('gh-table-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    $text = @'
+$responses = Get-Content -LiteralPath '__DATA__' -Raw | ConvertFrom-Json -AsHashtable
+$line = ($args | ForEach-Object { "$_" }) -join ' '
+$key = @($responses.Keys | Where-Object { $line.StartsWith($_) } | Sort-Object Length -Descending) | Select-Object -First 1
+if (-not $key) { "no stand-in response for: $line"; exit 1 }
+$value = "$($responses[$key])"
+if ($value.StartsWith('!fail')) { $value; exit 1 }
+$value
+exit 0
+'@
+    Write-FixtureText $fake $text.Replace('__DATA__', $data.Replace("'", "''"))
+    return $fake
+}
+
+## Runs delete-branch for branch 'one' of $Repository merged at $Tip, with GitHub listing
+## $Dependents (a JSON array, or a '!fail' response) as the open pull requests targeting it.
+function Invoke-DeleteBranch([string]$Repository, [string]$Tip, [string]$Dependents = '[]') {
+    $fake = New-FakeGitHubCli @{ 'pr list --base one' = $Dependents }
+    return Invoke-IntegrateScript 'delete-branch' @{ Repository = $Repository; Branch = 'one'; MergedTip = $Tip; BaseBranch = 'main'; GitHubCli = $fake }
+}
+
 Test 'deleting a merged branch at its merged tip removes it' {
     $f = New-LandedFixture
-    $run = Invoke-IntegrateScript 'delete-branch' @{ Repository = $f.Repository; Branch = 'one'; MergedTip = $f.Head; BaseBranch = 'main' }
+    $run = Invoke-DeleteBranch $f.Repository $f.Head
     Assert ($run.Code -eq 0 -and $run.Result.outcome -eq 'deleted' -and -not (Get-OriginBranch $f.Repository 'one')) "Not deleted: $($run.Result | ConvertTo-Json -Compress)"
 }
 
@@ -762,16 +790,15 @@ Test 'a branch pushed to after merging is preserved and reported' {
     # The reviewer's case: a session pushes to the branch after its approved head merged.
     $f = New-LandedFixture
     $moved = Push-ElsewhereCommit $f.Repository 'one'
-    $run = Invoke-IntegrateScript 'delete-branch' @{ Repository = $f.Repository; Branch = 'one'; MergedTip = $f.Head; BaseBranch = 'main' }
+    $run = Invoke-DeleteBranch $f.Repository $f.Head
     Assert ($run.Code -eq 0 -and $run.Result.outcome -eq 'moved' -and $run.Result.current -eq $moved) "Expected it preserved: $($run.Result | ConvertTo-Json -Compress)"
     Assert ((Get-OriginBranch $f.Repository 'one') -eq $moved) 'The newer commit was deleted.'
 }
 
 Test 'deleting an already deleted branch is a no-op' {
     $f = New-LandedFixture
-    $parameters = @{ Repository = $f.Repository; Branch = 'one'; MergedTip = $f.Head; BaseBranch = 'main' }
-    Invoke-IntegrateScript 'delete-branch' $parameters | Out-Null
-    $run = Invoke-IntegrateScript 'delete-branch' $parameters
+    Invoke-DeleteBranch $f.Repository $f.Head | Out-Null
+    $run = Invoke-DeleteBranch $f.Repository $f.Head
     Assert ($run.Code -eq 0 -and $run.Result.outcome -eq 'absent' -and -not $run.Result.deleted) "Expected a no-op: $($run.Result | ConvertTo-Json -Compress)"
 }
 
@@ -779,8 +806,112 @@ Test 'a branch whose tip the base does not contain is not deleted' {
     $repo = New-RemoteFixture @{ 'a.txt' = "a`n" }
     $one = Add-FixtureCommit $repo 'one' 'main' @{ 'a.txt' = "a1`n" }
     Invoke-FixtureGit $repo @('push', '--quiet', 'origin', 'one') | Out-Null
-    $run = Invoke-IntegrateScript 'delete-branch' @{ Repository = $repo; Branch = 'one'; MergedTip = $one; BaseBranch = 'main' }
+    $run = Invoke-DeleteBranch $repo $one
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'has not merged' -and (Get-OriginBranch $repo 'one') -eq $one) "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
+}
+
+Test 'a branch another open pull request still targets is not deleted' {
+    # The DRRD pilot's case: #231 targeted #226's branch, and deleting that branch first
+    # could have closed it.
+    $f = New-LandedFixture
+    $run = Invoke-DeleteBranch $f.Repository $f.Head '[{"number":9,"url":"https://github.com/fixture/repo/pull/9"}]'
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'Retarget them to main' -and (@($run.Result.dependents | ForEach-Object number) -join ',') -eq '9') "Expected a refusal naming #9: $($run.Result | ConvertTo-Json -Compress)"
+    Assert ((Get-OriginBranch $f.Repository 'one') -eq $f.Head) 'The branch was deleted.'
+}
+
+Test 'a GitHub error while listing dependents deletes nothing' {
+    $f = New-LandedFixture
+    $run = Invoke-DeleteBranch $f.Repository $f.Head '!fail HTTP 502'
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'Could not ask GitHub' -and (Get-OriginBranch $f.Repository 'one') -eq $f.Head) "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
+}
+
+## Runs check-issues for pull request 7 of fixture/repo, whose default branch is main.
+## $PullRequest overrides the pull request's fields, $Issues gives each issue URL its
+## `gh issue view` JSON, and $Timelines gives an issue's repository/number its timeline
+## lines; a missing timeline is empty.
+function Invoke-CheckIssues([hashtable]$PullRequest, [hashtable]$Issues, [hashtable]$Timelines = @{}) {
+    $pr = [ordered]@{ number = 7; url = 'https://github.com/fixture/repo/pull/7'; state = 'MERGED'; mergedAt = '2026-01-01T00:00:00Z'; baseRefName = 'main'; body = ''; closingIssuesReferences = @() }
+    foreach ($key in $PullRequest.Keys) { $pr[$key] = $PullRequest[$key] }
+    $responses = @{
+        'repo view' = '{"nameWithOwner":"fixture/repo","defaultBranchRef":{"name":"main"}}'
+        'pr view 7' = ($pr | ConvertTo-Json -Depth 6 -Compress)
+    }
+    foreach ($url in $Issues.Keys) {
+        $responses["issue view $url"] = $Issues[$url]
+        $responses["api repos/$($url -replace '^https://github.com/', '')/timeline"] = if ($Timelines.ContainsKey($url)) { $Timelines[$url] } else { '' }
+    }
+    $folder = Join-Path $sandbox ('check-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $folder | Out-Null
+    return Invoke-IntegrateScript 'check-issues' @{ Repository = $folder; PullRequest = 7; GitHubCli = (New-FakeGitHubCli $responses) }
+}
+
+## A closing reference to issue $Number of $Owner/$Name, as GitHub lists it.
+function New-ClosingReference([int]$Number, [string]$Owner = 'fixture', [string]$Name = 'repo') {
+    return @{ number = $Number; url = "https://github.com/$Owner/$Name/issues/$Number"; repository = @{ name = $Name; owner = @{ login = $Owner } } }
+}
+
+$closedIssue = '{"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-01-01T00:00:03Z"}'
+$openIssue = '{"state":"OPEN","stateReason":null,"closedAt":null}'
+
+Test 'issues GitHub closed are reported closed with nothing to investigate' {
+    $run = Invoke-CheckIssues @{ body = 'Closes #5'; closingIssuesReferences = @(New-ClosingReference 5) } @{ 'https://github.com/fixture/repo/issues/5' = $closedIssue }
+    Assert ($run.Code -eq 0 -and $run.Result.allClosed) "Expected all closed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+    $issue = @($run.Result.issues)[0]
+    Assert ($issue.linkedBy -eq 'keyword' -and @($issue.findings).Count -eq 0) "Wrong report: $($issue | ConvertTo-Json -Compress)"
+}
+
+Test 'an issue left open by a merge into another branch says why' {
+    # GitHub lists no closing issues for a pull request targeting another branch, so the
+    # description's keyword is all that names the issue.
+    $run = Invoke-CheckIssues @{ baseRefName = 'release'; body = 'Closes #5' } @{ 'https://github.com/fixture/repo/issues/5' = $openIssue }
+    Assert ($run.Code -eq 0 -and -not $run.Result.allClosed) "Expected an open issue: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+    $issue = @($run.Result.issues)[0]
+    $text = @($issue.findings) -join ' | '
+    Assert ($issue.linkedBy -eq 'keyword GitHub did not link' -and $text -match 'not the default branch main' -and $text -match 'does not list it as closing') "Wrong findings: $text"
+}
+
+Test 'a reopened issue says who reopened it and when' {
+    $timeline = "{`"event`":`"closed`",`"created_at`":`"2026-01-01T00:00:03Z`",`"actor`":`"github`"}`n{`"event`":`"reopened`",`"created_at`":`"2026-01-02T09:00:00Z`",`"actor`":`"someone`"}"
+    $run = Invoke-CheckIssues @{ body = 'Closes #5'; closingIssuesReferences = @(New-ClosingReference 5) } @{ 'https://github.com/fixture/repo/issues/5' = $openIssue } @{ 'https://github.com/fixture/repo/issues/5' = $timeline }
+    $text = @(@($run.Result.issues)[0].findings) -join ' | '
+    Assert ($run.Code -eq 0 -and $text -match 'reopened by someone at 2026-01-02') "Wrong findings: $text"
+}
+
+Test 'a merge moments ago is reported as possibly still processing' {
+    $now = (Get-Date).ToUniversalTime().AddSeconds(-10).ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $run = Invoke-CheckIssues @{ mergedAt = $now; body = 'Closes #5'; closingIssuesReferences = @(New-ClosingReference 5) } @{ 'https://github.com/fixture/repo/issues/5' = $openIssue }
+    $text = @(@($run.Result.issues)[0].findings) -join ' | '
+    Assert ($run.Code -eq 0 -and $text -match 'may still be processing') "Wrong findings: $text"
+}
+
+Test 'an issue in another repository is kept apart from one with the same number here' {
+    $run = Invoke-CheckIssues @{ body = 'Fixes other/place#7'; closingIssuesReferences = @(New-ClosingReference 7) } @{
+        'https://github.com/fixture/repo/issues/7' = $closedIssue
+        'https://github.com/other/place/issues/7' = $openIssue
+    }
+    $issues = @($run.Result.issues)
+    $there = $issues | Where-Object url -EQ 'https://github.com/other/place/issues/7'
+    Assert ($run.Code -eq 0 -and $issues.Count -eq 2 -and $there.state -eq 'OPEN' -and (@($there.findings) -join ' ') -match 'lives in other/place') "Wrong report: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+    Assert (($issues | Where-Object url -EQ 'https://github.com/fixture/repo/issues/7').state -eq 'CLOSED') 'The local #7 was confused with the other repository''s.'
+}
+
+Test 'a pull request that has not merged is reported' {
+    $run = Invoke-CheckIssues @{ state = 'OPEN'; mergedAt = $null; closingIssuesReferences = @(New-ClosingReference 5) } @{ 'https://github.com/fixture/repo/issues/5' = $openIssue }
+    $text = @(@($run.Result.issues)[0].findings) -join ' | '
+    Assert ($run.Code -eq 0 -and $text -match 'has not merged; it is OPEN') "Wrong findings: $text"
+}
+
+Test 'an open issue with no cause found says to look by hand' {
+    $run = Invoke-CheckIssues @{ closingIssuesReferences = @(New-ClosingReference 5) } @{ 'https://github.com/fixture/repo/issues/5' = $openIssue }
+    $issue = @($run.Result.issues)[0]
+    Assert ($run.Code -eq 0 -and $issue.linkedBy -eq 'manual link' -and (@($issue.findings) -join ' ') -match 'No cause found') "Wrong report: $($issue | ConvertTo-Json -Compress)"
+}
+
+Test 'a GitHub error while checking issues fails without guessing' {
+    $fake = New-FakeGitHubCli @{ 'repo view' = '!fail HTTP 502' }
+    $folder = Join-Path $sandbox ('check-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $folder | Out-Null
+    $run = Invoke-IntegrateScript 'check-issues' @{ Repository = $folder; PullRequest = 7; GitHubCli = $fake }
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'Could not read the repository') "Expected an error: $($run.Result | ConvertTo-Json -Compress)"
 }
 
 Write-Output "Integrate tests: $script:Passed passed, $script:Failed failed. Fixtures: $sandbox"
