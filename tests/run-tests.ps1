@@ -279,6 +279,43 @@ if (Test-Path -LiteralPath $store) {
 }
 Write-Output 'HTTP 404: Not Found'; exit 1
 '@ | Set-Content $gh
+Test 'Windows tool discovery and publish skip extensionless shims' {
+    if (-not $IsWindows) {return}
+    $shimDirectory=Join-Path $sandbox 'shim-bin'
+    $toolDirectory=Join-Path $sandbox 'native-bin'
+    New-Item -ItemType Directory $shimDirectory,$toolDirectory | Out-Null
+    foreach ($name in @('gh','butler','steamcmd')) {
+        '#!/bin/sh' | Set-Content (Join-Path $shimDirectory $name)
+        Copy-Item $gh (Join-Path $toolDirectory "$name.ps1")
+    }
+    $priorPath=$env:PATH
+    $env:PATH="$shimDirectory;$toolDirectory;$priorPath"
+    try {
+        foreach ($name in @('gh','butler','steamcmd')) {
+            $found=& (Get-Module Release) {param($name) Find-ReleaseDoctorTool $name} $name
+            Assert ($found -eq (Join-Path $toolDirectory "$name.ps1")) "Discovery accepted the $name shim."
+            $explicit=& (Get-Module Release) {param($path) Find-ReleaseDoctorTool $path} (Join-Path $shimDirectory $name)
+            Assert (-not $explicit) 'Explicit extensionless path was accepted.'
+        }
+        $repo=New-Fixture 'shim-notes'
+        $prepared=Invoke-ReleasePrepare $repo @('notes') (Join-Path $sandbox 'shim-note-state')
+        $state=Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'shim-remote-note.md'
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+        Assert ($result.destinations.notes.preflightStatus -eq 'succeeded') "Publish did not use the runnable PATH candidate: $($result.destinations.notes.error)"
+        # Seed a stale successful native exit code; a non-process must not inherit it.
+        Expect-Error {
+            & (Get-Module Release) {param($directory)
+                function NoProcess {}
+                $global:LASTEXITCODE=0
+                Invoke-ReleaseTool 'NoProcess' @() $directory
+            } $sandbox
+        } 'did not run as a process'
+    } finally {
+        $env:PATH=$priorPath
+        Remove-Item Env:BA_FIXTURE_NOTE_STORE -ErrorAction SilentlyContinue
+    }
+}
 Test 'notes are approval gated, public, idempotent and never overwrite different content' {
     $repo = New-Fixture 'public-notes'
     $prepared = Invoke-ReleasePrepare $repo @('itch-windows','notes') (Join-Path $sandbox 'note-state') $engine
@@ -293,6 +330,7 @@ Test 'notes are approval gated, public, idempotent and never overwrite different
         $env:BA_FIXTURE_PRIVATE='1'
         $result = Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 $hash
         Assert ($result.destinations.notes.status -eq 'failed' -and -not (Test-Path $env:BA_FIXTURE_NOTE_STORE)) 'Private notes repo was published to.'
+        Assert ($result.destinations.notes.error -like '*Public notes require a public repository and verified write permission.*') 'Preflight lost its underlying failure reason.'
         Remove-Item Env:BA_FIXTURE_PRIVATE
         'conflicting existing public notes' | Set-Content $env:BA_FIXTURE_NOTE_STORE
         $conflictHash = (Get-FileHash $env:BA_FIXTURE_NOTE_STORE).Hash

@@ -7,7 +7,7 @@ Test 'process environment overrides remove originally absent variables after too
     "if (`$env:BA_RELEASE_ABSENT_ENVIRONMENT_TEST -cne 'temporary') {exit 9}; exit 0" | Set-Content -LiteralPath $probe
     $result=Invoke-ReleaseTool $probe @() $sandbox -Environment @{$key='temporary'}
     Assert ($result.exitCode -eq 0 -and -not (Test-Path -LiteralPath ('Env:'+$key))) 'Successful tool left an originally absent variable behind.'
-    Expect-Error {Invoke-ReleaseTool (Join-Path $sandbox 'missing-executable') @() $sandbox -Environment @{$key='temporary'}} 'not recognized|cannot find|not found'
+    Expect-Error {Invoke-ReleaseTool (Join-Path $sandbox 'missing-executable') @() $sandbox -Environment @{$key='temporary'}} 'did not run as a process'
     Assert (-not (Test-Path -LiteralPath ('Env:'+$key))) 'Failed tool left an originally absent variable behind.'
 }
 if ($IsWindows -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {

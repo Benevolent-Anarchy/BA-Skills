@@ -642,6 +642,10 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
         if ($notesDestination.Count) {
             $notesRecord=$state.destinations[$notesDestination[0].id]
             try {
+                Push-Location -LiteralPath $state.plan.repository
+                try {$resolvedGh=Find-ReleaseDoctorTool $GhExecutable} finally {Pop-Location}
+                if (-not $resolvedGh) {throw "Executable missing or not runnable: $GhExecutable"}
+                $GhExecutable=$resolvedGh
                 Assert-ReleaseNotesDestination $state.plan $notes $StatePath $GhExecutable
                 if ($notesRecord.Contains('preflightStatus') -and $notesRecord.preflightStatus -eq 'failed') {$notesRecord.error=$null}
                 $notesRecord.preflightStatus='succeeded'
@@ -649,7 +653,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             catch {
                 if ($notesRecord.status -ne 'held') {$notesRecord.status='failed'}
                 $notesRecord.preflightStatus='failed'
-                $notesRecord.error='Public notes preflight failed; check public visibility, write permissions, approved availability link and conflicting notes before any store publication.'
+                $notesRecord.error="Public notes preflight failed; check public visibility, write permissions, approved availability link and conflicting notes before any store publication. $($_.Exception.Message)"
                 $state.status=Get-ReleaseOverallStatus $state;Write-ReleaseJson $stateFile $state
                 return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}
             }

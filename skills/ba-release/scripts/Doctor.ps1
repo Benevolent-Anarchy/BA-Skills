@@ -1,14 +1,5 @@
 # Inspects local prerequisites for explicit destinations without exports, sign-in or remote operations.
 
-# Resolves an explicit executable or PATH command without invoking it.
-function Find-ReleaseDoctorTool([string]$Name) {
-    if (-not $Name) {return $null}
-    $command=Get-Command $Name -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($command) {return $command.Source}
-    if (Test-Path -LiteralPath $Name -PathType Leaf) {return (Get-Item -LiteralPath $Name).FullName}
-    return $null
-}
-
 # Reads Godot's documented host directories, including editor self-contained mode.
 function Get-ReleaseDoctorDirectories([string]$Engine) {
     if ($Engine) {
