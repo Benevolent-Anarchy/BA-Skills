@@ -777,11 +777,13 @@ function New-FakeGitHubCli([hashtable]$Responses) {
 $responses = Get-Content -LiteralPath '__DATA__' -Raw | ConvertFrom-Json -AsHashtable
 $words = [string[]]@($args | ForEach-Object { "$_" })
 $line = $words -join ' '
-# A GraphQL call is keyed by its variables, in order, without the query text:
-# 'graphql owner=fixture name=repo number=7 after=c2'.
+# A GraphQL call is keyed by its query's name, if it has one, and its variables in order,
+# without the query text: 'graphql PullRequestCommits owner=fixture name=repo number=7 after=c2'.
 if ($words[0] -eq 'api' -and $words[1] -eq 'graphql') {
+    $query = @($words | Where-Object { $_.StartsWith('query=') }) | Select-Object -First 1
+    $operation = if ($query -match '^query=\s*query\s+(\w+)') { $Matches[1] }
     $variables = for ($i = 2; $i + 1 -lt $words.Count; $i += 2) { if (-not $words[$i + 1].StartsWith('query=')) { $words[$i + 1] } }
-    $line = 'graphql ' + (@($variables) -join ' ')
+    $line = (@('graphql', $operation) + @($variables) | Where-Object { $_ }) -join ' '
 }
 if ($words[0] -eq 'api' -and $words -contains 'markdown') {
     $request = Get-Content -LiteralPath $words[[array]::IndexOf($words, '--input') + 1] -Raw | ConvertFrom-Json
@@ -1029,27 +1031,50 @@ function New-GitHubCheckout {
     return $repo
 }
 
-## The merge commit every page from New-CommitPage reports, unless told otherwise.
+## The commits every page from New-CommitPage reports, unless told otherwise: the pull
+## request's head, the base it merged into, and the merge commit.
+$headOid = 'beadbead' + ('0' * 32)
+$baseOid = 'basebase' + ('0' * 32)
 $mergeOid = 'feedface' + ('0' * 32)
 
-## One page of a pull request's commits as GitHub's GraphQL API returns it: $Messages are
-## the commits' messages, $Total is the pull request's total, and $Next the cursor of the
-## following page, if any. The pull request's merge commit, $mergeOid, has $MergeMessage;
-## -NoMergeCommit leaves it out, as GitHub does for one not merged. $Closing are the issues
-## GitHub lists as closing it, $ClosingTotal its count of them, and $Manual those of them
-## linked by hand.
-function New-CommitPage([string[]]$Messages = @(), [int]$Total = -1, [string]$Next, [string]$MergeMessage = 'Merge pull request #7 from fixture/topic', [switch]$NoMergeCommit, [object[]]$Closing = @(), [int]$ClosingTotal = -1, [object[]]$Manual = @()) {
+## A made-up commit id, unique to this run.
+function New-Oid { return ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')).Substring(0, 40) }
+
+## One page of a pull request's commits as GitHub's GraphQL API returns it. $Messages are
+## the commits' messages, each authored at $Authored plus its position in minutes, $Total
+## is the pull request's total, and $Next the cursor of the following page, if any. The
+## head is $Head. The merge commit $MergeOid has $MergeMessage and, by default, the parents
+## of a merge commit: the base and the head. -Linear gives it the base alone, as a squash
+## or rebase does; -NoMergeCommit leaves it out, as GitHub does for one not merged.
+function New-CommitPage([string[]]$Messages = @(), [int]$Total = -1, [string]$Next, [string]$MergeMessage = 'Merge pull request #7 from fixture/topic', [switch]$NoMergeCommit, [switch]$Linear, [string]$MergeOid = $mergeOid, [string]$Head = $headOid, [string]$Authored = '2025-12-01T00:00:00Z', [string[]]$Oids = @()) {
     if ($Total -lt 0) { $Total = $Messages.Count }
-    if ($ClosingTotal -lt 0) { $ClosingTotal = $Closing.Count }
-    $nodes = @($Messages | ForEach-Object { @{ commit = @{ oid = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')).Substring(0, 40); message = $_ } } })
-    $merge = if ($NoMergeCommit) { $null } else { @{ oid = $mergeOid; message = $MergeMessage } }
+    $nodes = @(for ($i = 0; $i -lt $Messages.Count; $i++) {
+        $oid = if ($i -lt $Oids.Count) { $Oids[$i] } else { New-Oid }
+        @{ commit = @{ oid = $oid; message = $Messages[$i]; authoredDate = ([datetime]$Authored).ToUniversalTime().AddMinutes($i).ToString('yyyy-MM-ddTHH:mm:ssZ'); parents = @{ totalCount = 1 } } }
+    })
+    $parents = if ($Linear) { @($baseOid) } else { @($baseOid, $Head) }
+    $merge = if ($NoMergeCommit) { $null } else { @{ oid = $MergeOid; message = $MergeMessage; authoredDate = '2026-01-01T00:00:00Z'; parents = @{ totalCount = $parents.Count; nodes = @($parents | ForEach-Object { @{ oid = $_ } }) } } }
     $pullRequest = @{
-        closing = @{ totalCount = $ClosingTotal; nodes = @($Closing) }
-        manual = @{ totalCount = $Manual.Count; nodes = @($Manual | ForEach-Object { @{ url = $_.url } }) }
+        headRefOid = $Head
         mergeCommit = $merge
         commits = @{ totalCount = $Total; pageInfo = @{ hasNextPage = [bool]$Next; endCursor = $(if ($Next) { $Next } else { $null }) }; nodes = $nodes }
     }
-    return ConvertTo-Json -Compress -Depth 8 -InputObject @{ data = @{ repository = @{ pullRequest = $pullRequest } } }
+    return ConvertTo-Json -Compress -Depth 9 -InputObject @{ data = @{ repository = @{ pullRequest = $pullRequest } } }
+}
+
+## One page of the issues GitHub lists as closing a pull request: $References, of $Total
+## in all, followed by the page at cursor $Next, if any.
+function New-ClosingPage([object[]]$References = @(), [int]$Total = -1, [string]$Next) {
+    if ($Total -lt 0) { $Total = $References.Count }
+    $connection = @{ totalCount = $Total; pageInfo = @{ hasNextPage = [bool]$Next; endCursor = $(if ($Next) { $Next } else { $null }) }; nodes = @($References) }
+    return ConvertTo-Json -Compress -Depth 8 -InputObject @{ data = @{ repository = @{ pullRequest = @{ closingIssuesReferences = $connection } } } }
+}
+
+## One page of a commit's history as GitHub's GraphQL API returns it, newest first: each of
+## $Commits has an oid, message and authoredDate.
+function New-HistoryPage([object[]]$Commits) {
+    $history = @{ totalCount = 1000; pageInfo = @{ hasNextPage = $true; endCursor = 'h2' }; nodes = @($Commits) }
+    return ConvertTo-Json -Compress -Depth 8 -InputObject @{ data = @{ repository = @{ object = @{ history = $history } } } }
 }
 
 ## A closing reference to issue $Number of $Owner/$Name, as GitHub lists it.
@@ -1059,30 +1084,33 @@ function New-ClosingReference([int]$Number, [string]$Owner = 'fixture', [string]
 
 ## A reference as GitHub's Markdown renderer links it, in the shape it was seen to return:
 ## to issue $Number of $Repository, or with -PullRequest to that pull request, showing $Text.
-function New-RenderedReference([string]$Repository, [int]$Number, [string]$Text = "#$Number", [switch]$PullRequest) {
+## With $Comment, the link points at that comment on the issue, as GitHub renders a URL
+## to it: the href keeps the comment, and data-url names the issue.
+function New-RenderedReference([string]$Repository, [int]$Number, [string]$Text = "#$Number", [switch]$PullRequest, [long]$Comment) {
     $type, $path = if ($PullRequest) { 'pull_request', 'pull' } else { 'issue', 'issues' }
-    return "<a class=`"issue-link js-issue-link`" data-error-text=`"Failed to load title`" data-id=`"$(5000000000 + $Number)`" data-permission-text=`"Title is private`" data-url=`"https://github.com/$Repository/issues/$Number`" data-hovercard-type=`"$type`" data-hovercard-url=`"/$Repository/$path/$Number/hovercard`" href=`"https://github.com/$Repository/$path/$Number`">$Text</a>"
+    $hovercard, $fragment = if ($Comment) { "?comment_id=$Comment&amp;comment_type=issue_comment", "#issuecomment-$Comment" } else { '', '' }
+    return "<a class=`"issue-link js-issue-link`" data-error-text=`"Failed to load title`" data-id=`"$(5000000000 + $Number)`" data-permission-text=`"Title is private`" data-url=`"https://github.com/$Repository/issues/$Number`" data-hovercard-type=`"$type`" data-hovercard-url=`"/$Repository/$path/$Number/hovercard$hovercard`" href=`"https://github.com/$Repository/$path/$Number$fragment`">$Text</a>"
 }
 
 ## Runs check-issues for pull request 7 of fixture/repo, whose default branch is main.
 ## $PullRequest overrides the pull request's fields; its `closing` and `manual` give the
-## issues GitHub lists as closing it, and those linked by hand. $Issues gives each issue
-## URL its `gh issue view` JSON, and $Timelines gives an issue URL the pages of its
-## timeline, each a JSON array; a missing timeline is one empty page. $Commits are the
-## pages of the pull request's commits, keyed by the cursor that reads them ('' for the
-## first), in place of one page from `closing` and `manual`. $Renderings give a commit
-## message the HTML GitHub renders it as.
-function Invoke-CheckIssues([hashtable]$PullRequest, [hashtable]$Issues, [hashtable]$Timelines = @{}, [hashtable]$Commits, [hashtable]$Renderings = @{}) {
+## issues GitHub lists as closing it, and those linked by hand, each one page. $Issues
+## gives each issue URL its `gh issue view` JSON, and $Timelines gives an issue URL the
+## pages of its timeline, each a JSON array; a missing timeline is one empty page. $Commits
+## are the pages of the pull request's commits, keyed by the cursor that reads them ('' for
+## the first). $Renderings give a commit message the HTML GitHub renders it as, and
+## $Extra adds or replaces any other stand-in response.
+function Invoke-CheckIssues([hashtable]$PullRequest, [hashtable]$Issues, [hashtable]$Timelines = @{}, [hashtable]$Commits = @{ '' = (New-CommitPage) }, [hashtable]$Renderings = @{}, [hashtable]$Extra = @{}) {
     $pr = [ordered]@{ number = 7; url = 'https://github.com/fixture/repo/pull/7'; state = 'MERGED'; mergedAt = '2026-01-01T00:00:00Z'; baseRefName = 'main' }
     foreach ($key in @($PullRequest.Keys | Where-Object { $_ -notin @('closing', 'manual') })) { $pr[$key] = $PullRequest[$key] }
-    if (-not $Commits) { $Commits = @{ '' = (New-CommitPage -Closing @($PullRequest.closing | Where-Object { $_ }) -Manual @($PullRequest.manual | Where-Object { $_ })) } }
     $responses = @{
         'repo view fixture/repo' = '{"nameWithOwner":"fixture/repo","defaultBranchRef":{"name":"main"}}'
         'pr view 7 --repo fixture/repo' = ($pr | ConvertTo-Json -Depth 6 -Compress)
+        'graphql ClosingIssues owner=fixture name=repo number=7 manual=false' = (New-ClosingPage @($PullRequest.closing | Where-Object { $_ }))
+        'graphql ClosingIssues owner=fixture name=repo number=7 manual=true' = (New-ClosingPage @($PullRequest.manual | Where-Object { $_ }))
     }
     foreach ($cursor in $Commits.Keys) {
-        $key = 'graphql owner=fixture name=repo number=7' + $(if ($cursor) { " after=$cursor" })
-        $responses[$key] = $Commits[$cursor]
+        $responses["graphql PullRequestCommits owner=fixture name=repo number=7$(if ($cursor) { " after=$cursor" })"] = $Commits[$cursor]
     }
     foreach ($text in $Renderings.Keys) { $responses["markdown $text"] = $Renderings[$text] }
     foreach ($url in $Issues.Keys) {
@@ -1092,6 +1120,7 @@ function Invoke-CheckIssues([hashtable]$PullRequest, [hashtable]$Issues, [hashta
             $responses["api repos/$($url -replace '^https://github.com/', '')/timeline?per_page=100&page=$page"] = $pages[$page - 1]
         }
     }
+    foreach ($key in $Extra.Keys) { $responses[$key] = $Extra[$key] }
     return Invoke-IntegrateScript 'check-issues' @{ Repository = (New-GitHubCheckout); PullRequest = 7; GitHubCli = (New-FakeGitHubCli $responses) }
 }
 
@@ -1104,10 +1133,13 @@ $closedIssue = '{"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-01-
 $openIssue = '{"state":"OPEN","stateReason":null,"closedAt":null}'
 $issue5 = 'https://github.com/fixture/repo/issues/5'
 $fixes5 = "<p dir=`"auto`">Fixes $(New-RenderedReference 'fixture/repo' 5)</p>"
+$reopened5 = ConvertTo-Json -Compress -Depth 4 -InputObject @(
+    (New-TimelineEvent 'closed' '2026-01-01T00:00:02Z' 'github'),
+    (New-TimelineEvent 'reopened' '2026-01-05T00:00:00Z' 'someone'))
 
 Test 'issues GitHub closed are reported closed with nothing to investigate' {
     $run = Invoke-CheckIssues @{ closing = @(New-ClosingReference 5) } @{ $issue5 = $closedIssue }
-    Assert ($run.Code -eq 0 -and $run.Result.allClosed) "Expected all closed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+    Assert ($run.Code -eq 0 -and $run.Result.allClosed -and $run.Result.landing -eq 'merge') "Expected all closed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
     $issue = @($run.Result.issues)[0]
     Assert ($issue.linkedBy -eq 'description keyword' -and -not $issue.manualLink -and @($issue.findings).Count -eq 0) "Wrong report: $($issue | ConvertTo-Json -Compress)"
 }
@@ -1118,6 +1150,24 @@ Test 'a description keyword GitHub does not list closes nothing' {
     # is expected of it; the description itself is never read here.
     $run = Invoke-CheckIssues @{ body = 'Deleting that branch first could have closed #231. Closes #5' } @{}
     Assert ($run.Code -eq 0 -and $run.Result.allClosed -and @($run.Result.issues).Count -eq 0) "Expected nothing to audit: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'every issue GitHub lists is read, past its first page' {
+    # The reviewer's case: 101 issues are GitHub's ordinary paging, not a short list.
+    $references = @(1..101 | ForEach-Object { New-ClosingReference $_ })
+    $issues = @{}; foreach ($ref in $references) { $issues[$ref.url] = $closedIssue }
+    $run = Invoke-CheckIssues @{} $issues @{} @{ '' = (New-CommitPage) } @{} @{
+        'graphql ClosingIssues owner=fixture name=repo number=7 manual=false' = (New-ClosingPage $references[0..99] 101 'p2')
+        'graphql ClosingIssues owner=fixture name=repo number=7 manual=false after=p2' = (New-ClosingPage $references[100..100] 101)
+    }
+    Assert ($run.Code -eq 0 -and $run.Result.allClosed -and @($run.Result.issues).Count -eq 101) "Expected all 101: $(@($run.Result.issues).Count) $($run.Result.error)"
+}
+
+Test 'fewer closing issues than GitHub counts fail the audit' {
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage) } @{} @{
+        'graphql ClosingIssues owner=fixture name=repo number=7 manual=false' = (New-ClosingPage @(New-ClosingReference 5) 2)
+    }
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'Read 1 of the 2 issues GitHub lists') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
 }
 
 Test 'an issue a commit names, left open by a merge into another branch, says why' {
@@ -1177,9 +1227,9 @@ Test 'an issue in another repository is kept apart from one with the same number
 }
 
 Test 'a pull request that has not merged is reported' {
-    $run = Invoke-CheckIssues @{ state = 'OPEN'; mergedAt = $null; closing = @(New-ClosingReference 5) } @{ $issue5 = $openIssue }
+    $run = Invoke-CheckIssues @{ state = 'OPEN'; mergedAt = $null; closing = @(New-ClosingReference 5) } @{ $issue5 = $openIssue } @{} @{ '' = (New-CommitPage -NoMergeCommit) }
     $text = @(@($run.Result.issues)[0].findings) -join ' | '
-    Assert ($run.Code -eq 0 -and $text -match 'has not merged; it is OPEN') "Wrong findings: $text"
+    Assert ($run.Code -eq 0 -and $text -match 'has not merged; it is OPEN' -and $null -eq $run.Result.landing) "Wrong findings: $text"
 }
 
 Test 'an open issue with no cause found says to look by hand' {
@@ -1201,27 +1251,67 @@ Test 'a warning from gh does not stop the dependents check' {
 }
 
 Test 'a warning from gh does not stop the issue check' {
-    $fake = New-FakeGitHubCli @{
+    $run = Invoke-CheckIssues @{ closing = @(New-ClosingReference 5) } @{ $issue5 = $closedIssue } @{} @{ '' = (New-CommitPage) } @{} @{
         'repo view fixture/repo' = '!warn {"nameWithOwner":"fixture/repo","defaultBranchRef":{"name":"main"}}'
-        'pr view 7 --repo fixture/repo' = '{"number":7,"url":"https://github.com/fixture/repo/pull/7","state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","baseRefName":"main"}'
-        'issue view https://github.com/fixture/repo/issues/5' = $closedIssue
-        'graphql owner=fixture name=repo number=7' = (New-CommitPage -Closing @(New-ClosingReference 5))
     }
-    $run = Invoke-IntegrateScript 'check-issues' @{ Repository = (New-GitHubCheckout); PullRequest = 7; GitHubCli = $fake }
     Assert ($run.Code -eq 0 -and $run.Result.allClosed -and @($run.Result.issues).Count -eq 1) "A gh warning broke the issue check: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
 }
 
-Test 'an issue named only in a merged commit''s message is audited, and its reopening found' {
-    # #26: GitHub lists no closing issues; only the commit says Fixes #5. The message with
-    # no keyword is never sent to be rendered: the stand-in has no rendering for it.
-    $timeline = ConvertTo-Json -Compress -Depth 4 -InputObject @(
-        (New-TimelineEvent 'closed' '2026-01-01T00:00:02Z' 'github'),
-        (New-TimelineEvent 'reopened' '2026-01-05T00:00:00Z' 'someone'))
+Test 'a regular merge lands its commits, so an issue only a commit names is audited' {
+    # #26, and #34's regular merge: the merge commit's second parent is the head, so every
+    # commit landed. The message with no keyword is never sent to be rendered: the
+    # stand-in has no rendering for it.
     $message = "Light the lamp`n`nFixes #5"
-    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{ $issue5 = $timeline } @{ '' = (New-CommitPage @('Tidy the cell', $message)) } @{ $message = "<p dir=`"auto`">Light the lamp</p>`n$fixes5" }
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{ $issue5 = $reopened5 } @{ '' = (New-CommitPage @('Tidy the cell', $message)) } @{ $message = "<p dir=`"auto`">Light the lamp</p>`n$fixes5" }
     $issues = @($run.Result.issues)
-    Assert ($run.Code -eq 0 -and $issues.Count -eq 1 -and $issues[0].linkedBy -eq 'commit keyword' -and @($issues[0].commits).Count -eq 1) "Commit reference missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+    Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'merge' -and $issues.Count -eq 1 -and $issues[0].linkedBy -eq 'commit keyword' -and @($issues[0].commits).Count -eq 1) "Commit reference missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
     Assert ((@($issues[0].findings) -join ' ') -match 'reopened by someone at 2026-01-05') "Reopening not reported: $(@($issues[0].findings) -join ' | ')"
+}
+
+Test 'a fast-forward to the head lands its commits' {
+    $oid = New-Oid
+    $page = New-CommitPage @('Fixes #5') -Oids @($oid) -Head $oid -MergeOid $oid -Linear -MergeMessage 'Fixes #5'
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $closedIssue } @{} @{ '' = $page } @{ 'Fixes #5' = $fixes5 }
+    $issues = @($run.Result.issues)
+    Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'fast-forward' -and $issues.Count -eq 1 -and $issues[0].inMergeCommit) "Fast-forward mishandled: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'an edited squash that drops a commit''s keyword expects nothing of it' {
+    # #34: the original commit said Fixes #5, but only the squash reached the default
+    # branch, and its message names nothing. The original is never sent to be rendered.
+    $page = New-CommitPage @('Fixes #5') -Linear -MergeMessage 'Squash without any closing keyword'
+    $history = New-HistoryPage @(@{ oid = $mergeOid; message = 'Squash without any closing keyword'; authoredDate = '2026-01-01T00:00:00Z' })
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{} @{ '' = $page } @{} @{ "graphql LandedHistory owner=fixture name=repo oid=$mergeOid" = $history }
+    Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'squash' -and $run.Result.allClosed -and @($run.Result.issues).Count -eq 0) "Expected nothing to audit: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'a squash whose message adds a keyword is audited' {
+    $message = "Implement retry (#7)`n`nFixes #5"
+    $page = New-CommitPage @('Implement retry') -Linear -MergeMessage $message
+    $history = New-HistoryPage @(@{ oid = $mergeOid; message = $message; authoredDate = '2026-01-01T00:00:00Z' })
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{ $issue5 = $reopened5 } @{ '' = $page } @{ $message = "<p dir=`"auto`">Implement retry (#7)</p>`n$fixes5" } @{ "graphql LandedHistory owner=fixture name=repo oid=$mergeOid" = $history }
+    $issues = @($run.Result.issues)
+    Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'squash' -and $issues.Count -eq 1 -and $issues[0].linkedBy -eq 'merge commit keyword' -and (@($issues[0].findings) -join ' ') -match 'reopened by someone') "Squash keyword missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'a rebase lands copies of the commits, which are audited by the copies'' ids' {
+    # #34: the copies have new ids but each original's message and author date, the last
+    # being the merge commit; a keyword in an earlier copy closes its issue too.
+    $copy = New-Oid
+    $page = New-CommitPage @('Fixes #5', 'Tidy the cell') -Linear -MergeMessage 'Tidy the cell' -Authored '2025-12-01T00:00:00Z'
+    $history = New-HistoryPage @(
+        @{ oid = $mergeOid; message = 'Tidy the cell'; authoredDate = '2025-12-01T00:01:00Z' },
+        @{ oid = $copy; message = 'Fixes #5'; authoredDate = '2025-12-01T00:00:00Z' })
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $closedIssue } @{} @{ '' = $page } @{ 'Fixes #5' = $fixes5 } @{ "graphql LandedHistory owner=fixture name=repo oid=$mergeOid" = $history }
+    $issues = @($run.Result.issues)
+    Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'rebase' -and $issues.Count -eq 1 -and (@($issues[0].commits) -join ',') -eq $copy.Substring(0, 8) -and -not $issues[0].inMergeCommit) "Rebase mishandled: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'a merge commit that does not merge the head fails the audit' {
+    # The merge commit's second parent is $headOid, but GitHub reports another head.
+    $page = (New-CommitPage @('Fixes #5')).Replace("`"headRefOid`":`"$headOid`"", "`"headRefOid`":`"$(New-Oid)`"")
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = $page }
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'does not merge its head') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
 }
 
 Test 'only references GitHub resolves to an issue, right after a closing keyword, close it' {
@@ -1238,16 +1328,33 @@ Test 'only references GitHub resolves to an issue, right after a closing keyword
     Assert ($run.Code -eq 0 -and $found -eq 'fixture/repo#6,other/place#229') "Expected only #6 and other/place#229: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
 }
 
+Test 'a closing link to an issue comment closes that issue, in a commit or the merge commit' {
+    # The reviewer's case: GitHub renders a URL to a comment with the comment in its href
+    # and the issue in data-url, and closes the issue.
+    $commit = 'Fixes https://github.com/fixture/repo/issues/5#issuecomment-4439918073'
+    $merge = "Merge pull request #7 from fixture/topic`n`nCloses https://github.com/fixture/repo/issues/6#issuecomment-5754638401"
+    $renderings = @{
+        $commit = "<p dir=`"auto`">Fixes $(New-RenderedReference 'fixture/repo' 5 '#5 (comment)' -Comment 4439918073)</p>"
+        $merge = "<p dir=`"auto`">Merge pull request $(New-RenderedReference 'fixture/repo' 7 -PullRequest) from fixture/topic</p>`n<p dir=`"auto`">Closes $(New-RenderedReference 'fixture/repo' 6 '#6 (comment)' -Comment 5754638401)</p>"
+    }
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue; 'https://github.com/fixture/repo/issues/6' = $openIssue } @{} @{ '' = (New-CommitPage @($commit) -MergeMessage $merge) } $renderings
+    $issues = @($run.Result.issues)
+    $five = $issues | Where-Object number -EQ 5
+    $six = $issues | Where-Object number -EQ 6
+    Assert ($run.Code -eq 0 -and -not $run.Result.allClosed -and $issues.Count -eq 2) "Comment links missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+    Assert ($five.url -eq $issue5 -and $five.linkedBy -eq 'commit keyword' -and $six.url -eq 'https://github.com/fixture/repo/issues/6' -and $six.linkedBy -eq 'merge commit keyword') "Wrong identities: $($issues | ConvertTo-Json -Compress -Depth 4)"
+}
+
 Test 'a commit message GitHub could not render fails the audit' {
     $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage @('Fixes #5')) } @{ 'Fixes #5' = '!fail HTTP 502' }
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'Could not have GitHub read the references in the message of commit') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
 }
 
 Test 'references GitHub lists and commits name are merged, and other repositories kept apart' {
-    $run = Invoke-CheckIssues @{} @{
+    $run = Invoke-CheckIssues @{ closing = @(New-ClosingReference 5) } @{
         $issue5 = $closedIssue
         'https://github.com/other/place/issues/5' = $openIssue
-    } @{} @{ '' = (New-CommitPage @('Fixes #5', 'Resolves other/place#5') -Closing @(New-ClosingReference 5)) } @{
+    } @{} @{ '' = (New-CommitPage @('Fixes #5', 'Resolves other/place#5')) } @{
         'Fixes #5' = $fixes5
         'Resolves other/place#5' = "<p dir=`"auto`">Resolves $(New-RenderedReference 'other/place' 5 'other/place#5')</p>"
     }
@@ -1261,12 +1368,9 @@ Test 'references GitHub lists and commits name are merged, and other repositorie
 Test 'an issue named only in the merge commit''s message is audited, and its reopening found' {
     # #31: landing writes the title into the merge commit, which GitHub lists apart from
     # the pull request's commits; nothing else names #5.
-    $timeline = ConvertTo-Json -Compress -Depth 4 -InputObject @(
-        (New-TimelineEvent 'closed' '2026-01-01T00:00:02Z' 'github'),
-        (New-TimelineEvent 'reopened' '2026-01-05T00:00:00Z' 'someone'))
-    $message = "Merge pull request #7 from fixture/fix`n`nFixes #5: implement retry"
-    $html = "<p dir=`"auto`">Merge pull request $(New-RenderedReference 'fixture/repo' 7 -PullRequest) from fixture/fix</p>`n<p dir=`"auto`">Fixes $(New-RenderedReference 'fixture/repo' 5): implement retry</p>"
-    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{ $issue5 = $timeline } @{ '' = (New-CommitPage @('Implement retry') -MergeMessage $message) } @{ $message = $html }
+    $message = "Merge pull request #7 from fixture/topic`n`nFixes #5: implement retry"
+    $html = "<p dir=`"auto`">Merge pull request $(New-RenderedReference 'fixture/repo' 7 -PullRequest) from fixture/topic</p>`n<p dir=`"auto`">Fixes $(New-RenderedReference 'fixture/repo' 5): implement retry</p>"
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{ $issue5 = $reopened5 } @{ '' = (New-CommitPage @('Implement retry') -MergeMessage $message) } @{ $message = $html }
     $issues = @($run.Result.issues)
     Assert ($run.Code -eq 0 -and -not $run.Result.allClosed -and $run.Result.mergeCommit -eq $mergeOid -and $issues.Count -eq 1) "Merge commit reference missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
     Assert ($issues[0].linkedBy -eq 'merge commit keyword' -and $issues[0].inMergeCommit -and @($issues[0].commits).Count -eq 0) "Not attributed to the merge commit: $($issues[0] | ConvertTo-Json -Compress)"
@@ -1274,9 +1378,9 @@ Test 'an issue named only in the merge commit''s message is audited, and its reo
 }
 
 Test 'an issue GitHub lists, a commit names and the merge commit names is reported once' {
-    $message = "Merge pull request #7 from fixture/fix`n`nFixes #5: implement retry"
-    $html = "<p dir=`"auto`">Merge pull request $(New-RenderedReference 'fixture/repo' 7 -PullRequest) from fixture/fix</p>`n<p dir=`"auto`">Fixes $(New-RenderedReference 'fixture/repo' 5): implement retry</p>"
-    $run = Invoke-CheckIssues @{} @{ $issue5 = $closedIssue } @{} @{ '' = (New-CommitPage @('Fixes #5') -MergeMessage $message -Closing @(New-ClosingReference 5)) } @{ 'Fixes #5' = $fixes5; $message = $html }
+    $message = "Merge pull request #7 from fixture/topic`n`nFixes #5: implement retry"
+    $html = "<p dir=`"auto`">Merge pull request $(New-RenderedReference 'fixture/repo' 7 -PullRequest) from fixture/topic</p>`n<p dir=`"auto`">Fixes $(New-RenderedReference 'fixture/repo' 5): implement retry</p>"
+    $run = Invoke-CheckIssues @{ closing = @(New-ClosingReference 5) } @{ $issue5 = $closedIssue } @{} @{ '' = (New-CommitPage @('Fixes #5') -MergeMessage $message) } @{ 'Fixes #5' = $fixes5; $message = $html }
     $issues = @($run.Result.issues)
     Assert ($run.Code -eq 0 -and $issues.Count -eq 1 -and $issues[0].linkedBy -eq 'description keyword' -and $issues[0].linked -and $issues[0].inMergeCommit -and @($issues[0].commits).Count -eq 1) "Not reported once with every source: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
 }
@@ -1296,17 +1400,12 @@ Test 'commits on a second page are read' {
 
 Test 'commits GitHub could not list fail the audit instead of passing it empty' {
     $run = Invoke-CheckIssues @{} @{} @{} @{ '' = '!fail HTTP 502' }
-    Assert ($run.Code -eq 1 -and $run.Result.error -match 'Could not read the commits of #7') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'Could not read commits on #7') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
 }
 
 Test 'fewer commits than GitHub counts fail the audit' {
     $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage @('Only one') 3) }
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'Read 1 of the 3 commits') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
-}
-
-Test 'fewer closing issues than GitHub counts fail the audit' {
-    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage -Closing @(New-ClosingReference 5) -ClosingTotal 2) }
-    Assert ($run.Code -eq 1 -and $run.Result.error -match 'Read 1 of the 2 issues GitHub lists') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
 }
 
 Test 'a credential in a refused remote URL never reaches the output' {

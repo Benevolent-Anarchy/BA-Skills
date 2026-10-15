@@ -2,13 +2,16 @@
 # still open, finds out why instead of closing it. Which issues it should have closed is
 # GitHub's reading, not one made here. The issues GitHub lists as closing the pull request,
 # from the description's keywords or a link made by hand, come from GitHub's own list. A
-# commit message's keywords appear in no list, so each message naming a keyword, the merge
-# commit's included, is rendered by GitHub in this repository: GitHub decides which
-# repository each reference names, whether that issue exists and whether it is an issue at
-# all, and leaves code alone, and a reference it resolves to an issue closes it when one of
-# GitHub's closing keywords comes right before it. Every page of the commits is read; a
-# count that falls short of GitHub's total, a merged pull request without its merge commit,
-# or a message GitHub could not render is an error, never an empty audit. For an open issue
+# commit message closes issues only once its commit reaches the default branch, so only
+# the messages that landed count, as the merge commit's ancestry shows: every commit of a
+# merge or fast-forward, a rebase's copies, or a squash alone, the merge commit's own
+# message included. Those appear in no list, so each one naming a keyword is rendered by
+# GitHub in this repository: GitHub decides which repository each reference names, whether
+# that issue exists and whether it is an issue at all, and leaves code alone, and a
+# reference it resolves to an issue closes it when one of GitHub's closing keywords comes
+# right before it. Every page of every list is read; a count that falls short of GitHub's
+# total, a merged pull request without its merge commit, or a message GitHub could not
+# render is an error, never an empty audit. For an open issue
 # it reports what it can establish: the pull request has not merged; it merged into a
 # branch that is not the default, where GitHub closes nothing; the issue was reopened after
 # this merge, and by whom; the merge was so recent that GitHub may still be processing it;
@@ -58,58 +61,133 @@ function Get-ClosingEvents([string]$IssueRepository, [int]$Number) {
 # A UTC time as text.
 function Format-Time([datetime]$Time) { return $Time.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
 
-# What GitHub records about the pull request's closing references, read page by page:
-# every issue it lists as closing it, those linked by hand, every commit as oid and
-# message, and the commit that merged it, which GitHub lists apart from the commits: a
-# merge commit, whose message landing writes from the title, or an edited squash. A list
-# shorter than GitHub's own count is an error: an audit that missed something must not
-# pass as one that found nothing.
+# Every node of one GraphQL connection, read page by page with its own cursor. $Fields are
+# the query's variables as gh arguments, $Select picks the connection out of a response,
+# and $What names it in errors. With $Stop, reading ends once that many nodes are in;
+# otherwise a total short of GitHub's own count is an error, so an audit that missed
+# something never passes as one that found nothing.
+function Read-Connection([string]$Query, [string[]]$Fields, [scriptblock]$Select, [string]$What, [int]$Stop = 0) {
+    $nodes = [Collections.Generic.List[object]]::new()
+    $after = $null
+    $total = $null
+    do {
+        $arguments = @('api', 'graphql', '-f', "query=$Query") + $Fields
+        if ($after) { $arguments += @('-f', "after=$after") }
+        $page = & $Select (Invoke-GitHub $arguments $What).data
+        if (-not $page) { throw "GitHub returned no $What." }
+        $total = $page.totalCount
+        foreach ($node in @($page.nodes)) { $nodes.Add($node) }
+        $after = if ($page.pageInfo.hasNextPage) { $page.pageInfo.endCursor } else { $null }
+        if ($page.pageInfo.hasNextPage -and -not $after) { throw "GitHub reported more $What without a cursor to read them." }
+    } while ($after -and ($Stop -eq 0 -or $nodes.Count -lt $Stop))
+    if ($Stop -eq 0 -and $nodes.Count -ne [int]$total) { throw "Read $($nodes.Count) of the $total $What, so the audit would be incomplete." }
+    return $(if ($Stop) { @($nodes | Select-Object -First $Stop) } else { $nodes.ToArray() })
+}
+
+# What GitHub records about the pull request: every issue it lists as closing it, those
+# linked by hand, its head, every commit, and the commit that merged it, which GitHub
+# lists apart from the commits.
 function Get-PullRequestSources {
     $owner, $name = $here -split '/', 2
-    $query = @'
-query($owner: String!, $name: String!, $number: Int!, $after: String) {
+    $fields = @('-f', "owner=$owner", '-f', "name=$name", '-F', "number=$PullRequest")
+    $closingQuery = @'
+query ClosingIssues($owner: String!, $name: String!, $number: Int!, $manual: Boolean!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      closing: closingIssuesReferences(first: 100) { totalCount nodes { number url repository { nameWithOwner } } }
-      manual: closingIssuesReferences(first: 100, userLinkedOnly: true) { totalCount nodes { url } }
-      mergeCommit { oid message }
-      commits(first: 100, after: $after) {
+      closingIssuesReferences(first: 100, after: $after, userLinkedOnly: $manual) {
         totalCount
         pageInfo { hasNextPage endCursor }
-        nodes { commit { oid message } }
+        nodes { number url repository { nameWithOwner } }
       }
     }
   }
 }
 '@
-    $commits = [Collections.Generic.List[object]]::new()
-    $after = $null
-    $total = $null
-    $first = $null
-    do {
-        $arguments = @('api', 'graphql', '-f', "query=$query", '-f', "owner=$owner", '-f', "name=$name", '-F', "number=$PullRequest")
-        if ($after) { $arguments += @('-f', "after=$after") }
-        $read = (Invoke-GitHub $arguments "the commits of #$PullRequest").data.repository.pullRequest
-        if (-not $first) { $first = $read }
-        $page = $read.commits
-        $total = [int]$page.totalCount
-        foreach ($node in @($page.nodes)) { $commits.Add([pscustomobject]@{ oid = $node.commit.oid; message = $node.commit.message }) }
-        $after = if ($page.pageInfo.hasNextPage) { $page.pageInfo.endCursor } else { $null }
-        if ($page.pageInfo.hasNextPage -and -not $after) { throw "GitHub reported more commits on #$PullRequest without a cursor to read them." }
-    } while ($after)
-    if ($commits.Count -ne $total) { throw "Read $($commits.Count) of the $total commits on #$PullRequest, so the audit would be incomplete." }
-    $closing = @($first.closing.nodes)
-    $manual = @($first.manual.nodes)
-    if ($closing.Count -ne [int]$first.closing.totalCount -or $manual.Count -ne [int]$first.manual.totalCount) { throw "Read $($closing.Count) of the $($first.closing.totalCount) issues GitHub lists as closing #$PullRequest, so the audit would be incomplete." }
-    $merge = if ($first.mergeCommit) { [pscustomobject]@{ oid = $first.mergeCommit.oid; message = $first.mergeCommit.message } }
-    return [pscustomobject]@{ Closing = $closing; Manual = @($manual | ForEach-Object url); Commits = $commits.ToArray(); Merge = $merge }
+    $commitsQuery = @'
+query PullRequestCommits($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      mergeCommit { oid message authoredDate parents(first: 2) { totalCount nodes { oid } } }
+      commits(first: 100, after: $after) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { commit { oid message authoredDate parents { totalCount } } }
+      }
+    }
+  }
+}
+'@
+    $closing = @(Read-Connection $closingQuery ($fields + @('-F', 'manual=false')) { $args[0].repository.pullRequest.closingIssuesReferences } "issues GitHub lists as closing #$PullRequest")
+    $manual = @(Read-Connection $closingQuery ($fields + @('-F', 'manual=true')) { $args[0].repository.pullRequest.closingIssuesReferences } "issues linked by hand to #$PullRequest")
+    # The head and merge commit come with the first page of commits.
+    $script:pullRequestRecord = $null
+    $commits = @(Read-Connection $commitsQuery $fields { if (-not $script:pullRequestRecord) { $script:pullRequestRecord = $args[0].repository.pullRequest }; $args[0].repository.pullRequest.commits } "commits on #$PullRequest")
+    $record = $script:pullRequestRecord
+    return [pscustomobject]@{
+        Closing = $closing; Manual = @($manual | ForEach-Object url); Head = $record.headRefOid
+        Commits = @($commits | ForEach-Object { [pscustomobject]@{ oid = $_.commit.oid; message = $_.commit.message; authoredDate = $_.commit.authoredDate; isMerge = [int]$_.commit.parents.totalCount -gt 1 } })
+        Merge = $record.mergeCommit
+    }
+}
+
+# The commits whose messages reached the default branch, as the merge commit's ancestry
+# shows, each marked when it is the merge commit itself. A merge whose second parent is
+# the head, or a fast-forward to the head, landed every commit. A rebase landed copies,
+# each with its original's message and author date, ending at the merge commit; merge
+# commits in the pull request are not copied. A squash landed the merge commit alone. A
+# pull request not merged has landed nothing yet; its commits are what a merge would land.
+# The kind of landing found is kept in $script:landing for the report.
+function Get-LandedCommits($Sources) {
+    $merge = $Sources.Merge
+    $mergeOid = if ($merge) { $merge.oid }
+    $every = @($Sources.Commits | ForEach-Object { [pscustomobject]@{ oid = $_.oid; message = $_.message; landedAsMerge = $_.oid -eq $mergeOid } })
+    $script:landing = $null
+    if ($pr.state -ne 'MERGED') { return $every }
+    if (-not $merge) { throw "GitHub reports #$PullRequest merged but not the commit that merged it, so that commit's message could not be audited." }
+    $parents = @($merge.parents.nodes | ForEach-Object oid)
+    if ($merge.oid -eq $Sources.Head) { $script:landing = 'fast-forward'; return $every }
+    if ([int]$merge.parents.totalCount -ge 2) {
+        if ($parents[1] -ne $Sources.Head) { throw "#$PullRequest's merge commit $($merge.oid) does not merge its head $($Sources.Head), so which commits landed is unknown." }
+        $script:landing = 'merge'
+        return $every + @([pscustomobject]@{ oid = $merge.oid; message = $merge.message; landedAsMerge = $true })
+    }
+    $copied = @($Sources.Commits | Where-Object { -not $_.isMerge })
+    if ($copied.Count -gt 0) {
+        $owner, $name = $here -split '/', 2
+        $historyQuery = @'
+query LandedHistory($owner: String!, $name: String!, $oid: GitObjectID!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    object(oid: $oid) {
+      ... on Commit {
+        history(first: 100, after: $after) {
+          totalCount
+          pageInfo { hasNextPage endCursor }
+          nodes { oid message authoredDate }
+        }
+      }
+    }
+  }
+}
+'@
+        $history = @(Read-Connection $historyQuery @('-f', "owner=$owner", '-f', "name=$name", '-f', "oid=$($merge.oid)") { $args[0].repository.object.history } "history of #$PullRequest's merge commit" $copied.Count)
+        $rebased = $history.Count -eq $copied.Count
+        for ($i = 0; $rebased -and $i -lt $copied.Count; $i++) {
+            $original = $copied[$copied.Count - 1 - $i]
+            $rebased = $history[$i].message -eq $original.message -and $history[$i].authoredDate -eq $original.authoredDate
+        }
+        if ($rebased) { $script:landing = 'rebase'; return @($history | ForEach-Object { [pscustomobject]@{ oid = $_.oid; message = $_.message; landedAsMerge = $_.oid -eq $merge.oid } }) }
+    }
+    $script:landing = 'squash'
+    return @([pscustomobject]@{ oid = $merge.oid; message = $merge.message; landedAsMerge = $true })
 }
 
 # The issues a commit message closes, as GitHub reads it. GitHub renders the message in
 # this repository and resolves each reference itself; only a link to an issue, with one of
-# GitHub's closing keywords right before it, counts. A message without any keyword is not
-# sent. The message travels in a file, so no quote in it depends on how PowerShell passes
-# native arguments.
+# GitHub's closing keywords right before it, counts, and the issue is the one GitHub's
+# canonical data-url names, whatever comment its href points at. A message without any
+# keyword is not sent. The message travels in a file, so no quote in it depends on how
+# PowerShell passes native arguments.
 function Get-CommitClosingReferences([string]$Message, [string]$What) {
     if ($Message -notmatch '(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b') { return }
     $request = Join-Path ([IO.Path]::GetTempPath()) ('ba-integrate-render-' + [guid]::NewGuid().ToString('N') + '.json')
@@ -120,7 +198,7 @@ function Get-CommitClosingReferences([string]$Message, [string]$What) {
     foreach ($match in [regex]::Matches($call.Out, '(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+<a\s([^>]*)>')) {
         $attributes = $match.Groups[1].Value
         if ($attributes -notmatch '\bdata-hovercard-type="issue"') { continue }
-        $link = [regex]::Match($attributes, '\bhref="https://github\.com/(?<repository>[^/"]+/[^/"]+)/issues/(?<number>\d+)"')
+        $link = [regex]::Match($attributes, '\bdata-url="https://github\.com/(?<repository>[^/"]+/[^/"]+)/issues/(?<number>\d+)"')
         if (-not $link.Success) { continue }
         $issueRepository = $link.Groups['repository'].Value
         [pscustomobject]@{ url = "https://github.com/$issueRepository/issues/$($link.Groups['number'].Value)"; repository = $issueRepository; number = [int]$link.Groups['number'].Value }
@@ -138,8 +216,8 @@ try {
     $sources = Get-PullRequestSources
 
     # Expected issues, each once by URL, with where it was named: listed by GitHub as
-    # closing the pull request, and whether by hand; in the message of one of its commits;
-    # or in the message of the commit that merged it.
+    # closing the pull request, and whether by hand; in the message of a commit that
+    # landed; or in the message of the commit that merged it.
     $expected = [ordered]@{}
     function Add-Expected($Reference, [string]$Source) {
         if (-not $expected.Contains($Reference.url)) {
@@ -153,18 +231,14 @@ try {
     foreach ($ref in $sources.Closing) {
         Add-Expected ([pscustomobject]@{ url = $ref.url; repository = $ref.repository.nameWithOwner; number = [int]$ref.number }) 'linked'
     }
-    foreach ($commit in @($sources.Commits)) {
+    # Only messages that reached the default branch can close anything: a squash's
+    # original commits never do, while its final message and a rebase's copies do.
+    foreach ($commit in @(Get-LandedCommits $sources)) {
         $short = $commit.oid.Substring(0, 8)
-        foreach ($ref in @(Get-CommitClosingReferences "$($commit.message)" "commit $short")) { Add-Expected $ref $short }
+        $source, $what = if ($commit.landedAsMerge) { 'merge', "the merge commit $short" } else { $short, "commit $short" }
+        foreach ($ref in @(Get-CommitClosingReferences "$($commit.message)" $what)) { Add-Expected $ref $source }
     }
-    # The merge commit counts only once the pull request has merged, and a merged one
-    # without it would leave its message unread.
-    $mergeCommit = $null
-    if ($pr.state -eq 'MERGED') {
-        if (-not $sources.Merge) { throw "GitHub reports #$PullRequest merged but not the commit that merged it, so that commit's message could not be audited." }
-        $mergeCommit = $sources.Merge.oid
-        foreach ($ref in @(Get-CommitClosingReferences "$($sources.Merge.message)" "the merge commit $($mergeCommit.Substring(0, 8))")) { Add-Expected $ref 'merge' }
-    }
+    $mergeCommit = if ($pr.state -eq 'MERGED') { $sources.Merge.oid }
     foreach ($entry in $expected.Values) {
         $entry.linkedBy = if ($entry.manualLink) { 'manual link' }
             elseif ($entry.linked) { 'description keyword' }
@@ -202,7 +276,7 @@ try {
     }
 
     [ordered]@{
-        pullRequest = $PullRequest; url = $pr.url; state = $pr.state; mergedAt = $pr.mergedAt; mergeCommit = $mergeCommit
+        pullRequest = $PullRequest; url = $pr.url; state = $pr.state; mergedAt = $pr.mergedAt; mergeCommit = $mergeCommit; landing = $script:landing
         baseRef = $pr.baseRefName; defaultBranch = $defaultBranch
         allClosed = -not @($issues | Where-Object { $_.state -ne 'CLOSED' })
         issues = @($issues)
