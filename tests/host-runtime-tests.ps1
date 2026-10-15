@@ -98,6 +98,33 @@ Test 'release CLI binds relative executable paths to the caller across doctor pr
         $env:BA_STEAM_USERNAME=$priorSteam;$env:BA_FIXTURE_NOTE_STORE=$priorStore
     }
 }
+Test 'Steam and Butler failures retain safe reasons without persisting private tool output' {
+    $repo=New-StoreFixture 'store-safe-diagnostics'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','steam') (Join-Path $sandbox 'store-safe-diagnostics-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $missing=Join-Path $sandbox 'private-runtime-path/missing-tool'
+    $priorSteam=$env:BA_STEAM_USERNAME
+    try {
+        $env:BA_STEAM_USERNAME=$null
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $missing -SteamCmdExecutable $missing -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+        Assert ($result.destinations.steam.error -like '*Set BA_STEAM_USERNAME*') 'Steam failure hid the missing authentication input.'
+        $env:BA_STEAM_USERNAME='private_fixture_account'
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $missing -SteamCmdExecutable $missing
+        Assert ($result.destinations['itch-windows'].error -like '*Butler executable is unavailable before upload.*') 'Butler failure hid the missing executable.'
+        Assert ($result.destinations.steam.error -like '*SteamCMD executable is unavailable before upload.*') 'Steam failure hid the missing executable.'
+        Assert (-not $result.destinations['itch-windows'].remote.Contains('phase') -and -not $result.destinations.steam.remote.Contains('phase')) 'Missing tools claimed an upload had started.'
+        $failedButler=Join-Path $sandbox 'private-butler.ps1'
+        $failedSteam=Join-Path $sandbox 'private-steam.ps1'
+        "'password=private-tool-output';[Console]::Error.WriteLine('Bearer private-tool-stderr');exit 23" | Set-Content $failedButler
+        "'password=private-tool-output';[Console]::Error.WriteLine('Bearer private-tool-stderr');exit 24" | Set-Content $failedSteam
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $failedButler -SteamCmdExecutable $failedSteam
+        Assert ($result.destinations['itch-windows'].status -eq 'failed' -and $result.destinations['itch-windows'].error -like '*Butler upload failed (exit 23).*') 'Butler failure lost its exit code.'
+        Assert ($result.destinations.steam.status -eq 'failed' -and $result.destinations.steam.error -like '*SteamCMD upload failed (exit 24); no verifiable build-completion record.*') 'Steam failure lost its exit code or completion check.'
+        $json=($result | ConvertTo-Json -Depth 30)+(Get-Content $stateFile -Raw)
+        Assert ($json -notmatch 'private-tool-output|private-tool-stderr|private-runtime-path|private_fixture_account') 'Store failure exposed private output, a runtime path or an account.'
+    } finally {$env:BA_STEAM_USERNAME=$priorSteam}
+}
 if ($IsWindows -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
     Test 'Windows state paths remain readable from WSL through Store app redirection' {
         $folder=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) ('ba-release-path-test-'+[guid]::NewGuid().ToString('N'))

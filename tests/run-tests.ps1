@@ -567,6 +567,7 @@ Test 'Steam zero-exit error output cannot be called uploaded' {
     try {
         $result=Invoke-ReleasePublish -StatePath $prepared.statePath -SteamCmdExecutable $steam -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
         Assert ($result.destinations.steam.status -notin @('succeeded','submitted','awaiting-store-action')) 'Steam error exit 0 was accepted as success.'
+        Assert ($result.destinations.steam.error -like '*SteamCMD did not provide a verifiable build-completion record.*') 'Steam failure hid the missing completion proof.'
     } finally {Remove-Item Env:BA_STEAM_USERNAME;Remove-Item Env:BA_FIXTURE_STEAM_FALSE_SUCCESS}
 }
 Test 'late Steam errors retain uploaded build proof for reconciliation and never repeat automatically' {
@@ -577,6 +578,7 @@ Test 'late Steam errors retain uploaded build proof for reconciliation and never
     try {
         $result=Invoke-ReleasePublish -StatePath $prepared.statePath -SteamCmdExecutable $steam -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
         Assert ($result.destinations.steam.status -eq 'uncertain' -and $result.destinations.steam.remote.buildId -eq '999') 'Steam completed build proof was lost after a late error.'
+        Assert ($result.destinations.steam.error -like '*SteamCMD reported completion followed by an error (exit 9); reconcile the saved build ID.*') 'Late Steam failure lost its actionable diagnostic.'
         $again=Invoke-ReleasePublish -StatePath $prepared.statePath -SteamCmdExecutable $steam
         Assert ($again.destinations.steam.attempts -eq 1) 'Late Steam error repeated upload without reconciliation.'
         $reconciled=Invoke-ReleasePublish -StatePath $prepared.statePath -SteamCmdExecutable $steam -RetryUncertain

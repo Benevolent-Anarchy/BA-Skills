@@ -70,3 +70,26 @@ Test 'Google Play auth refuses a credential cache inside a Git checkout' {
     $fixtureArgs.GcloudConfigDirectory=Join-Path $repo '.git'
     Expect-Error {Invoke-WithGooglePlayAccessToken @fixtureArgs -Action {throw 'unexpected action'}} 'outside Git'
 }
+if ($IsWindows) {
+    Test 'Google Play auth skips extensionless gcloud and git shims before identity and token probes' {
+        Import-PlayAuthFixtureModule
+        $fixtureArgs=New-PlayAuthFixture
+        $tools=Split-Path $fixtureArgs.GcloudExecutable -Parent
+        $shims=Join-Path $sandbox 'gcloud-shims'
+        New-Item -ItemType Directory $shims | Out-Null
+        foreach ($name in @('gcloud','git')) {'#!/bin/sh' | Set-Content (Join-Path $shims $name)}
+        $fixtureArgs.Remove('GcloudExecutable')
+        $priorPath=$env:PATH;$priorToken=$env:BA_GOOGLE_PLAY_ACCESS_TOKEN;$priorConfig=$env:CLOUDSDK_CONFIG
+        $env:PATH=$shims+';'+$tools+';'+$priorPath
+        try {
+            $transport={param($request) return @{accessToken='shim-test-play-token';expireTime=[DateTimeOffset]::UtcNow.AddMinutes(55).ToString('O')}}
+            $result=Invoke-WithGooglePlayAccessToken @fixtureArgs -TokenTransport $transport -Action {
+                Assert ($env:BA_GOOGLE_PLAY_ACCESS_TOKEN -eq 'shim-test-play-token') 'Resolved CLI did not acquire the scoped token.'
+                'completed with runnable gcloud'
+            }
+            Assert ($result -eq 'completed with runnable gcloud') 'Shim prevented the identity/token workflow.'
+            Assert ($env:BA_GOOGLE_PLAY_ACCESS_TOKEN -eq $priorToken -and $env:CLOUDSDK_CONFIG -eq $priorConfig) 'Shim test did not restore authentication environment.'
+            Expect-Error {Invoke-WithGooglePlayAccessToken @fixtureArgs -GcloudExecutable (Join-Path $shims 'gcloud') -Action {throw 'unexpected action'}} 'Google CLI executable is missing or not runnable'
+        } finally {$env:PATH=$priorPath}
+    }
+}

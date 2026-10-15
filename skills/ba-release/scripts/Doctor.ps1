@@ -48,7 +48,9 @@ function Get-ReleaseDoctor {
         try {$engine=Get-ReleaseEngine $GodotExecutable} catch {}
         & $add 'godot' $(if ($engine) {'passed'} else {'blocked'}) $(if ($engine) {"Executable found: $engine"} else {'Godot executable missing; supply -GodotExecutable.'})
         if ($engine) {
-            $version=Invoke-ReleaseProbe $engine @('--version') ([IO.Path]::GetTempPath()) $ProbeTimeoutSeconds
+            $versionError='Godot version was unreadable or the bounded probe failed.'
+            try {$version=Invoke-ReleaseProbe $engine @('--version') ([IO.Path]::GetTempPath()) $ProbeTimeoutSeconds}
+            catch {$version=@{exitCode=125;text=''};$versionError='Godot version probe could not start; check executable format and execute permission.'}
             $text=$version.text.Trim()
             if ($version.exitCode -eq 0 -and $text -match '^(\d+\.\d+(?:\.\d+)?)\.(stable|beta\d*|rc\d*|dev\d*)(?:\.|$)') {
                 $engineVersion=$Matches[1]+'.'+$Matches[2]
@@ -56,7 +58,7 @@ function Get-ReleaseDoctor {
                 $projectText=[IO.File]::ReadAllText((Join-Path $settings.projectPath 'project.godot'))
                 $required=if ($projectText -match '(?m)^config/features=PackedStringArray\("(\d+\.\d+)"') {$Matches[1]} else {$null}
                 & $add 'godot-version' $(if (-not $required -or $required -ceq $engineMinor) {'passed'} else {'blocked'}) $(if ($required -and $required -cne $engineMinor) {"Project requires Godot $required; selected engine is $engineVersion."} else {"Selected engine: $engineVersion. The project's complete gate still determines compatibility."})
-            } else {& $add 'godot-version' 'blocked' 'Godot version was unreadable or the bounded probe failed.'}
+            } else {& $add 'godot-version' 'blocked' $versionError}
             $directories=Get-ReleaseDoctorDirectories $engine
         }
         if (-not $TemplateRoot -and $directories) {$TemplateRoot=Join-Path $directories.data 'export_templates'}

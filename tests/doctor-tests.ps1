@@ -70,6 +70,45 @@ Test 'doctor version probes have a bounded timeout' {
     $report=Get-ReleaseDoctor -Repository $fixture.repo -Destination @('itch-windows') -GodotExecutable $fixture.tool -TemplateRoot $fixture.templates -ButlerExecutable $butler -ProbeTimeoutSeconds 1
     Assert ($watch.Elapsed.TotalSeconds -lt 10 -and @($report.checks | Where-Object {$_.id -eq 'godot-version' -and $_.status -eq 'blocked'}).Count -eq 1) 'Hung version probe was not bounded.'
 }
+if ($IsWindows) {
+    Test 'doctor Godot discovery skips extensionless shims for explicit and default engine names' {
+        $fixture=New-DoctorFixture 'doctor-engine-shims'
+        $shims=Join-Path $sandbox 'godot-shims';$tools=Join-Path $sandbox 'godot-tools'
+        New-Item -ItemType Directory $shims,$tools | Out-Null
+        foreach ($name in @('godot_console','godot4_console','godot','godot4')) {
+            '#!/bin/sh' | Set-Content (Join-Path $shims $name)
+            Copy-Item $fixture.tool (Join-Path $tools ($name+'.ps1'))
+        }
+        $priorPath=$env:PATH
+        $env:PATH=$shims+';'+$tools+';'+$priorPath
+        try {
+            foreach ($name in @('godot_console','godot4_console','godot','godot4')) {
+                $found=& (Get-Module Release) {param($name) Get-ReleaseEngine $name} $name
+                Assert ($found -eq (Join-Path $tools ($name+'.ps1'))) "Engine lookup accepted the $name shim."
+            }
+            $default=& (Get-Module Release) {Get-ReleaseEngine}
+            Assert ($default -eq (Join-Path $tools 'godot_console.ps1')) 'Default engine lookup changed preference or accepted a shim.'
+            foreach ($name in @('godot',$null)) {
+                $report=Get-ReleaseDoctor -Repository $fixture.repo -Destination @('itch-windows') -GodotExecutable $name -TemplateRoot $fixture.templates -ButlerExecutable $butler
+                Assert $report.ready 'Doctor could not probe the runnable Godot candidate.'
+                Assert (@($report.checks | Where-Object {$_.id -eq 'godot-version' -and $_.status -eq 'passed'}).Count -eq 1) 'Doctor did not verify the resolved engine.'
+            }
+            Expect-Error {& (Get-Module Release) {param($path) Get-ReleaseEngine $path} (Join-Path $shims 'godot')} 'Requested Godot executable was not found'
+        } finally {$env:PATH=$priorPath}
+    }
+}
+Test 'doctor keeps its complete blocked report when the engine process cannot start' {
+    $fixture=New-DoctorFixture 'doctor-engine-start-failure'
+    $invalid=Join-Path $sandbox 'invalid-engine.exe'
+    'not an executable image' | Set-Content -LiteralPath $invalid
+    $cli=Join-Path $root 'skills/ba-release/scripts/release.ps1'
+    $json=& pwsh -NoProfile -File $cli -Mode doctor -Repository $fixture.repo -Destination itch-windows -GodotExecutable $invalid -ButlerExecutable $butler -TemplateRoot $fixture.templates
+    Assert ($LASTEXITCODE -eq 2) "Doctor aborted instead of reporting a blocked probe: $json"
+    $report=($json -join "`n") | ConvertFrom-Json -AsHashtable
+    Assert (-not $report.ready -and -not $report.Contains('error')) 'Doctor returned only a top-level exception.'
+    Assert (@($report.checks | Where-Object {$_.id -eq 'godot-version' -and $_.status -eq 'blocked' -and $_.message -like '*could not start*'}).Count -eq 1) 'Probe launch failure was not explained.'
+    Assert (@($report.checks | Where-Object {$_.id -eq 'butler' -and $_.status -eq 'passed'}).Count -eq 1 -and @($report.checks | Where-Object {$_.id -eq 'template:Windows existing'}).Count -eq 1) 'Engine probe failure discarded the other checks.'
+}
 Test 'doctor respects Gradle APKs and their configured build directory' {
     $fixture=New-DoctorFixture 'doctor-gradle-apk'
     Add-FixtureApk $fixture.repo

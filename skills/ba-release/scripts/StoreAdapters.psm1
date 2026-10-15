@@ -16,14 +16,14 @@ function Publish-SteamRelease($Plan, $Destination, $Artifacts, [string]$StatePat
         $Record.remote.phase='build-uploaded';$Record.remote.ambiguous=$false;& $SaveState
         return 'awaiting-store-action'
     }
-    if ([string]::IsNullOrWhiteSpace($env:BA_STEAM_USERNAME) -or $env:BA_STEAM_USERNAME -notmatch '^[A-Za-z0-9_-]+$') { throw 'Set BA_STEAM_USERNAME for the existing authenticated SteamCMD account; passwords are never script arguments.' }
+    if ([string]::IsNullOrWhiteSpace($env:BA_STEAM_USERNAME) -or $env:BA_STEAM_USERNAME -notmatch '^[A-Za-z0-9_-]+$') { throw (New-ReleaseDiagnosticError 'Set BA_STEAM_USERNAME for the existing authenticated SteamCMD account; passwords are never script arguments.') }
     $directory=Join-Path $StatePath ("steam/"+$Destination.id+'/'+[guid]::NewGuid().ToString('N'))
     $output=Join-Path $directory 'output'
     New-Item -ItemType Directory -Path $output -Force | Out-Null
     $depotLines=[Collections.Generic.List[string]]::new()
     foreach ($depot in $Destination.depots) {
         $artifact=@($Artifacts | Where-Object {$_.preset -ceq $depot.preset})
-        if ($artifact.Count -ne 1) {throw 'Steam depot artifact was not uniquely prepared.'}
+        if ($artifact.Count -ne 1) {throw (New-ReleaseDiagnosticError 'Steam depot artifact was not uniquely prepared.')}
         $contentRoot=[IO.Path]::GetFullPath((Join-Path $StatePath $artifact[0].directory))
         $depotPath=Join-Path $directory "depot_$($depot.id).vdf"
         $vdf='"DepotBuildConfig"' + "`n{`n" + '  "DepotID" '+(ConvertTo-SteamVdfValue $depot.id)+"`n" + '  "ContentRoot" '+(ConvertTo-SteamVdfValue $contentRoot)+"`n"
@@ -37,8 +37,11 @@ function Publish-SteamRelease($Plan, $Destination, $Artifacts, [string]$StatePat
     $appPath=Join-Path $directory "app_$($Destination.appId).vdf"
     $vdf='"AppBuild"' + "`n{`n" + '  "AppID" '+(ConvertTo-SteamVdfValue $Destination.appId)+"`n" + '  "Desc" '+(ConvertTo-SteamVdfValue "Version $($Plan.version)")+"`n" + '  "BuildOutput" '+(ConvertTo-SteamVdfValue $output)+"`n" + '  "SetLive" '+(ConvertTo-SteamVdfValue $setLive)+"`n" + '  "Preview" "0"'+"`n"+'  "Depots"'+"`n  {`n"+($depotLines -join "`n")+"`n  }`n}`n"
     [IO.File]::WriteAllText($appPath,$vdf,[Text.UTF8Encoding]::new($false))
+    Push-Location -LiteralPath $StatePath
+    try {$uploadExecutable=Find-ReleaseDoctorTool $SteamCmdExecutable} finally {Pop-Location}
+    if (-not $uploadExecutable) {throw (New-ReleaseDiagnosticError 'SteamCMD executable is unavailable before upload.')}
     $Record.remote.phase='uploading'; $Record.remote.ambiguous=$false; & $SaveState
-    $result=Invoke-ReleaseTool $SteamCmdExecutable @('+login',$env:BA_STEAM_USERNAME,'+run_app_build',$appPath,'+quit') $StatePath
+    $result=Invoke-ReleaseTool $uploadExecutable @('+login',$env:BA_STEAM_USERNAME,'+run_app_build',$appPath,'+quit') $StatePath
     # SteamCMD can exit zero on errors. Require the observed AppID/BuildID success record.
     $logPath=Join-Path $output "app_build_$($Destination.appId).log"
     $proof=$result.text
@@ -46,7 +49,8 @@ function Publish-SteamRelease($Plan, $Destination, $Artifacts, [string]$StatePat
     $pattern='Successfully finished AppID\s+'+[regex]::Escape([string]$Destination.appId)+'\s+build\s+\(BuildID\s+(?<build>\d+)\)'
     if ($proof -notmatch $pattern) {
         if ($result.exitCode -eq 0) {$Record.remote.ambiguous=$true}
-        throw 'SteamCMD did not provide a verifiable build-completion record.'
+        if ($result.exitCode -ne 0) {throw (New-ReleaseDiagnosticError "SteamCMD upload failed (exit $([int]$result.exitCode)); no verifiable build-completion record.")}
+        throw (New-ReleaseDiagnosticError 'SteamCMD did not provide a verifiable build-completion record.')
     }
     $Record.remote.buildId=$Matches.build; $Record.remote.phase='build-uploaded'
     $Record.remote.appId=$Destination.appId; $Record.remote.branch=$Destination.branch
@@ -54,7 +58,7 @@ function Publish-SteamRelease($Plan, $Destination, $Artifacts, [string]$StatePat
     $Record.remote.requiredActions=@('Verify the uploaded build is live on the approved branch.','Publish the approved patch notes as a Steam announcement and verify its URL.')
     if ($result.exitCode -ne 0) {
         $Record.remote.phase='build-uploaded-with-error';$Record.remote.ambiguous=$true;& $SaveState
-        throw 'SteamCMD reported completion followed by an error; reconcile the saved build ID.'
+        throw (New-ReleaseDiagnosticError "SteamCMD reported completion followed by an error (exit $([int]$result.exitCode)); reconcile the saved build ID.")
     }
     & $SaveState
     return 'awaiting-store-action'

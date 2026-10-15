@@ -40,8 +40,8 @@ editor mode are supported. This does not translate Windows tools into Linux tool
 
 The `release.ps1` CLI resolves executable overrides containing a directory against
 the caller's working directory, once, before any mode runs. The shared Git/GitHub
-CLI, Butler and SteamCMD lookup uses PATH for bare names, never an implicit file
-in the game or state directory. On Windows it supports only `.exe`, `.com`, `.bat`,
+CLI, Godot, gcloud, Butler and SteamCMD lookup uses PATH for bare names, never an
+implicit file in the game or state directory. On Windows it supports only `.exe`, `.com`, `.bat`,
 `.cmd` and `.ps1`; association-only scripts are not waited processes.
 
 Each check reports `passed`, `blocked`, `skipped` or `unverified`. `ready` means
@@ -50,6 +50,13 @@ username cannot prove validity, store access or cached SteamCMD authentication.
 SDK/JDK and signing presence cannot prove compatibility or a valid signature.
 The complete project gate, real exports and store preflights still supply those
 checks. Doctor makes no remote calls, login attempts, exports or source/state writes.
+An engine whose version probe cannot start produces a blocked `godot-version`
+check without discarding the rest of the report.
+
+Steam and Butler publication errors retain library-generated reasons, including
+missing executables/authentication inputs, upload exit codes and missing Steam
+completion proof. Arbitrary tool output and unclassified exception text remain
+excluded from the release journal because they can contain credentials.
 
 ## Prepared destination holds
 

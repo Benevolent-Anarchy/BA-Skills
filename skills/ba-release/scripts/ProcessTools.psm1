@@ -18,6 +18,14 @@ function Find-ReleaseDoctorTool([string]$Name) {
     return $null
 }
 
+# Marks only library-generated diagnostics as safe for release journals.
+# Never pass external tool output or provider exception text as the diagnostic.
+function New-ReleaseDiagnosticError([string]$Message, [string]$Diagnostic=$Message) {
+    $exception=[Exception]::new($Message)
+    $exception.Data['releaseDiagnostic']=$Diagnostic
+    return $exception
+}
+
 function Invoke-ReleaseTool([string]$Executable, [string[]]$Arguments, [string]$Directory, [hashtable]$Environment=@{}) {
     $PSNativeCommandUseErrorActionPreference = $false
     $priorEnvironment=@{}
@@ -28,14 +36,16 @@ function Invoke-ReleaseTool([string]$Executable, [string[]]$Arguments, [string]$
             [Environment]::SetEnvironmentVariable($key,$Environment[$key],'Process')
         }
         $resolved=Find-ReleaseDoctorTool $Executable
-        if (-not $resolved) {throw "Tool '$Executable' did not run as a process: executable missing or not runnable."}
+        if (-not $resolved) {throw (New-ReleaseDiagnosticError "Tool '$Executable' did not run as a process: executable missing or not runnable." 'Tool executable is missing or not runnable; supply its runtime path.')}
         $Executable=$resolved
         $global:LASTEXITCODE=$null
-        if ($Executable.EndsWith('.ps1',[StringComparison]::OrdinalIgnoreCase)) {
-            $lines = & (Join-Path $PSHOME $(if ($IsWindows) {'pwsh.exe'} else {'pwsh'})) -NoProfile -File $Executable @Arguments 2>&1
-        } else { $lines = & $Executable @Arguments 2>&1 }
+        try {
+            if ($Executable.EndsWith('.ps1',[StringComparison]::OrdinalIgnoreCase)) {
+                $lines = & (Join-Path $PSHOME $(if ($IsWindows) {'pwsh.exe'} else {'pwsh'})) -NoProfile -File $Executable @Arguments 2>&1
+            } else { $lines = & $Executable @Arguments 2>&1 }
+        } catch {throw (New-ReleaseDiagnosticError 'Tool process could not be started; check executable format and execute permission.')}
         # Defensive guard: supported tool types must produce their own native exit code.
-        if ($null -eq $LASTEXITCODE) {throw "Tool '$Executable' did not run as a process (no exit code)."}
+        if ($null -eq $LASTEXITCODE) {throw (New-ReleaseDiagnosticError "Tool '$Executable' did not run as a process (no exit code)." 'Tool did not report a process exit code; inspect the executable before retrying.')}
         return @{exitCode=$LASTEXITCODE; text=($lines -join "`n")}
     } finally {
         foreach ($key in $priorEnvironment.Keys) {
@@ -68,4 +78,4 @@ function Invoke-ReleaseProbe([string]$Executable, [string[]]$Arguments, [string]
         return @{exitCode=$process.ExitCode;text=$stdout.Result+"`n"+$stderr.Result}
     } finally {$process.Dispose()}
 }
-Export-ModuleMember -Function Find-ReleaseDoctorTool,Invoke-ReleaseTool,Invoke-ReleaseProbe
+Export-ModuleMember -Function Find-ReleaseDoctorTool,New-ReleaseDiagnosticError,Invoke-ReleaseTool,Invoke-ReleaseProbe
