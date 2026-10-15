@@ -5,6 +5,7 @@ function New-PlayAuthFixture {
     $cli=Join-Path $folder 'gcloud.ps1'
     @'
 param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Rest)
+if ($MyInvocation.ExpectingInput) {$input | Out-Null}
 if ($Rest -contains 'list') { '[{"account":"cicely@benevolentanarchy.com","status":"ACTIVE"}]'; exit 0 }
 if ($Rest -contains 'print-access-token') { 'user-fixture-secret'; exit 0 }
 exit 92

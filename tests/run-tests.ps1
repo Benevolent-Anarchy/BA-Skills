@@ -316,6 +316,41 @@ Test 'Windows tool discovery and publish skip extensionless shims' {
         Remove-Item Env:BA_FIXTURE_NOTE_STORE -ErrorAction SilentlyContinue
     }
 }
+Test 'notes preflight retains only classified diagnostics and never private paths or parser errors' {
+    $repo=New-Fixture 'notes-safe-diagnostics'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','notes') (Join-Path $sandbox 'notes-safe-diagnostics-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $fakeGh=Join-Path $sandbox 'notes-diagnostic-gh.ps1'
+    @'
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Rest)
+if ($env:BA_FIXTURE_NOTE_RESPONSE -eq 'unavailable') {'private-note-diagnostic';exit 12}
+if ($env:BA_FIXTURE_NOTE_RESPONSE -eq 'metadata-json') {'{"private-note-diagnostic":';exit 0}
+if (($Rest -join ' ') -notmatch '/contents/') {'{"private":false,"permissions":{"push":true}}';exit 0}
+if ($env:BA_FIXTURE_NOTE_RESPONSE -eq 'entry-json') {'{"private-note-diagnostic":';exit 0}
+'{"encoding":"base64","content":"private-note-diagnostic!"}';exit 0
+'@ | Set-Content -LiteralPath $fakeGh
+    $generic='Public notes preflight failed; check public visibility, write permissions, approved availability link and conflicting notes before any store publication.'
+    $priorResponse=$env:BA_FIXTURE_NOTE_RESPONSE
+    try {
+        foreach ($scenario in @('missing','unavailable','metadata-json','entry-json','base64')) {
+            $env:BA_FIXTURE_NOTE_RESPONSE=$scenario
+            $executable=if ($scenario -eq 'missing') {Join-Path $sandbox 'private-runtime-path/missing-gh.exe'} else {$fakeGh}
+            $result=Invoke-ReleasePublish -StatePath $prepared.statePath -GhExecutable $executable -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+            $record=$result.destinations.notes
+            Assert ($record.status -eq 'failed' -and $record.preflightStatus -eq 'failed') "$scenario preflight did not fail."
+            $expected=switch ($scenario) {
+                'missing' {$generic+' GitHub CLI executable is missing or not runnable; supply -GhExecutable.'}
+                'unavailable' {$generic+' Public notes repository is unavailable.'}
+                default {$generic}
+            }
+            Assert ($record.error -eq $expected) "$scenario persisted an unclassified preflight diagnostic."
+            Assert ($result.destinations['itch-windows'].attempts -eq 0) "$scenario preflight failure allowed a store attempt."
+            $json=($result | ConvertTo-Json -Depth 30)+(Get-Content $stateFile -Raw)
+            Assert ($json -notmatch 'private-note-diagnostic|private-runtime-path') "$scenario preflight exposed private data."
+        }
+    } finally {$env:BA_FIXTURE_NOTE_RESPONSE=$priorResponse}
+}
 Test 'notes are approval gated, public, idempotent and never overwrite different content' {
     $repo = New-Fixture 'public-notes'
     $prepared = Invoke-ReleasePrepare $repo @('itch-windows','notes') (Join-Path $sandbox 'note-state') $engine
@@ -336,6 +371,7 @@ Test 'notes are approval gated, public, idempotent and never overwrite different
         $conflictHash = (Get-FileHash $env:BA_FIXTURE_NOTE_STORE).Hash
         $result = Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -GhExecutable $gh
         Assert ($result.destinations.notes.status -eq 'failed') 'Conflicting notes were called successful.'
+        Assert ($result.destinations.notes.error -like '*Existing public canonical notes conflict with the approved content.*') 'Conflicting notes lost the classified reason.'
         Assert ((Get-FileHash $env:BA_FIXTURE_NOTE_STORE).Hash -eq $conflictHash) 'Existing public note content was overwritten.'
         [IO.File]::WriteAllText($env:BA_FIXTURE_NOTE_STORE,[IO.File]::ReadAllText($notesPath))
         $result = Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -GhExecutable $gh

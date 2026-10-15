@@ -643,7 +643,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             try {
                 Push-Location -LiteralPath $state.plan.repository
                 try {$resolvedGh=Find-ReleaseDoctorTool $GhExecutable} finally {Pop-Location}
-                if (-not $resolvedGh) {throw "Executable missing or not runnable: $GhExecutable"}
+                if (-not $resolvedGh) {throw (New-ReleaseDiagnosticError 'GitHub CLI executable is missing or not runnable; supply -GhExecutable.')}
                 $GhExecutable=$resolvedGh
                 Assert-ReleaseNotesDestination $state.plan $notes $StatePath $GhExecutable
                 if ($notesRecord.Contains('preflightStatus') -and $notesRecord.preflightStatus -eq 'failed') {$notesRecord.error=$null}
@@ -652,7 +652,8 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             catch {
                 if ($notesRecord.status -ne 'held') {$notesRecord.status='failed'}
                 $notesRecord.preflightStatus='failed'
-                $notesRecord.error="Public notes preflight failed; check public visibility, write permissions, approved availability link and conflicting notes before any store publication. $($_.Exception.Message)"
+                $notesRecord.error='Public notes preflight failed; check public visibility, write permissions, approved availability link and conflicting notes before any store publication.'
+                if ($_.Exception.Data.Contains('releaseDiagnostic')) {$notesRecord.error += ' '+$_.Exception.Data['releaseDiagnostic']}
                 $state.status=Get-ReleaseOverallStatus $state;Write-ReleaseJson $stateFile $state
                 return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}
             }

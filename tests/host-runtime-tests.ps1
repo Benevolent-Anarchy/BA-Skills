@@ -10,6 +10,59 @@ Test 'process environment overrides remove originally absent variables after too
     Expect-Error {Invoke-ReleaseTool (Join-Path $sandbox 'missing-executable') @() $sandbox -Environment @{$key='temporary'}} 'did not run as a process'
     Assert (-not (Test-Path -LiteralPath ('Env:'+$key))) 'Failed tool left an originally absent variable behind.'
 }
+Test 'tool runners close stdin even when the caller holds an input pipe open' {
+    $tool=Join-Path $sandbox 'stdin-gcloud.ps1'
+    @'
+if ($MyInvocation.ExpectingInput) {
+    [Console]::Error.WriteLine('waiting-for-eof')
+    $input | Out-Null
+}
+'eof received'
+exit 7
+'@ | Set-Content -LiteralPath $tool
+    $runner=Join-Path $sandbox 'open-stdin-runner.ps1'
+    @'
+# Like the SDK wrapper, omit a param block so pwsh does not bind stdin before the body.
+$Module,$Tool,$Directory,$Kind=$args
+$ErrorActionPreference='Stop'
+Import-Module $Module -Force
+$result=switch ($Kind) {
+    'probe' {Invoke-ReleaseProbe $Tool @('--version') $Directory 5}
+    'tool' {Invoke-ReleaseTool $Tool @('--version') $Directory}
+    'native' {Invoke-ReleaseTool (Join-Path $PSHOME $(if ($IsWindows) {'pwsh.exe'} else {'pwsh'})) @('-NoProfile','-File',$Tool,'--version') $Directory}
+}
+$result | ConvertTo-Json -Compress
+exit 0
+'@ | Set-Content -LiteralPath $runner
+    foreach ($kind in @('control','probe','tool','native')) {
+        $start=[Diagnostics.ProcessStartInfo]::new()
+        $start.FileName=Join-Path $PSHOME $(if ($IsWindows) {'pwsh.exe'} else {'pwsh'})
+        $start.UseShellExecute=$false;$start.CreateNoWindow=$true
+        $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+        $arguments=if ($kind -eq 'control') {@('-NoProfile','-File',$tool)} else {@('-NoProfile','-File',$runner,(Join-Path $root 'skills/ba-release/scripts/ProcessTools.psm1'),$tool,$sandbox,$kind)}
+        foreach ($argument in $arguments) {$start.ArgumentList.Add($argument)}
+        $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+        try {
+            $null=$process.Start()
+            # Deliberately leave StandardInput open: closing the outer pipe would hide the bug.
+            if ($kind -eq 'control') {
+                $ready=$process.StandardError.ReadLineAsync()
+                Assert ($ready.Wait(10000) -and $ready.Result -eq 'waiting-for-eof') 'Control wrapper did not enter its input-reading branch.'
+                Assert (-not $process.WaitForExit(250)) 'Control wrapper did not block on inherited stdin.'
+                continue
+            }
+            $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+            Assert ($process.WaitForExit(15000)) "$kind runner waited on the caller's open input pipe."
+            Assert ([Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout,$stderr),5000)) "$kind output did not close."
+            Assert ($process.ExitCode -eq 0) "$kind runner failed: $($stderr.Result)"
+            $result=$stdout.Result | ConvertFrom-Json -AsHashtable
+            Assert ($result.exitCode -eq 7 -and $result.text -match 'eof received') "$kind did not return the wrapper output and exit code: $($stdout.Result)"
+        } finally {
+            if (-not $process.HasExited) {$process.Kill($true);$null=$process.WaitForExit(5000)}
+            $process.Dispose()
+        }
+    }
+}
 Test 'tool lookup requires PATH or an explicit directory and never implicitly runs a local file' {
     Import-Module (Join-Path $root 'skills/ba-release/scripts/ProcessTools.psm1') -Force
     $directory=Join-Path $sandbox 'local-tool-lookup'
@@ -96,6 +149,27 @@ Test 'release CLI binds relative executable paths to the caller across doctor pr
     } finally {
         Pop-Location
         $env:BA_STEAM_USERNAME=$priorSteam;$env:BA_FIXTURE_NOTE_STORE=$priorStore
+    }
+}
+if ($IsWindows) {
+    Test 'release CLI reports a missing-drive executable as blocked without rejecting other modes' {
+        $repo=New-Fixture 'missing-drive-cli'
+        $drive=@(90..68 | ForEach-Object {[string][char]$_} | Where-Object {-not (Get-PSDrive -Name $_ -ErrorAction SilentlyContinue)})[0]
+        Assert ($null -ne $drive) 'Fixture requires an unused drive letter.'
+        $missing=$drive+':\private-runtime-path\missing.exe'
+        $cli=Join-Path $root 'skills/ba-release/scripts/release.ps1'
+        $executables=@{GodotExecutable=$missing;ButlerExecutable=$missing;SteamCmdExecutable=$missing;GhExecutable=$missing}
+        $json=& pwsh -NoProfile -File $cli -Mode doctor -Repository $repo -Destination notes @executables
+        Assert ($LASTEXITCODE -eq 2) "Missing drive aborted doctor instead of blocking one tool: $json"
+        $report=($json -join "`n") | ConvertFrom-Json -AsHashtable
+        Assert (-not $report.ready -and @($report.checks | Where-Object {$_.id -eq 'gh' -and $_.status -eq 'blocked'}).Count -eq 1) 'Missing-drive GitHub CLI was not blocked.'
+        Assert (@($report.checks | Where-Object {$_.id -eq 'godot' -and $_.status -eq 'skipped'}).Count -eq 1) 'Unselected missing-drive tool affected the doctor report.'
+        $json=& pwsh -NoProfile -File $cli -Mode doctor -Repository $repo -Destination itch-windows @executables
+        Assert ($LASTEXITCODE -eq 2) "Missing-drive engine aborted doctor: $json"
+        $report=($json -join "`n") | ConvertFrom-Json -AsHashtable
+        Assert (@($report.checks | Where-Object {$_.id -eq 'godot' -and $_.status -eq 'blocked'}).Count -eq 1) 'Missing-drive engine was not blocked.'
+        $json=& pwsh -NoProfile -File $cli -Mode plan -Repository $repo -Destination notes @executables
+        Assert ($LASTEXITCODE -eq 0) "An unused missing-drive override blocked read-only planning: $json"
     }
 }
 Test 'Steam and Butler failures retain safe reasons without persisting private tool output' {

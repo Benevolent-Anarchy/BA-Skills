@@ -38,11 +38,14 @@ Host paths stay out of release.json. Supply `-GodotExecutable`,
 explicit override. Godot's normal Windows/Linux/WSL data paths and self-contained
 editor mode are supported. This does not translate Windows tools into Linux tools.
 
-The `release.ps1` CLI resolves executable overrides containing a directory against
-the caller's working directory, once, before any mode runs. The shared Git/GitHub
+The `release.ps1` CLI resolves relative executable overrides containing a directory
+against the caller's working directory, once, before any mode runs. Fully qualified
+paths stay unchanged, even when their drive is unavailable. The shared Git/GitHub
 CLI, Godot, gcloud, Butler and SteamCMD lookup uses PATH for bare names, never an
 implicit file in the game or state directory. On Windows it supports only `.exe`, `.com`, `.bat`,
 `.cmd` and `.ps1`; association-only scripts are not waited processes.
+Both tool execution and bounded probes receive closed stdin. They are non-interactive:
+wrappers cannot wait on the agent's open input pipe; sign in separately beforehand.
 
 Each check reports `passed`, `blocked`, `skipped` or `unverified`. `ready` means
 no local blockers; `remoteAccessVerified` remains false. Presence of a token or
@@ -55,7 +58,9 @@ check without discarding the rest of the report.
 
 Steam and Butler publication errors retain library-generated reasons, including
 missing executables/authentication inputs, upload exit codes and missing Steam
-completion proof. Arbitrary tool output and unclassified exception text remain
+completion proof. Notes preflight uses the same policy for missing GitHub CLI,
+availability-link, repository-access and conflicting-content checks.
+Arbitrary tool output, private runtime paths and unclassified exception text remain
 excluded from the release journal because they can contain credentials.
 
 ## Prepared destination holds

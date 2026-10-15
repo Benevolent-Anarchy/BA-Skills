@@ -40,9 +40,10 @@ function Invoke-ReleaseTool([string]$Executable, [string[]]$Arguments, [string]$
         $Executable=$resolved
         $global:LASTEXITCODE=$null
         try {
+            # These operations are non-interactive; wrappers must see EOF, not the agent's open stdin.
             if ($Executable.EndsWith('.ps1',[StringComparison]::OrdinalIgnoreCase)) {
-                $lines = & (Join-Path $PSHOME $(if ($IsWindows) {'pwsh.exe'} else {'pwsh'})) -NoProfile -File $Executable @Arguments 2>&1
-            } else { $lines = & $Executable @Arguments 2>&1 }
+                $lines = @() | & (Join-Path $PSHOME $(if ($IsWindows) {'pwsh.exe'} else {'pwsh'})) -NoProfile -File $Executable @Arguments 2>&1
+            } else { $lines = @() | & $Executable @Arguments 2>&1 }
         } catch {throw (New-ReleaseDiagnosticError 'Tool process could not be started; check executable format and execute permission.')}
         # Defensive guard: supported tool types must produce their own native exit code.
         if ($null -eq $LASTEXITCODE) {throw (New-ReleaseDiagnosticError "Tool '$Executable' did not run as a process (no exit code)." 'Tool did not report a process exit code; inspect the executable before retrying.')}
@@ -60,6 +61,7 @@ function Invoke-ReleaseProbe([string]$Executable, [string[]]$Arguments, [string]
     $start=[Diagnostics.ProcessStartInfo]::new()
     $start.FileName=$Executable;$start.WorkingDirectory=$Directory
     $start.UseShellExecute=$false;$start.CreateNoWindow=$true
+    $start.RedirectStandardInput=$true
     $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
     if ($Executable.EndsWith('.ps1',[StringComparison]::OrdinalIgnoreCase)) {
         $start.FileName=Join-Path $PSHOME $(if ($IsWindows) {'pwsh.exe'} else {'pwsh'})
@@ -69,6 +71,7 @@ function Invoke-ReleaseProbe([string]$Executable, [string[]]$Arguments, [string]
     $process=[Diagnostics.Process]::new();$process.StartInfo=$start
     try {
         $null=$process.Start()
+        $process.StandardInput.Close()
         $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutSeconds*1000)) {
             $process.Kill($true);$null=$process.WaitForExit(5000)

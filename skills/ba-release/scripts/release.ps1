@@ -37,7 +37,7 @@ try {
     # Bare command names retain PATH lookup; missing explicit paths remain missing.
     foreach ($parameter in @('GodotExecutable','ButlerExecutable','GhExecutable','SteamCmdExecutable')) {
         $executable=Get-Variable -Name $parameter -ValueOnly
-        if ($executable -and [IO.Path]::GetFileName($executable) -cne $executable) {
+        if ($executable -and -not [IO.Path]::IsPathFullyQualified($executable) -and [IO.Path]::GetFileName($executable) -cne $executable) {
             Set-Variable -Name $parameter -Value $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($executable)
         }
     }
