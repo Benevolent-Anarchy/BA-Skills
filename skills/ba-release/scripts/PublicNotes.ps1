@@ -25,16 +25,16 @@ function Export-ReleasePlayChangelogs([string]$StatePath) {
 
 # Checks public visibility, write access and existing notes before starting any selected store writes.
 function Assert-ReleaseNotesDestination($Plan, [string]$Notes, [string]$StatePath, [string]$GhExecutable) {
-    if (-not $Notes.Contains("[Release availability](../availability/$($Plan.version).json)")) {throw 'Approved canonical notes require the predictable availability link.'}
+    if (-not $Notes.Contains("[Release availability](../availability/$($Plan.version).json)")) {throw (New-ReleaseDiagnosticError 'Approved canonical notes require the predictable availability link.')}
     $response=Invoke-ReleaseTool $GhExecutable @('api','--hostname','github.com',"repos/$($Plan.notesRepository)") $StatePath
-    if ($response.exitCode -ne 0) {throw 'Public notes repository is unavailable.'}
+    if ($response.exitCode -ne 0) {throw (New-ReleaseDiagnosticError 'Public notes repository is unavailable.')}
     $metadata=$response.text | ConvertFrom-Json -AsHashtable
-    if (-not $metadata.Contains('private') -or $metadata.private -ne $false -or -not $metadata.Contains('permissions') -or $metadata.permissions['push'] -ne $true) {throw 'Public notes require a public repository and verified write permission.'}
+    if (-not $metadata.Contains('private') -or $metadata.private -ne $false -or -not $metadata.Contains('permissions') -or $metadata.permissions['push'] -ne $true) {throw (New-ReleaseDiagnosticError 'Public notes require a public repository and verified write permission.')}
     $existing=Invoke-ReleaseTool $GhExecutable @('api','--hostname','github.com',"repos/$($Plan.notesRepository)/contents/releases/$($Plan.version).md") $StatePath
     if ($existing.exitCode -eq 0) {
         $entry=$existing.text | ConvertFrom-Json -AsHashtable
-        if ($entry.encoding -ne 'base64' -or [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($entry.content)) -cne $Notes) {throw 'Existing public canonical notes conflict with the approved content.'}
-    } elseif ($existing.text -notmatch '(?i)HTTP 404|Not Found') {throw 'Cannot verify existing public notes.'}
+        if ($entry.encoding -ne 'base64' -or [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($entry.content)) -cne $Notes) {throw (New-ReleaseDiagnosticError 'Existing public canonical notes conflict with the approved content.')}
+    } elseif ($existing.text -notmatch '(?i)HTTP 404|Not Found') {throw (New-ReleaseDiagnosticError 'Cannot verify existing public notes.')}
 }
 
 # Requires actual live evidence for this release; an uploaded Steam build or submitted Play edit is insufficient.

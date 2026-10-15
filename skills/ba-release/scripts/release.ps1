@@ -33,6 +33,14 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Release.psm1') -Force
 $selected = @($Destination | ForEach-Object {$_.Split(',')} | Where-Object {$_})
 try {
+    # Bind explicit tool paths to the caller's location before any mode changes directory.
+    # Bare command names retain PATH lookup; missing explicit paths remain missing.
+    foreach ($parameter in @('GodotExecutable','ButlerExecutable','GhExecutable','SteamCmdExecutable')) {
+        $executable=Get-Variable -Name $parameter -ValueOnly
+        if ($executable -and -not [IO.Path]::IsPathFullyQualified($executable) -and [IO.Path]::GetFileName($executable) -cne $executable) {
+            Set-Variable -Name $parameter -Value $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($executable)
+        }
+    }
     if ($Mode -eq 'unhold' -and $PSBoundParameters.ContainsKey('HoldReason')) {throw '-HoldReason cannot be supplied to unhold.'}
     if ($PlayTrackReviewed -and $Mode -ne 'unhold') {throw '-PlayTrackReviewed applies only to unhold.'}
     if ($MigrateConfiguration -and $Mode -ne 'extend') {throw '-MigrateConfiguration applies only to extend.'}

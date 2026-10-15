@@ -18,12 +18,12 @@ function Invoke-WithGooglePlayAccessToken {
     if ($ServiceAccount -notmatch '^[a-z][a-z0-9-]{4,29}@[a-z][a-z0-9-]{4,29}\.iam\.gserviceaccount\.com$') {throw 'Supply a valid authorized service account email.'}
     if (-not (Test-Path -LiteralPath $GcloudConfigDirectory -PathType Container)) {throw 'The existing Google CLI credential directory is required.'}
     $directory=(Resolve-Path -LiteralPath $GcloudConfigDirectory).Path
-    $git=@(Get-Command git -CommandType Application -ErrorAction Stop)[0]
-    $boundary=Invoke-ReleaseProbe $git.Source @('-C',$directory,'rev-parse','--git-dir') $directory
+    $git=Find-ReleaseDoctorTool 'git'
+    if (-not $git) {throw 'Git executable is missing or not runnable; credential boundary could not be verified.'}
+    $boundary=Invoke-ReleaseProbe $git @('-C',$directory,'rev-parse','--git-dir') $directory
     if ($boundary.exitCode -eq 124 -or $boundary.exitCode -eq 0) {throw 'Keep Google CLI credentials outside Git checkouts.'}
-    if (-not (Test-Path -LiteralPath $GcloudExecutable -PathType Leaf)) {
-        $GcloudExecutable=@(Get-Command $GcloudExecutable -CommandType Application -ErrorAction Stop)[0].Source
-    }
+    $GcloudExecutable=Find-ReleaseDoctorTool $GcloudExecutable
+    if (-not $GcloudExecutable) {throw 'Google CLI executable is missing or not runnable; supply -GcloudExecutable.'}
     $priorConfig=$env:CLOUDSDK_CONFIG
     $priorToken=$env:BA_GOOGLE_PLAY_ACCESS_TOKEN
     $userToken=$null;$mint=$null

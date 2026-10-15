@@ -279,6 +279,78 @@ if (Test-Path -LiteralPath $store) {
 }
 Write-Output 'HTTP 404: Not Found'; exit 1
 '@ | Set-Content $gh
+Test 'Windows tool discovery and publish skip extensionless shims' {
+    if (-not $IsWindows) {return}
+    $shimDirectory=Join-Path $sandbox 'shim-bin'
+    $toolDirectory=Join-Path $sandbox 'native-bin'
+    New-Item -ItemType Directory $shimDirectory,$toolDirectory | Out-Null
+    foreach ($name in @('gh','butler','steamcmd')) {
+        '#!/bin/sh' | Set-Content (Join-Path $shimDirectory $name)
+        Copy-Item $gh (Join-Path $toolDirectory "$name.ps1")
+    }
+    $priorPath=$env:PATH
+    $env:PATH="$shimDirectory;$toolDirectory;$priorPath"
+    try {
+        foreach ($name in @('gh','butler','steamcmd')) {
+            $found=& (Get-Module Release) {param($name) Find-ReleaseDoctorTool $name} $name
+            Assert ($found -eq (Join-Path $toolDirectory "$name.ps1")) "Discovery accepted the $name shim."
+            $explicit=& (Get-Module Release) {param($path) Find-ReleaseDoctorTool $path} (Join-Path $shimDirectory $name)
+            Assert (-not $explicit) 'Explicit extensionless path was accepted.'
+        }
+        $repo=New-Fixture 'shim-notes'
+        $prepared=Invoke-ReleasePrepare $repo @('notes') (Join-Path $sandbox 'shim-note-state')
+        $state=Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'shim-remote-note.md'
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+        Assert ($result.destinations.notes.preflightStatus -eq 'succeeded') "Publish did not use the runnable PATH candidate: $($result.destinations.notes.error)"
+        # PowerShell functions are not executable tools, even if they would return success.
+        Expect-Error {
+            & (Get-Module Release) {param($directory)
+                function NoProcess {}
+                $global:LASTEXITCODE=0
+                Invoke-ReleaseTool 'NoProcess' @() $directory
+            } $sandbox
+        } 'executable missing or not runnable'
+    } finally {
+        $env:PATH=$priorPath
+        Remove-Item Env:BA_FIXTURE_NOTE_STORE -ErrorAction SilentlyContinue
+    }
+}
+Test 'notes preflight retains only classified diagnostics and never private paths or parser errors' {
+    $repo=New-Fixture 'notes-safe-diagnostics'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows','notes') (Join-Path $sandbox 'notes-safe-diagnostics-state') $engine
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $state=Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
+    $fakeGh=Join-Path $sandbox 'notes-diagnostic-gh.ps1'
+    @'
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Rest)
+if ($env:BA_FIXTURE_NOTE_RESPONSE -eq 'unavailable') {'private-note-diagnostic';exit 12}
+if ($env:BA_FIXTURE_NOTE_RESPONSE -eq 'metadata-json') {'{"private-note-diagnostic":';exit 0}
+if (($Rest -join ' ') -notmatch '/contents/') {'{"private":false,"permissions":{"push":true}}';exit 0}
+if ($env:BA_FIXTURE_NOTE_RESPONSE -eq 'entry-json') {'{"private-note-diagnostic":';exit 0}
+'{"encoding":"base64","content":"private-note-diagnostic!"}';exit 0
+'@ | Set-Content -LiteralPath $fakeGh
+    $generic='Public notes preflight failed; check public visibility, write permissions, approved availability link and conflicting notes before any store publication.'
+    $priorResponse=$env:BA_FIXTURE_NOTE_RESPONSE
+    try {
+        foreach ($scenario in @('missing','unavailable','metadata-json','entry-json','base64')) {
+            $env:BA_FIXTURE_NOTE_RESPONSE=$scenario
+            $executable=if ($scenario -eq 'missing') {Join-Path $sandbox 'private-runtime-path/missing-gh.exe'} else {$fakeGh}
+            $result=Invoke-ReleasePublish -StatePath $prepared.statePath -GhExecutable $executable -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+            $record=$result.destinations.notes
+            Assert ($record.status -eq 'failed' -and $record.preflightStatus -eq 'failed') "$scenario preflight did not fail."
+            $expected=switch ($scenario) {
+                'missing' {$generic+' GitHub CLI executable is missing or not runnable; supply -GhExecutable.'}
+                'unavailable' {$generic+' Public notes repository is unavailable.'}
+                default {$generic}
+            }
+            Assert ($record.error -eq $expected) "$scenario persisted an unclassified preflight diagnostic."
+            Assert ($result.destinations['itch-windows'].attempts -eq 0) "$scenario preflight failure allowed a store attempt."
+            $json=($result | ConvertTo-Json -Depth 30)+(Get-Content $stateFile -Raw)
+            Assert ($json -notmatch 'private-note-diagnostic|private-runtime-path') "$scenario preflight exposed private data."
+        }
+    } finally {$env:BA_FIXTURE_NOTE_RESPONSE=$priorResponse}
+}
 Test 'notes are approval gated, public, idempotent and never overwrite different content' {
     $repo = New-Fixture 'public-notes'
     $prepared = Invoke-ReleasePrepare $repo @('itch-windows','notes') (Join-Path $sandbox 'note-state') $engine
@@ -293,11 +365,13 @@ Test 'notes are approval gated, public, idempotent and never overwrite different
         $env:BA_FIXTURE_PRIVATE='1'
         $result = Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 $hash
         Assert ($result.destinations.notes.status -eq 'failed' -and -not (Test-Path $env:BA_FIXTURE_NOTE_STORE)) 'Private notes repo was published to.'
+        Assert ($result.destinations.notes.error -like '*Public notes require a public repository and verified write permission.*') 'Preflight lost its underlying failure reason.'
         Remove-Item Env:BA_FIXTURE_PRIVATE
         'conflicting existing public notes' | Set-Content $env:BA_FIXTURE_NOTE_STORE
         $conflictHash = (Get-FileHash $env:BA_FIXTURE_NOTE_STORE).Hash
         $result = Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -GhExecutable $gh
         Assert ($result.destinations.notes.status -eq 'failed') 'Conflicting notes were called successful.'
+        Assert ($result.destinations.notes.error -like '*Existing public canonical notes conflict with the approved content.*') 'Conflicting notes lost the classified reason.'
         Assert ((Get-FileHash $env:BA_FIXTURE_NOTE_STORE).Hash -eq $conflictHash) 'Existing public note content was overwritten.'
         [IO.File]::WriteAllText($env:BA_FIXTURE_NOTE_STORE,[IO.File]::ReadAllText($notesPath))
         $result = Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -GhExecutable $gh
@@ -529,6 +603,7 @@ Test 'Steam zero-exit error output cannot be called uploaded' {
     try {
         $result=Invoke-ReleasePublish -StatePath $prepared.statePath -SteamCmdExecutable $steam -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
         Assert ($result.destinations.steam.status -notin @('succeeded','submitted','awaiting-store-action')) 'Steam error exit 0 was accepted as success.'
+        Assert ($result.destinations.steam.error -like '*SteamCMD did not provide a verifiable build-completion record.*') 'Steam failure hid the missing completion proof.'
     } finally {Remove-Item Env:BA_STEAM_USERNAME;Remove-Item Env:BA_FIXTURE_STEAM_FALSE_SUCCESS}
 }
 Test 'late Steam errors retain uploaded build proof for reconciliation and never repeat automatically' {
@@ -539,6 +614,7 @@ Test 'late Steam errors retain uploaded build proof for reconciliation and never
     try {
         $result=Invoke-ReleasePublish -StatePath $prepared.statePath -SteamCmdExecutable $steam -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
         Assert ($result.destinations.steam.status -eq 'uncertain' -and $result.destinations.steam.remote.buildId -eq '999') 'Steam completed build proof was lost after a late error.'
+        Assert ($result.destinations.steam.error -like '*SteamCMD reported completion followed by an error (exit 9); reconcile the saved build ID.*') 'Late Steam failure lost its actionable diagnostic.'
         $again=Invoke-ReleasePublish -StatePath $prepared.statePath -SteamCmdExecutable $steam
         Assert ($again.destinations.steam.attempts -eq 1) 'Late Steam error repeated upload without reconciliation.'
         $reconciled=Invoke-ReleasePublish -StatePath $prepared.statePath -SteamCmdExecutable $steam -RetryUncertain

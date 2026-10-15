@@ -416,14 +416,13 @@ function Assert-ReleaseArtifacts([string]$StatePath, $State) {
 # Finds an installed engine at runtime; host-specific executable paths do not enter release.json.
 function Get-ReleaseEngine([string]$Executable) {
     if ($Executable) {
-        $command = Get-Command $Executable -ErrorAction SilentlyContinue
-        if ($command) { return $command.Source }
-        if (Test-Path -LiteralPath $Executable -PathType Leaf) { return (Get-Item $Executable).FullName }
+        $engine=Find-ReleaseDoctorTool $Executable
+        if ($engine) {return $engine}
         throw 'Requested Godot executable was not found.'
     }
     foreach ($name in @('godot_console','godot4_console','godot','godot4')) {
-        $command = Get-Command $name -ErrorAction SilentlyContinue
-        if ($command) { return $command.Source }
+        $engine=Find-ReleaseDoctorTool $name
+        if ($engine) {return $engine}
     }
     throw 'No Godot executable found; supply -GodotExecutable for the inspected engine.'
 }
@@ -642,6 +641,10 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
         if ($notesDestination.Count) {
             $notesRecord=$state.destinations[$notesDestination[0].id]
             try {
+                Push-Location -LiteralPath $state.plan.repository
+                try {$resolvedGh=Find-ReleaseDoctorTool $GhExecutable} finally {Pop-Location}
+                if (-not $resolvedGh) {throw (New-ReleaseDiagnosticError 'GitHub CLI executable is missing or not runnable; supply -GhExecutable.')}
+                $GhExecutable=$resolvedGh
                 Assert-ReleaseNotesDestination $state.plan $notes $StatePath $GhExecutable
                 if ($notesRecord.Contains('preflightStatus') -and $notesRecord.preflightStatus -eq 'failed') {$notesRecord.error=$null}
                 $notesRecord.preflightStatus='succeeded'
@@ -650,6 +653,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 if ($notesRecord.status -ne 'held') {$notesRecord.status='failed'}
                 $notesRecord.preflightStatus='failed'
                 $notesRecord.error='Public notes preflight failed; check public visibility, write permissions, approved availability link and conflicting notes before any store publication.'
+                if ($_.Exception.Data.Contains('releaseDiagnostic')) {$notesRecord.error += ' '+$_.Exception.Data['releaseDiagnostic']}
                 $state.status=Get-ReleaseOverallStatus $state;Write-ReleaseJson $stateFile $state
                 return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}
             }
@@ -685,20 +689,20 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 $outcome='succeeded'
                 if ($destination.type -eq 'itch') {
                     $artifacts = @($state.artifacts | Where-Object {$_.preset -ceq $destination.preset})
-                    if ($artifacts.Count -ne 1) { throw 'Prepared artifact not uniquely found.' }
+                    if ($artifacts.Count -ne 1) { throw (New-ReleaseDiagnosticError 'Prepared artifact not uniquely found.') }
                     $directory = Resolve-ReleasePath $StatePath $artifacts[0].directory -MustExist
                     $preset=@($state.plan.exports | Where-Object {$_.name -ceq $destination.preset})[0]
                     $inputPath=Get-ReleaseButlerInput $directory $preset $destination
                     if ($preset.platform -eq 'Android' -and (-not $state.checks[$destination.id].Contains('input') -or
-                        $state.checks[$destination.id].input -cne [IO.Path]::GetRelativePath($StatePath,$inputPath).Replace('\','/'))) {throw 'Resume prepare to verify the signed APK input before publication.'}
+                        $state.checks[$destination.id].input -cne [IO.Path]::GetRelativePath($StatePath,$inputPath).Replace('\','/'))) {throw (New-ReleaseDiagnosticError 'Resume prepare to verify the signed APK input before publication.')}
                     $arguments = @('push',$inputPath,$destination.target,'--userversion',$state.plan.version)
                     foreach ($pattern in $destination.ignore) { $arguments += @('--ignore',$pattern) }
                     Push-Location -LiteralPath $StatePath
                     try {$pushExecutable=Find-ReleaseDoctorTool $ButlerExecutable} finally {Pop-Location}
-                    if (-not $pushExecutable) {throw 'Butler executable is unavailable before upload.'}
+                    if (-not $pushExecutable) {throw (New-ReleaseDiagnosticError 'Butler executable is unavailable before upload.')}
                     $record.remote.phase='pushing';Write-ReleaseJson $stateFile $state
                     $upload = Invoke-ReleaseTool $pushExecutable $arguments $StatePath
-                    if ($upload.exitCode -ne 0) { throw "Butler upload failed (exit $($upload.exitCode))." }
+                    if ($upload.exitCode -ne 0) { throw (New-ReleaseDiagnosticError "Butler upload failed (exit $([int]$upload.exitCode)).") }
                     $record.remote.phase='upload-complete';$record.remote.live=$true;$record.remote.target=$destination.target;$record.remote.sourceCommit=$artifacts[0]['sourceCommit']
                     if ($destination.Contains('displayName')) {$outcome='awaiting-store-action';$record.remote.displayNameRequired=$destination.displayName}
                 } elseif ($destination.type -eq 'steam') {
@@ -712,12 +716,15 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 $record.status=$outcome
             } catch {
                 $record.status=if (($record.remote.Contains('phase') -and $record.remote.phase -eq 'committing') -or ($record.remote.Contains('ambiguous') -and $record.remote.ambiguous)) {'uncertain'} else {'failed'}
-                # Do not persist command output: authentication tools can include sensitive diagnostics.
+                # Do not persist arbitrary exception text/output: authentication tools can include secrets.
                 $record.error = switch ($destination.type) {
                     'itch' {'Butler attempt failed; reconcile the remote channel before retrying if the result is ambiguous.'}
                     'steam' {'Steam attempt needs inspection; check authenticated SteamCMD access and the app build result before retrying.'}
                     'google-play' {'Play attempt needs inspection; check the saved edit, bundle version/hash, track and commit/review state before retrying.'}
                     default {'Public note attempt failed; check repository visibility, conflicting content and GitHub access.'}
+                }
+                if ($destination.type -in @('itch','steam') -and $_.Exception.Data.Contains('releaseDiagnostic')) {
+                    $record.error += ' '+$_.Exception.Data['releaseDiagnostic']
                 }
             }
             Write-ReleaseJson $stateFile $state
