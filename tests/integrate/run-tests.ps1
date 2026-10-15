@@ -1084,7 +1084,9 @@ function New-CommitRecord([string]$Oid, [string]$Message, [string[]]$Parents = @
 ## What GitHub records about the commits on $Pages, the JSON pages of a pull request's
 ## commits: each commit follows the one before it and the first follows the base, all
 ## introduced by #7, as is the merge commit, which follows the base and, unless linear,
-## the head. The base came with #6. A page that is not JSON gives nothing.
+## the head. The base came with #6. GitHub's comparison of the head with the merge commit
+## finds the merge ahead when it has two parents, and the two diverged when it is linear.
+## A page that is not JSON gives nothing.
 function New-LandedGraph([string[]]$Pages) {
     $records = @{}
     try { $read = @($Pages | ForEach-Object { (ConvertFrom-Json $_).data.repository.pullRequest }) } catch { return $records }
@@ -1099,6 +1101,10 @@ function New-LandedGraph([string[]]$Pages) {
     if ($merge -and -not $records.ContainsKey($key)) {
         $parents = if ([int]$merge.parents.totalCount -ge 2) { @($baseOid, $read[0].headRefOid) } else { @($baseOid) }
         $records += New-CommitRecord $merge.oid $merge.message $parents @(7)
+    }
+    if ($merge) {
+        $status = if ([int]$merge.parents.totalCount -ge 2) { 'ahead' } else { 'diverged' }
+        $records["api repos/fixture/repo/compare/$($read[0].headRefOid)...$($merge.oid)?per_page=1"] = (ConvertTo-Json -Compress -InputObject @{ status = $status })
     }
     return $records
 }
@@ -1355,6 +1361,25 @@ Test 'an indirect merge with the head as the merge commit''s first parent lands 
     Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'merge' -and $issues.Count -eq 1 -and (@($issues[0].commits) -join ',') -eq $head.Substring(0, 8)) "Indirect merge mishandled: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
 }
 
+Test 'a commit first merged into another branch lands when a later pull request brings it to the default branch' {
+    # The reviewer's case, as on c-lgrant/tvault #29: a feature merged into an intermediate
+    # branch through #6, which GitHub keeps recording as introducing it, and #7 merges that
+    # branch into main with the feature's head as its second parent. GitHub's comparison
+    # finds the head among the merge commit's ancestors, so its Fixes #5 landed now.
+    $head = New-Oid
+    $page = New-CommitPage @('Fixes #5') -Oids @($head)
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{} @{ '' = $page } @{ 'Fixes #5' = $fixes5 } (New-CommitRecord $head 'Fixes #5' @($baseOid) @(6))
+    $issues = @($run.Result.issues)
+    Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'merge' -and -not $run.Result.allClosed -and $issues.Count -eq 1 -and $issues[0].linkedBy -eq 'commit keyword' -and (@($issues[0].commits) -join ',') -eq $head.Substring(0, 8)) "Two-stage merge mishandled: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'a head GitHub cannot compare with the merge commit fails the audit' {
+    $page = New-CommitPage
+    $head = ((ConvertFrom-Json $page).data.repository.pullRequest.headRefOid)
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = $page } @{} @{ "api repos/fixture/repo/compare/${head}...${mergeOid}?per_page=1" = '!fail HTTP 502' }
+    Assert ($run.Code -eq 1 -and $run.Result.error -match "Could not read the comparison of #7's head with its merge commit") "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
+}
+
 Test 'a merged pull request GitHub lists no commits for fails the audit' {
     # #35's git/git case: the branch was rewritten after the merge, so nothing shows what
     # landed.
@@ -1362,8 +1387,8 @@ Test 'a merged pull request GitHub lists no commits for fails the audit' {
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'lists no commits for #7') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
 }
 
-Test 'a merge commit GitHub does not record as introduced by the pull request fails the audit' {
-    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage) } @{} (New-CommitRecord $mergeOid 'Merge pull request #7 from fixture/topic' @($baseOid) @(6))
+Test 'a squash GitHub does not record as introduced by the pull request fails the audit' {
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage -Linear) } @{} (New-CommitRecord $mergeOid 'Squash of #7' @($baseOid) @(6))
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'does not record #7 as introducing its merge commit') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
 }
 
@@ -1377,9 +1402,9 @@ Test 'more commits recorded as landed than the pull request has fail the audit' 
 Test 'a commit GitHub cannot read while tracing what landed fails the audit' {
     # In place of the bounded history read the reviewer found could end short: each commit
     # is read by its id, and a failed or partial read is an error.
-    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage) } @{} @{ "graphql LandedCommit owner=fixture name=repo oid=$mergeOid" = '!fail HTTP 502' }
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage -Linear) } @{} @{ "graphql LandedCommit owner=fixture name=repo oid=$mergeOid" = '!fail HTTP 502' }
     Assert ($run.Code -eq 1 -and $run.Result.error -match "Could not read commit $mergeOid") "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
-    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage) } @{} (New-CommitRecord $mergeOid 'Merge pull request #7 from fixture/topic' @($baseOid) @(6) 11)
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage -Linear) } @{} (New-CommitRecord $mergeOid 'Squash of #7' @($baseOid) @(6) 11)
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'listed only part of what it records') "Expected a failure on a partial record: $($run.Result | ConvertTo-Json -Compress)"
 }
 
