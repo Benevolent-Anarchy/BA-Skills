@@ -1031,9 +1031,8 @@ function New-GitHubCheckout {
     return $repo
 }
 
-## The commits every page from New-CommitPage reports, unless told otherwise: the pull
-## request's head, the base it merged into, and the merge commit.
-$headOid = 'beadbead' + ('0' * 32)
+## The commits every test's pull request has unless it says otherwise: the base it
+## merged into, and its merge commit.
 $baseOid = 'basebase' + ('0' * 32)
 $mergeOid = 'feedface' + ('0' * 32)
 
@@ -1041,19 +1040,18 @@ $mergeOid = 'feedface' + ('0' * 32)
 function New-Oid { return ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')).Substring(0, 40) }
 
 ## One page of a pull request's commits as GitHub's GraphQL API returns it. $Messages are
-## the commits' messages, each authored at $Authored plus its position in minutes, $Total
-## is the pull request's total, and $Next the cursor of the following page, if any. The
-## head is $Head. The merge commit $MergeOid has $MergeMessage and, by default, the parents
-## of a merge commit: the base and the head. -Linear gives it the base alone, as a squash
-## or rebase does; -NoMergeCommit leaves it out, as GitHub does for one not merged.
-function New-CommitPage([string[]]$Messages = @(), [int]$Total = -1, [string]$Next, [string]$MergeMessage = 'Merge pull request #7 from fixture/topic', [switch]$NoMergeCommit, [switch]$Linear, [string]$MergeOid = $mergeOid, [string]$Head = $headOid, [string]$Authored = '2025-12-01T00:00:00Z', [string[]]$Oids = @()) {
+## the commits' messages, with ids from $Oids or made up, $Total is the pull request's
+## total, and $Next the cursor of the following page, if any. The head is $Head, or this
+## page's last commit. The merge commit $MergeOid has $MergeMessage and, by default, the
+## two parents of a merge commit; -Linear gives it one, as a squash or rebase does, and
+## -NoMergeCommit leaves it out, as GitHub does for one not merged.
+function New-CommitPage([string[]]$Messages = @('Implement the change'), [int]$Total = -1, [string]$Next, [string]$MergeMessage = 'Merge pull request #7 from fixture/topic', [switch]$NoMergeCommit, [switch]$Linear, [string]$MergeOid = $mergeOid, [string]$Head, [string[]]$Oids = @()) {
     if ($Total -lt 0) { $Total = $Messages.Count }
     $nodes = @(for ($i = 0; $i -lt $Messages.Count; $i++) {
-        $oid = if ($i -lt $Oids.Count) { $Oids[$i] } else { New-Oid }
-        @{ commit = @{ oid = $oid; message = $Messages[$i]; authoredDate = ([datetime]$Authored).ToUniversalTime().AddMinutes($i).ToString('yyyy-MM-ddTHH:mm:ssZ'); parents = @{ totalCount = 1 } } }
+        @{ commit = @{ oid = $(if ($i -lt $Oids.Count) { $Oids[$i] } else { New-Oid }); message = $Messages[$i] } }
     })
-    $parents = if ($Linear) { @($baseOid) } else { @($baseOid, $Head) }
-    $merge = if ($NoMergeCommit) { $null } else { @{ oid = $MergeOid; message = $MergeMessage; authoredDate = '2026-01-01T00:00:00Z'; parents = @{ totalCount = $parents.Count; nodes = @($parents | ForEach-Object { @{ oid = $_ } }) } } }
+    if (-not $Head) { $Head = if ($nodes.Count) { $nodes[-1].commit.oid } else { New-Oid } }
+    $merge = if ($NoMergeCommit) { $null } else { @{ oid = $MergeOid; message = $MergeMessage; parents = @{ totalCount = $(if ($Linear) { 1 } else { 2 }) } } }
     $pullRequest = @{
         headRefOid = $Head
         mergeCommit = $merge
@@ -1070,11 +1068,39 @@ function New-ClosingPage([object[]]$References = @(), [int]$Total = -1, [string]
     return ConvertTo-Json -Compress -Depth 8 -InputObject @{ data = @{ repository = @{ pullRequest = @{ closingIssuesReferences = $connection } } } }
 }
 
-## One page of a commit's history as GitHub's GraphQL API returns it, newest first: each of
-## $Commits has an oid, message and authoredDate.
-function New-HistoryPage([object[]]$Commits) {
-    $history = @{ totalCount = 1000; pageInfo = @{ hasNextPage = $true; endCursor = 'h2' }; nodes = @($Commits) }
-    return ConvertTo-Json -Compress -Depth 8 -InputObject @{ data = @{ repository = @{ object = @{ history = $history } } } }
+## The stand-in response for what GitHub records about commit $Oid: $Message, $Parents,
+## and $Introduced, the numbers of the fixture/repo pull requests GitHub says introduced it,
+## of $IntroducedTotal in all.
+function New-CommitRecord([string]$Oid, [string]$Message, [string[]]$Parents = @(), [int[]]$Introduced = @(), [int]$IntroducedTotal = -1) {
+    if ($IntroducedTotal -lt 0) { $IntroducedTotal = $Introduced.Count }
+    $commit = @{
+        oid = $Oid; message = $Message
+        parents = @{ totalCount = $Parents.Count; nodes = @($Parents | ForEach-Object { @{ oid = $_ } }) }
+        associatedPullRequests = @{ totalCount = $IntroducedTotal; nodes = @($Introduced | ForEach-Object { @{ number = $_; repository = @{ nameWithOwner = 'fixture/repo' } } }) }
+    }
+    return @{ "graphql LandedCommit owner=fixture name=repo oid=$Oid" = (ConvertTo-Json -Compress -Depth 8 -InputObject @{ data = @{ repository = @{ object = $commit } } }) }
+}
+
+## What GitHub records about the commits on $Pages, the JSON pages of a pull request's
+## commits: each commit follows the one before it and the first follows the base, all
+## introduced by #7, as is the merge commit, which follows the base and, unless linear,
+## the head. The base came with #6. A page that is not JSON gives nothing.
+function New-LandedGraph([string[]]$Pages) {
+    $records = @{}
+    try { $read = @($Pages | ForEach-Object { (ConvertFrom-Json $_).data.repository.pullRequest }) } catch { return $records }
+    $previous = $baseOid
+    foreach ($node in @($read | ForEach-Object { @($_.commits.nodes) })) {
+        $records += New-CommitRecord $node.commit.oid $node.commit.message @($previous) @(7)
+        $previous = $node.commit.oid
+    }
+    $records += New-CommitRecord $baseOid 'Earlier work' @() @(6)
+    $merge = $read[0].mergeCommit
+    $key = "graphql LandedCommit owner=fixture name=repo oid=$($merge.oid)"
+    if ($merge -and -not $records.ContainsKey($key)) {
+        $parents = if ([int]$merge.parents.totalCount -ge 2) { @($baseOid, $read[0].headRefOid) } else { @($baseOid) }
+        $records += New-CommitRecord $merge.oid $merge.message $parents @(7)
+    }
+    return $records
 }
 
 ## A closing reference to issue $Number of $Owner/$Name, as GitHub lists it.
@@ -1098,8 +1124,9 @@ function New-RenderedReference([string]$Repository, [int]$Number, [string]$Text 
 ## gives each issue URL its `gh issue view` JSON, and $Timelines gives an issue URL the
 ## pages of its timeline, each a JSON array; a missing timeline is one empty page. $Commits
 ## are the pages of the pull request's commits, keyed by the cursor that reads them ('' for
-## the first). $Renderings give a commit message the HTML GitHub renders it as, and
-## $Extra adds or replaces any other stand-in response.
+## the first); what GitHub records about each commit comes from New-LandedGraph.
+## $Renderings give a commit message the HTML GitHub renders it as, and $Extra adds or
+## replaces any other stand-in response.
 function Invoke-CheckIssues([hashtable]$PullRequest, [hashtable]$Issues, [hashtable]$Timelines = @{}, [hashtable]$Commits = @{ '' = (New-CommitPage) }, [hashtable]$Renderings = @{}, [hashtable]$Extra = @{}) {
     $pr = [ordered]@{ number = 7; url = 'https://github.com/fixture/repo/pull/7'; state = 'MERGED'; mergedAt = '2026-01-01T00:00:00Z'; baseRefName = 'main' }
     foreach ($key in @($PullRequest.Keys | Where-Object { $_ -notin @('closing', 'manual') })) { $pr[$key] = $PullRequest[$key] }
@@ -1113,6 +1140,8 @@ function Invoke-CheckIssues([hashtable]$PullRequest, [hashtable]$Issues, [hashta
         $responses["graphql PullRequestCommits owner=fixture name=repo number=7$(if ($cursor) { " after=$cursor" })"] = $Commits[$cursor]
     }
     foreach ($text in $Renderings.Keys) { $responses["markdown $text"] = $Renderings[$text] }
+    $graph = New-LandedGraph (@($Commits[''] | Where-Object { $_ }) + @($Commits.Keys | Where-Object { $_ } | Sort-Object | ForEach-Object { $Commits[$_] }))
+    foreach ($key in $graph.Keys) { $responses[$key] = $graph[$key] }
     foreach ($url in $Issues.Keys) {
         $responses["issue view $url"] = $Issues[$url]
         $pages = @(if ($Timelines.ContainsKey($url)) { $Timelines[$url] } else { '[]' })
@@ -1270,7 +1299,7 @@ Test 'a regular merge lands its commits, so an issue only a commit names is audi
 
 Test 'a fast-forward to the head lands its commits' {
     $oid = New-Oid
-    $page = New-CommitPage @('Fixes #5') -Oids @($oid) -Head $oid -MergeOid $oid -Linear -MergeMessage 'Fixes #5'
+    $page = New-CommitPage @('Fixes #5') -Oids @($oid) -MergeOid $oid -Linear -MergeMessage 'Fixes #5'
     $run = Invoke-CheckIssues @{} @{ $issue5 = $closedIssue } @{} @{ '' = $page } @{ 'Fixes #5' = $fixes5 }
     $issues = @($run.Result.issues)
     Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'fast-forward' -and $issues.Count -eq 1 -and $issues[0].inMergeCommit) "Fast-forward mishandled: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
@@ -1280,38 +1309,78 @@ Test 'an edited squash that drops a commit''s keyword expects nothing of it' {
     # #34: the original commit said Fixes #5, but only the squash reached the default
     # branch, and its message names nothing. The original is never sent to be rendered.
     $page = New-CommitPage @('Fixes #5') -Linear -MergeMessage 'Squash without any closing keyword'
-    $history = New-HistoryPage @(@{ oid = $mergeOid; message = 'Squash without any closing keyword'; authoredDate = '2026-01-01T00:00:00Z' })
-    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{} @{ '' = $page } @{} @{ "graphql LandedHistory owner=fixture name=repo oid=$mergeOid" = $history }
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{} @{ '' = $page }
     Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'squash' -and $run.Result.allClosed -and @($run.Result.issues).Count -eq 0) "Expected nothing to audit: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
 }
 
 Test 'a squash whose message adds a keyword is audited' {
     $message = "Implement retry (#7)`n`nFixes #5"
     $page = New-CommitPage @('Implement retry') -Linear -MergeMessage $message
-    $history = New-HistoryPage @(@{ oid = $mergeOid; message = $message; authoredDate = '2026-01-01T00:00:00Z' })
-    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{ $issue5 = $reopened5 } @{ '' = $page } @{ $message = "<p dir=`"auto`">Implement retry (#7)</p>`n$fixes5" } @{ "graphql LandedHistory owner=fixture name=repo oid=$mergeOid" = $history }
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{ $issue5 = $reopened5 } @{ '' = $page } @{ $message = "<p dir=`"auto`">Implement retry (#7)</p>`n$fixes5" }
     $issues = @($run.Result.issues)
     Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'squash' -and $issues.Count -eq 1 -and $issues[0].linkedBy -eq 'merge commit keyword' -and (@($issues[0].findings) -join ' ') -match 'reopened by someone') "Squash keyword missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
 }
 
 Test 'a rebase lands copies of the commits, which are audited by the copies'' ids' {
-    # #34: the copies have new ids but each original's message and author date, the last
-    # being the merge commit; a keyword in an earlier copy closes its issue too.
+    # #34: GitHub records the copies, new ids ending at the merge commit, as introduced by
+    # the pull request; a keyword in an earlier copy closes its issue too.
     $copy = New-Oid
-    $page = New-CommitPage @('Fixes #5', 'Tidy the cell') -Linear -MergeMessage 'Tidy the cell' -Authored '2025-12-01T00:00:00Z'
-    $history = New-HistoryPage @(
-        @{ oid = $mergeOid; message = 'Tidy the cell'; authoredDate = '2025-12-01T00:01:00Z' },
-        @{ oid = $copy; message = 'Fixes #5'; authoredDate = '2025-12-01T00:00:00Z' })
-    $run = Invoke-CheckIssues @{} @{ $issue5 = $closedIssue } @{} @{ '' = $page } @{ 'Fixes #5' = $fixes5 } @{ "graphql LandedHistory owner=fixture name=repo oid=$mergeOid" = $history }
+    $page = New-CommitPage @('Fixes #5', 'Tidy the cell') -Linear -MergeMessage 'Tidy the cell'
+    $graph = (New-CommitRecord $mergeOid 'Tidy the cell' @($copy) @(7)) + (New-CommitRecord $copy 'Fixes #5' @($baseOid) @(7))
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $closedIssue } @{} @{ '' = $page } @{ 'Fixes #5' = $fixes5 } $graph
     $issues = @($run.Result.issues)
     Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'rebase' -and $issues.Count -eq 1 -and (@($issues[0].commits) -join ',') -eq $copy.Substring(0, 8) -and -not $issues[0].inMergeCommit) "Rebase mishandled: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
 }
 
-Test 'a merge commit that does not merge the head fails the audit' {
-    # The merge commit's second parent is $headOid, but GitHub reports another head.
-    $page = (New-CommitPage @('Fixes #5')).Replace("`"headRefOid`":`"$headOid`"", "`"headRefOid`":`"$(New-Oid)`"")
-    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = $page }
-    Assert ($run.Code -eq 1 -and $run.Result.error -match 'does not merge its head') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
+Test 'a rebase that drops an empty commit still lands the earlier copy''s keyword' {
+    # The reviewer's case: GitHub does not copy a commit that was empty to begin with, so
+    # three originals land as two copies, and the first one's Fixes #5 still closes #5.
+    $copy = New-Oid
+    $page = New-CommitPage @('Fixes #5', 'Mark the CI run', 'Tidy the cell') -Linear -MergeMessage 'Tidy the cell'
+    $graph = (New-CommitRecord $mergeOid 'Tidy the cell' @($copy) @(7)) + (New-CommitRecord $copy 'Fixes #5' @($baseOid) @(7))
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $openIssue } @{ $issue5 = $reopened5 } @{ '' = $page } @{ 'Fixes #5' = $fixes5 } $graph
+    $issues = @($run.Result.issues)
+    Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'rebase' -and -not $run.Result.allClosed -and $issues.Count -eq 1 -and (@($issues[0].commits) -join ',') -eq $copy.Substring(0, 8)) "Earlier copy missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'an indirect merge with the head as the merge commit''s first parent lands its commits' {
+    # #35: someone merged the branch into the base, head first. The head's commits are
+    # ancestors of the merge commit, so they landed.
+    $head = New-Oid
+    $other = New-Oid
+    $page = New-CommitPage @('Fixes #5') -Oids @($head)
+    $graph = (New-CommitRecord $mergeOid "Merge branch 'topic'" @($head, $other) @(7)) + (New-CommitRecord $other 'Work from elsewhere' @($baseOid) @())
+    $run = Invoke-CheckIssues @{} @{ $issue5 = $closedIssue } @{} @{ '' = $page } @{ 'Fixes #5' = $fixes5 } $graph
+    $issues = @($run.Result.issues)
+    Assert ($run.Code -eq 0 -and $run.Result.landing -eq 'merge' -and $issues.Count -eq 1 -and (@($issues[0].commits) -join ',') -eq $head.Substring(0, 8)) "Indirect merge mishandled: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
+}
+
+Test 'a merged pull request GitHub lists no commits for fails the audit' {
+    # #35's git/git case: the branch was rewritten after the merge, so nothing shows what
+    # landed.
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage -Messages @()) }
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'lists no commits for #7') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
+}
+
+Test 'a merge commit GitHub does not record as introduced by the pull request fails the audit' {
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage) } @{} (New-CommitRecord $mergeOid 'Merge pull request #7 from fixture/topic' @($baseOid) @(6))
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'does not record #7 as introducing its merge commit') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
+}
+
+Test 'more commits recorded as landed than the pull request has fail the audit' {
+    $older = New-Oid
+    $graph = (New-CommitRecord $baseOid 'Earlier work' @($older) @(7)) + (New-CommitRecord $older 'Older work' @() @(7))
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage -Linear) } @{} $graph
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'records more commits as introduced by #7') "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
+}
+
+Test 'a commit GitHub cannot read while tracing what landed fails the audit' {
+    # In place of the bounded history read the reviewer found could end short: each commit
+    # is read by its id, and a failed or partial read is an error.
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage) } @{} @{ "graphql LandedCommit owner=fixture name=repo oid=$mergeOid" = '!fail HTTP 502' }
+    Assert ($run.Code -eq 1 -and $run.Result.error -match "Could not read commit $mergeOid") "Expected a failure: $($run.Result | ConvertTo-Json -Compress)"
+    $run = Invoke-CheckIssues @{} @{} @{} @{ '' = (New-CommitPage) } @{} (New-CommitRecord $mergeOid 'Merge pull request #7 from fixture/topic' @($baseOid) @(6) 11)
+    Assert ($run.Code -eq 1 -and $run.Result.error -match 'listed only part of what it records') "Expected a failure on a partial record: $($run.Result | ConvertTo-Json -Compress)"
 }
 
 Test 'only references GitHub resolves to an issue, right after a closing keyword, close it' {
@@ -1391,9 +1460,10 @@ Test 'a merged pull request whose merge commit GitHub does not give fails the au
 }
 
 Test 'commits on a second page are read' {
+    $headOfTwo = New-Oid
     $run = Invoke-CheckIssues @{} @{ 'https://github.com/fixture/repo/issues/9' = $closedIssue } @{} @{
-        '' = (New-CommitPage @('First half') 2 'c2')
-        'c2' = (New-CommitPage @('Closes #9') 2)
+        '' = (New-CommitPage @('First half') 2 'c2' -Head $headOfTwo)
+        'c2' = (New-CommitPage @('Closes #9') 2 -Oids @($headOfTwo))
     } @{ 'Closes #9' = "<p dir=`"auto`">Closes $(New-RenderedReference 'fixture/repo' 9)</p>" }
     Assert ($run.Code -eq 0 -and (@($run.Result.issues | ForEach-Object number) -join ',') -eq '9') "Second page missed: $($run.Result | ConvertTo-Json -Compress -Depth 6)"
 }
