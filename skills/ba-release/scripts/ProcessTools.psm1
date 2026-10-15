@@ -6,11 +6,12 @@ Set-StrictMode -Version Latest
 function Find-ReleaseDoctorTool([string]$Name) {
     if (-not $Name) {return $null}
     $candidates=@(Get-Command $Name -All -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | ForEach-Object {$_.Source})
-    if (Test-Path -LiteralPath $Name -PathType Leaf) {$candidates+= (Get-Item -LiteralPath $Name).FullName}
+    if ([IO.Path]::GetFileName($Name) -cne $Name -and (Test-Path -LiteralPath $Name -PathType Leaf)) {$candidates+= (Get-Item -LiteralPath $Name).FullName}
     foreach ($candidate in $candidates) {
         if ($IsWindows) {
             $extension=[IO.Path]::GetExtension($candidate)
-            if (-not $extension -or ($extension -ine '.ps1' -and $extension -notin @($env:PATHEXT -split ';'))) {continue}
+            # Association-only PATHEXT entries launch unwatched; accept only waited processes.
+            if ($extension -notin @('.exe','.com','.bat','.cmd','.ps1')) {continue}
         }
         return $candidate
     }
@@ -33,6 +34,7 @@ function Invoke-ReleaseTool([string]$Executable, [string[]]$Arguments, [string]$
         if ($Executable.EndsWith('.ps1',[StringComparison]::OrdinalIgnoreCase)) {
             $lines = & (Join-Path $PSHOME $(if ($IsWindows) {'pwsh.exe'} else {'pwsh'})) -NoProfile -File $Executable @Arguments 2>&1
         } else { $lines = & $Executable @Arguments 2>&1 }
+        # Defensive guard: supported tool types must produce their own native exit code.
         if ($null -eq $LASTEXITCODE) {throw "Tool '$Executable' did not run as a process (no exit code)."}
         return @{exitCode=$LASTEXITCODE; text=($lines -join "`n")}
     } finally {

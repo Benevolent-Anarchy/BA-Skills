@@ -38,6 +38,12 @@ Host paths stay out of release.json. Supply `-GodotExecutable`,
 explicit override. Godot's normal Windows/Linux/WSL data paths and self-contained
 editor mode are supported. This does not translate Windows tools into Linux tools.
 
+The `release.ps1` CLI resolves executable overrides containing a directory against
+the caller's working directory, once, before any mode runs. The shared Git/GitHub
+CLI, Butler and SteamCMD lookup uses PATH for bare names, never an implicit file
+in the game or state directory. On Windows it supports only `.exe`, `.com`, `.bat`,
+`.cmd` and `.ps1`; association-only scripts are not waited processes.
+
 Each check reports `passed`, `blocked`, `skipped` or `unverified`. `ready` means
 no local blockers; `remoteAccessVerified` remains false. Presence of a token or
 username cannot prove validity, store access or cached SteamCMD authentication.

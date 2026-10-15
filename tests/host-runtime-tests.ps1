@@ -10,6 +10,94 @@ Test 'process environment overrides remove originally absent variables after too
     Expect-Error {Invoke-ReleaseTool (Join-Path $sandbox 'missing-executable') @() $sandbox -Environment @{$key='temporary'}} 'did not run as a process'
     Assert (-not (Test-Path -LiteralPath ('Env:'+$key))) 'Failed tool left an originally absent variable behind.'
 }
+Test 'tool lookup requires PATH or an explicit directory and never implicitly runs a local file' {
+    Import-Module (Join-Path $root 'skills/ba-release/scripts/ProcessTools.psm1') -Force
+    $directory=Join-Path $sandbox 'local-tool-lookup'
+    New-Item -ItemType Directory $directory | Out-Null
+    $name='local-only-'+[guid]::NewGuid().ToString('N')+'.ps1'
+    $path=Join-Path $directory $name
+    "'explicit local tool';exit 0" | Set-Content -LiteralPath $path
+    Push-Location $directory
+    try {
+        Assert (-not (Find-ReleaseDoctorTool $name)) 'A bare command name resolved from the working directory.'
+        Expect-Error {Invoke-ReleaseTool $name @() $directory} 'executable missing or not runnable'
+        Assert ((Find-ReleaseDoctorTool ("./"+$name)) -eq $path) 'Explicit relative tool path was rejected.'
+        $result=Invoke-ReleaseTool ("./"+$name) @() $directory
+        Assert ($result.exitCode -eq 0 -and $result.text -eq 'explicit local tool') 'Explicit local tool did not run.'
+        $priorPath=$env:PATH
+        try {
+            $env:PATH=$directory+[IO.Path]::PathSeparator+$priorPath
+            Assert ((Find-ReleaseDoctorTool $name) -eq $path) 'A command on PATH was rejected.'
+        } finally {$env:PATH=$priorPath}
+    } finally {Pop-Location}
+}
+if ($IsWindows) {
+    Test 'Windows tool lookup rejects association-only PATHEXT entries before invocation' {
+        Import-Module (Join-Path $root 'skills/ba-release/scripts/ProcessTools.psm1') -Force
+        $directory=Join-Path $sandbox 'association-tools'
+        $fallback=Join-Path $sandbox 'waited-tools'
+        New-Item -ItemType Directory $directory,$fallback | Out-Null
+        $priorPath=$env:PATH;$priorExtensions=$env:PATHEXT
+        try {
+            $env:PATHEXT='.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL;.PY;.PYW;'+$priorExtensions
+            $env:PATH=$directory+';'+$fallback+';'+$priorPath
+            foreach ($extension in @('.vbs','.vbe','.js','.jse','.wsf','.wsh','.msc','.cpl','.py','.pyw')) {
+                $name='association-'+$extension.Substring(1)
+                $path=Join-Path $directory ($name+$extension)
+                'Association-only fixture; must never be invoked.' | Set-Content -LiteralPath $path
+                "'waited fallback';exit 0" | Set-Content (Join-Path $fallback ($name+'.ps1'))
+                Assert (@(Get-Command $name -All -CommandType Application,ExternalScript).Source -contains $path) "Fixture $extension was not discoverable."
+                Assert ((Find-ReleaseDoctorTool $name) -eq (Join-Path $fallback ($name+'.ps1'))) "Lookup accepted $extension."
+                Assert (-not (Find-ReleaseDoctorTool $path)) "An explicit $extension path was accepted."
+                Expect-Error {Invoke-ReleaseTool $path @() $sandbox} 'executable missing or not runnable'
+                $result=Invoke-ReleaseTool $name @() $sandbox
+                Assert ($result.exitCode -eq 0 -and $result.text -eq 'waited fallback') "The fallback for $extension did not run synchronously."
+            }
+            foreach ($extension in @('.bat','.cmd')) {
+                $path=Join-Path $fallback ('waited'+$extension)
+                "@echo off`r`necho waited batch`r`nexit /b 7" | Set-Content -LiteralPath $path
+                $result=Invoke-ReleaseTool $path @() $sandbox
+                Assert ($result.exitCode -eq 7 -and $result.text -eq 'waited batch') "$extension did not return its output and exit code."
+            }
+        } finally {$env:PATH=$priorPath;$env:PATHEXT=$priorExtensions}
+    }
+}
+Test 'release CLI binds relative executable paths to the caller across doctor prepare and publish' {
+    $fixture=New-DoctorFixture 'relative-cli-tools'
+    $caller=Join-Path $sandbox 'relative-cli-caller'
+    $tools=Join-Path $caller 'tool kit'
+    New-Item -ItemType Directory $tools | Out-Null
+    $engineText=[IO.File]::ReadAllText($engine).Replace('$index =', 'if ($Rest -contains ''--version'') {''4.7.1.stable.fixture'';exit 0}'+"`n"+'$index =')
+    $engineText | Set-Content -LiteralPath (Join-Path $tools 'godot.ps1')
+    Copy-Item $butler (Join-Path $tools 'butler.ps1')
+    Copy-Item $steam (Join-Path $tools 'steamcmd.ps1')
+    Copy-Item $gh (Join-Path $tools 'gh.ps1')
+    $cli=Join-Path $root 'skills/ba-release/scripts/release.ps1'
+    $executables=@{ButlerExecutable='tool kit/butler.ps1';SteamCmdExecutable='tool kit/steamcmd.ps1';GhExecutable='tool kit/gh.ps1'}
+    $priorSteam=$env:BA_STEAM_USERNAME;$priorStore=$env:BA_FIXTURE_NOTE_STORE
+    $env:BA_STEAM_USERNAME='fixture';$env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'relative-cli-remote-note.md'
+    Push-Location $caller
+    try {
+        $json=& pwsh -NoProfile -File $cli -Mode doctor -Repository $fixture.repo -Destination 'itch-windows,steam,notes' -GodotExecutable 'tool kit/godot.ps1' -TemplateRoot $fixture.templates @executables
+        Assert ($LASTEXITCODE -eq 0) "Doctor failed with caller-relative tools: $json"
+        $doctor=($json -join "`n") | ConvertFrom-Json -AsHashtable
+        foreach ($tool in @('butler','steamcmd','gh')) {
+            $check=@($doctor.checks | Where-Object {$_.id -eq $tool})[0]
+            Assert ($check.status -eq 'passed' -and $check.message -eq "Executable found: $(Join-Path $tools ($tool+'.ps1'))") "Doctor resolved $tool from the wrong directory."
+        }
+        $json=& pwsh -NoProfile -File $cli -Mode prepare -Repository $fixture.repo -Destination 'itch-windows,steam,notes' -StateRoot (Join-Path $sandbox 'relative-cli-state') -GodotExecutable 'tool kit/godot.ps1' -ButlerExecutable $executables.ButlerExecutable
+        Assert ($LASTEXITCODE -eq 0) "Preparation failed with caller-relative tools: $json"
+        $prepared=($json -join "`n") | ConvertFrom-Json -AsHashtable
+        $state=Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $json=& pwsh -NoProfile -File $cli -Mode publish -StatePath $prepared.statePath -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan) @executables
+        Assert ($LASTEXITCODE -eq 3) "Publish failed before recording store progress: $json"
+        $published=($json -join "`n") | ConvertFrom-Json -AsHashtable
+        Assert ($published.destinations['itch-windows'].status -eq 'succeeded' -and $published.destinations.steam.status -eq 'awaiting-store-action' -and $published.destinations.notes.status -eq 'succeeded') "Publish did not use the caller-relative tools: $json"
+    } finally {
+        Pop-Location
+        $env:BA_STEAM_USERNAME=$priorSteam;$env:BA_FIXTURE_NOTE_STORE=$priorStore
+    }
+}
 if ($IsWindows -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
     Test 'Windows state paths remain readable from WSL through Store app redirection' {
         $folder=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) ('ba-release-path-test-'+[guid]::NewGuid().ToString('N'))

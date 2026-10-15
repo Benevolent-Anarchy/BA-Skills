@@ -303,14 +303,14 @@ Test 'Windows tool discovery and publish skip extensionless shims' {
         $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'shim-remote-note.md'
         $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
         Assert ($result.destinations.notes.preflightStatus -eq 'succeeded') "Publish did not use the runnable PATH candidate: $($result.destinations.notes.error)"
-        # Seed a stale successful native exit code; a non-process must not inherit it.
+        # PowerShell functions are not executable tools, even if they would return success.
         Expect-Error {
             & (Get-Module Release) {param($directory)
                 function NoProcess {}
                 $global:LASTEXITCODE=0
                 Invoke-ReleaseTool 'NoProcess' @() $directory
             } $sandbox
-        } 'did not run as a process'
+        } 'executable missing or not runnable'
     } finally {
         $env:PATH=$priorPath
         Remove-Item Env:BA_FIXTURE_NOTE_STORE -ErrorAction SilentlyContinue
