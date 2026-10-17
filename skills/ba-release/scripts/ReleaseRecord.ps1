@@ -38,8 +38,9 @@ function New-ReleaseDamagedStateError([string]$Root, [string]$Path) {
 # Gathers a game's live records, its shared ledger's first. Before ledgers were shared, each checkout kept one in the
 # folder named by its own path's hash ($OwnId); another such folder counts only where its state says it released this game.
 # That folder is attributed by the states it holds before its ledger is read, and only rows on $Keys, this game's store
-# channels where given, are looked into, so damage in another game's folder never stops this one. Damage that may be this
-# game's still stops it, naming the file, rather than being read as proof that nothing shipped.
+# channels where given, are looked into, so damage that can be told to be another game's never stops this one. Damage that
+# may be this game's, including a folder whose states are all unreadable, still stops it, naming the file, rather than
+# being read as proof that nothing shipped.
 function Get-ReleaseLiveRecords([string]$SourceRepository, [string]$StateRoot, [string]$OwnId, [string[]]$Keys=@()) {
     $root=Get-ReleaseStateRoot $StateRoot
     $records=[Collections.Generic.List[object]]::new()
