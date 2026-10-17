@@ -808,8 +808,9 @@ function Confirm-ReleaseStoreCompletion([string]$StatePath, [string]$ReceiptPath
             $record.remote.completion=$receipt; $record.remote.phase='store-verified';$record.remote.live=$true;$record.status='succeeded';$record.error=$null
             $state.status=Get-ReleaseOverallStatus $state
             Write-ReleaseJson $stateFile $state
-            Update-ReleaseLiveLedger $StatePath $state
         }
+        # Recording again on a repeated confirmation repairs a ledger write interrupted after the first one was saved.
+        Update-ReleaseLiveLedger $StatePath $state
         return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}
     } finally {$lock.Dispose()}
 }

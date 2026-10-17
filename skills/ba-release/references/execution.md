@@ -250,7 +250,10 @@ approved `releases/<version>.md` only after at least one store is actually live,
 or a matching live receipt already exists; until then notes are `awaiting-release`.
 Keep `[Release availability](../availability/<version>.json)` in canonical notes.
 Separate owned JSON records live, held, submitted and pending destinations;
-updates create ordinary subsequent commits. Re-run publish after console
+updates create ordinary subsequent commits. A store another checkout made live
+for the same version and source is recorded as that checkout's state has it, so
+a checkout that did not publish there reports that store as the publishing one
+does. Re-run publish after console
 confirmation to refresh availability without repeating uploads. Identical notes
 count as complete; different
 content is a failure. No source repository commit, tag or push operation exists
@@ -320,13 +323,19 @@ It performs no remote writes or uploads. Only record what the user or agent has
 actually verified. A receipt can also reconcile an uncertain store operation
 whose exact remote result is known. See the receipt shapes in the store reference.
 Overall `submitted` and `needs-store-action` preserve pending store work; only
-all verified/completed destinations become `published`.
+all verified/completed destinations become `published`. Repeating `confirm` for a
+destination already confirmed records it in the live ledger again, which repairs
+a ledger write interrupted after the first confirmation was saved.
 
 The game's `live.json` advances only channels with live evidence, keyed by exact Butler
 target, Steam app/branch or Play package/track. Held/submitted stores retain their
 older baseline and the actual artifact source commit. Later plans use that baseline
 for missed-change evidence; frozen plans keep their original baselines on retry.
-Do not roll a channel backwards without explicit reconciliation. Canonical note
+Do not roll a channel backwards without explicit reconciliation. Each channel's
+row keeps every receipt recorded for it, so a release whose receipts are recorded
+again, after a newer release went live on one of its channels, leaves that newer
+row alone. A release going live on an older or diverged source for the first time
+is refused instead, once the other channels have been saved. Canonical note
 corrections belong in explicit subsequent public-repo commits, preserving history
 instead of duplicate entries. The automatic writer refuses conflicting canonical
 content and foreign availability files.

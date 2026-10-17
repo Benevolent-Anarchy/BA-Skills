@@ -42,18 +42,44 @@ function Test-ReleaseShipped($State, [string]$StatePath) {
     foreach ($destination in $State.plan.destinations) {
         if ($destination.selected -and $destination.type -ne 'notes' -and $State.destinations[$destination.id].remote.Contains('live') -and $State.destinations[$destination.id].remote.live -eq $true) {return $true}
     }
+    return @(Get-ReleaseShipmentReceipts $State $StatePath).Count -gt 0
+}
+
+# Lists the live receipts any checkout of the game recorded for this exact release: its version, from its source.
+function Get-ReleaseShipmentReceipts($State, [string]$StatePath) {
     $repositoryState=Split-Path $StatePath -Parent
     $records=Get-ReleaseLiveRecords (Get-ReleasePlanSourceRepository $State.plan) (Split-Path $repositoryState -Parent) (Split-Path $repositoryState -Leaf)
-    return @($records | Where-Object {$_.entry.version -ceq $State.plan.version -and $_.entry.sourceCommit -ceq $State.plan.head}).Count -gt 0
+    return @(Get-ReleaseLiveReceipts $records | Where-Object {$_.entry.version -ceq $State.plan.version -and $_.entry.sourceCommit -ceq $State.plan.head})
+}
+
+# Finds the live destination record another checkout's state holds for this release on $Destination's store channel.
+function Find-ReleaseSharedDestinationRecord($Receipts, $Destination) {
+    $key=Get-ReleaseStoreKey $Destination
+    foreach ($receipt in @($Receipts | Where-Object {$_.key -ceq $key})) {
+        if (-not $receipt.entry.statePath -or -not $receipt.entry.destination) {continue}
+        $path=Join-Path ([string]$receipt.entry.statePath) 'state.json'
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {continue}
+        $other=[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
+        $record=$other.destinations[[string]$receipt.entry.destination]
+        if ($record -and $record.remote.Contains('live') -and $record.remote.live -eq $true) {return $record}
+    }
+    return $null
 }
 
 # Writes changing factual availability with ordinary subsequent GitHub commits while preserving canonical notes.
+# A store another checkout made live for this same release is reported as that checkout's state records it, so whichever
+# checkout writes the record says the same of it; this release's own selection is unchanged.
 function Publish-ReleaseAvailability($State, [string]$StatePath, [string]$GhExecutable) {
     $destinations=[ordered]@{}
+    $receipts=@(Get-ReleaseShipmentReceipts $State $StatePath)
     foreach ($destination in $State.plan.destinations) {
         if ($destination.type -eq 'notes') {continue}
-        $record=$State.destinations[$destination.id]
-        $destinations[$destination.id]=[ordered]@{type=$destination.type;selected=$destination.selected;status=$record.status;live=($record.remote.Contains('live') -and $record.remote.live -eq $true)}
+        $record=$State.destinations[$destination.id];$selected=$destination.selected
+        if (-not ($record.remote.Contains('live') -and $record.remote.live -eq $true)) {
+            $shared=Find-ReleaseSharedDestinationRecord $receipts $destination
+            if ($shared) {$record=$shared;$selected=$true}
+        }
+        $destinations[$destination.id]=[ordered]@{type=$destination.type;selected=$selected;status=$record.status;live=($record.remote.Contains('live') -and $record.remote.live -eq $true)}
         if ($record.status -eq 'held') {Assert-ReleaseHoldReason $record.hold.reason;$destinations[$destination.id].holdReason=$record.hold.reason}
         if ($record.remote.Contains('buildId')) {$destinations[$destination.id].buildId=$record.remote.buildId}
         if ($destination.Contains('versionCode')) {$destinations[$destination.id].versionCode=$destination.versionCode}
