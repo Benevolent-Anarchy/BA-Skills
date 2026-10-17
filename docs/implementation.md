@@ -56,6 +56,9 @@ repeating completed uploads/exports. Canonical notes and submitted variants stay
 frozen; new variants and artifacts require expanded approval. A later first Android
 counter change retains the actual source commit for each existing/new artifact.
 The live ledger advances only confirmed channels, preserving skipped-store ranges.
+It is kept per GitHub repository rather than per checkout, so worktrees and clones
+sharing a state root plan from what any of them published; ledgers kept per checkout before that are
+read alongside, and records on diverged sources are refused rather than guessed.
 Exact canonical public notes require shipped-release evidence; a separate owned
 availability record describes staggered rollout through ordinary later commits.
 
