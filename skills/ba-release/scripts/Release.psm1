@@ -677,7 +677,10 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 if (-not (Test-ReleaseShipped $state $StatePath)) {$record.status='awaiting-release';$record.error=$null;Write-ReleaseJson $stateFile $state;continue}
                 if ($record.status -eq 'succeeded') {
                     try {Publish-ReleaseAvailability $state $StatePath $GhExecutable}
-                    catch {$record.error='Public availability record update failed; rerun publication after inspecting GitHub access.';$state.status='partial-failure';Write-ReleaseJson $stateFile $state;return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}}
+                    catch {
+                        $record.error=if ($_.Exception.Data.Contains('releaseDiagnostic')) {'Public availability record was not updated. '+$_.Exception.Data['releaseDiagnostic']} else {'Public availability record update failed; rerun publication after inspecting GitHub access.'}
+                        $state.status='partial-failure';Write-ReleaseJson $stateFile $state;return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}
+                    }
                 }
             }
             if ($record.status -in @('succeeded','submitted','awaiting-store-action')) { continue }
@@ -734,7 +737,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                     'google-play' {'Play attempt needs inspection; check the saved edit, bundle version/hash, track and commit/review state before retrying.'}
                     default {'Public note attempt failed; check repository visibility, conflicting content and GitHub access.'}
                 }
-                if ($destination.type -in @('itch','steam') -and $_.Exception.Data.Contains('releaseDiagnostic')) {
+                if ($destination.type -in @('itch','steam','notes') -and $_.Exception.Data.Contains('releaseDiagnostic')) {
                     $record.error += ' '+$_.Exception.Data['releaseDiagnostic']
                 }
             }

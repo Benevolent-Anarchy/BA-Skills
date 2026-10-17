@@ -259,7 +259,10 @@ source, supplies a store this one did not make live: a live record first, then,
 for a store this state did not select, whatever that state records, pending, held
 or submitted. A checkout that did not publish a store therefore reports it as the
 publishing one does, including an extended release whose channels keep older
-artifact sources. Re-run publish after console
+artifact sources. A state whose source another checkout's state of the same
+version has since been extended past, as its history shows, writes nothing and
+says so: only the extended release's own state can describe what is available
+now. Re-run publish after console
 confirmation to refresh availability without repeating uploads. Identical notes
 count as complete; different
 content is a failure. No source repository commit, tag or push operation exists

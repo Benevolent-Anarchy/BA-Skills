@@ -63,10 +63,8 @@ function Get-ReleaseShipmentReceipts($State, [string]$StatePath) {
     return @(Get-ReleaseVersionReceipts $State $StatePath | Where-Object {$_.entry.sourceCommit -ceq $State.plan.head})
 }
 
-# Reads the other journals of this same release that live receipts point to: the same version, now at the same source.
-# An extended release keeps each artifact's own source, so a channel's receipt can name an older commit than the release;
-# the journal it points to, not that commit, says which release it belongs to. Other same-version journals are ignored.
-function Get-ReleaseRelatedStates($State, [string]$StatePath) {
+# Reads the other journals, of any checkout, that live receipts for this release's version point to, at that version now.
+function Get-ReleaseVersionStates($State, [string]$StatePath) {
     $own=[IO.Path]::GetFullPath($StatePath).TrimEnd('\','/')
     $paths=@(Get-ReleaseVersionReceipts $State $StatePath | Where-Object {$_.entry.statePath} | ForEach-Object {[IO.Path]::GetFullPath([string]$_.entry.statePath).TrimEnd('\','/')} | Sort-Object -Unique)
     foreach ($path in $paths) {
@@ -74,7 +72,26 @@ function Get-ReleaseRelatedStates($State, [string]$StatePath) {
         $file=Join-Path $path 'state.json'
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {continue}
         $other=[IO.File]::ReadAllText($file) | ConvertFrom-Json -AsHashtable
-        if ($other.plan.version -ceq $State.plan.version -and $other.plan.head -ceq $State.plan.head) {$other}
+        if ($other.plan.version -ceq $State.plan.version) {$other}
+    }
+}
+
+# Reads the other journals of this same release that live receipts point to: the same version, now at the same source.
+# An extended release keeps each artifact's own source, so a channel's receipt can name an older commit than the release;
+# the journal it points to, not that commit, says which release it belongs to. Other same-version journals are ignored.
+function Get-ReleaseRelatedStates($State, [string]$StatePath) {
+    @(Get-ReleaseVersionStates $State $StatePath | Where-Object {$_.plan.head -ceq $State.plan.head})
+}
+
+# Refuses to describe a release that another checkout has since extended past this journal's source: the extended
+# journal, whose history holds this source, is the one that can say what is available now, and this older plan would
+# report its newer channels as not live and move the record's source back.
+function Assert-ReleaseNotSuperseded($State, [string]$StatePath) {
+    foreach ($other in @(Get-ReleaseVersionStates $State $StatePath)) {
+        if ($other.plan.head -ceq $State.plan.head -or -not $other.Contains('history')) {continue}
+        if (@($other.history | Where-Object {$_.plan.head -ceq $State.plan.head}).Count) {
+            throw (New-ReleaseDiagnosticError "Release $($State.plan.version) has since been extended from $($State.plan.head) to $($other.plan.head) in another checkout; publish from that release's own state to refresh its availability. Nothing was written.")
+        }
     }
 }
 
@@ -96,6 +113,7 @@ function Find-ReleaseRelatedDestinationRecord($Related, [string]$Id, [bool]$AnyS
 # A store another journal of this same release made live, or selected where this one did not, is reported as that journal
 # records it, so a checkout that did not publish there reports it as the publishing one does; this selection is unchanged.
 function Publish-ReleaseAvailability($State, [string]$StatePath, [string]$GhExecutable) {
+    Assert-ReleaseNotSuperseded $State $StatePath
     $destinations=[ordered]@{}
     $related=@(Get-ReleaseRelatedStates $State $StatePath)
     foreach ($destination in $State.plan.destinations) {

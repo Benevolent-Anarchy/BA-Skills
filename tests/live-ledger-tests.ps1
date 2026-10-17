@@ -9,17 +9,27 @@ function Write-LegacyLiveLedger([string]$StateRoot, [string]$Checkout, [string]$
     Write-Json (Join-Path $folder 'live.json') @{'itch:example/real-game:windows'=@{sourceCommit=$Commit;version=$Version;destination='itch-windows';statePath=(Join-Path $folder $Version)}}
 }
 
-# Publishes only the notes of the release prepared at $StorePath, from a new worktree named $Name at that release's source,
-# with the same approved notes, and returns the publication result and the availability record it left.
-function Publish-NotesFromAnotherCheckout([string]$Repo, [string]$StateRoot, [string]$StorePath, [string]$Name) {
+# Prepares only the notes of the release prepared at $StorePath, in a new worktree named $Name at that release's current
+# source, with the same canonical notes, and returns the notes-only state's path.
+function New-NotesCheckout([string]$Repo, [string]$StateRoot, [string]$StorePath, [string]$Name) {
     $storeState=Get-Content (Join-Path $StorePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
     $worktree=Join-Path $sandbox $Name
     Invoke-FixtureGit $Repo @('worktree','add','--quiet','--detach',$worktree,$storeState.plan.head) | Out-Null
     $notes=Invoke-ReleasePrepare $worktree @('notes') $StateRoot
     Copy-Item (Join-Path $StorePath 'notes.md') (Join-Path $notes.statePath 'notes.md') -Force
-    $notesState=Get-Content (Join-Path $notes.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
-    $result=Invoke-ReleasePublish -StatePath $notes.statePath -GhExecutable $gh -ApprovedPlanId $notesState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $notes.statePath $notesState.plan)
+    return $notes.statePath
+}
+
+# Approves and publishes the notes-only state at $NotesPath, and returns the result and the availability record it left.
+function Publish-NotesCheckout([string]$NotesPath) {
+    $notesState=Get-Content (Join-Path $NotesPath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+    $result=Invoke-ReleasePublish -StatePath $NotesPath -GhExecutable $gh -ApprovedPlanId $notesState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $NotesPath $notesState.plan)
     return @{result=$result;availability=(Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw)}
+}
+
+# Publishes only the notes of the release prepared at $StorePath from a new worktree named $Name, as the two steps above do.
+function Publish-NotesFromAnotherCheckout([string]$Repo, [string]$StateRoot, [string]$StorePath, [string]$Name) {
+    return Publish-NotesCheckout (New-NotesCheckout $Repo $StateRoot $StorePath $Name)
 }
 
 Test 'a worktree or clone of a game plans from the baselines another checkout published' {
@@ -224,5 +234,33 @@ Test 'a notes-only checkout keeps availability for an extended release whose cha
         Assert ($windows -cne $state.plan.head) 'The fixture did not keep Windows at an older source than the extended release.'
         $notes=Publish-NotesFromAnotherCheckout $repo $stateRoot $store.statePath 'extended-availability-notes'
         Assert ($notes.availability -ceq $written) "The notes-only checkout dropped the Windows build kept from the original source: $($notes.availability)"
+    } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE}
+}
+Test 'a notes-only checkout from before the release was extended refuses to rewrite its availability' {
+    $repo=New-StoreFixture 'superseded-notes';Add-FixtureApk $repo
+    $stateRoot=Join-Path $sandbox 'superseded-notes-state'
+    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'superseded-notes-note.md'
+    try {
+        $store=Invoke-ReleasePrepare $repo @('itch-windows','notes') $stateRoot $engine
+        $state=Get-Content (Join-Path $store.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $store.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $store.statePath $state.plan) | Out-Null
+        # One notes-only checkout publishes before the extension, another is only prepared before it.
+        $published=Publish-NotesFromAnotherCheckout $repo $stateRoot $store.statePath 'superseded-notes-published'
+        Assert ($published.result.destinations.notes.status -eq 'succeeded') 'The notes-only checkout did not publish before the extension.'
+        $waiting=New-NotesCheckout $repo $stateRoot $store.statePath 'superseded-notes-waiting'
+        Expand-ReleaseDestinations $store.statePath @('itch-android') $engine | Out-Null
+        Invoke-FixtureGit $repo @('add','export_presets.cfg') | Out-Null
+        Invoke-FixtureGit $repo @('commit','--quiet','-m','Reserve the APK counter') | Out-Null
+        Expand-ReleaseDestinations $store.statePath @('itch-android') $engine | Out-Null
+        $state=Get-Content (Join-Path $store.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $store.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $store.statePath $state.plan) | Out-Null
+        $written=Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw
+        Assert (($written | ConvertFrom-Json -AsHashtable).sourceCommit -ceq $state.plan.head) 'The extended release did not record its own source.'
+        $retry=Invoke-ReleasePublish -StatePath $published.result.statePath -GhExecutable $gh
+        Assert ((Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw) -ceq $written) 'Retrying a notes-only checkout from before the extension rewrote its availability.'
+        Assert ($retry.status -ne 'published' -and $retry.destinations.notes.error -match 'extended') "The obsolete retry was not refused with its reason: $($retry.status) $($retry.destinations.notes.error)"
+        $late=Publish-NotesCheckout $waiting
+        Assert ($late.availability -ceq $written) 'A notes-only checkout prepared before the extension rewrote its availability.'
+        Assert ($late.result.status -ne 'published' -and $late.result.destinations.notes.error -match 'extended') "The obsolete publication was not refused with its reason: $($late.result.status) $($late.result.destinations.notes.error)"
     } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE}
 }
