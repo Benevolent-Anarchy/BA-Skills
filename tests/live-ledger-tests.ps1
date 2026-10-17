@@ -403,3 +403,58 @@ Test 'a readable journal for another game does not hide a damaged one this game'
     Write-Json (Join-Path $stateRoot "$id/9.0.0/state.json") @{plan=@{notesRepository='Example/Other-Game-release-notes';version='9.0.0'}}
     Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot} ([regex]::Escape("$id/1.1.0/state.json"))
 }
+Test 'availability is left alone when a state that recorded this release live cannot be read' {
+    $repo=New-StoreFixture 'missing-journal';Add-FixtureApk $repo
+    $stateRoot=Join-Path $sandbox 'missing-journal-state'
+    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'missing-journal-note.md'
+    $journal=$null
+    try {
+        $store=Invoke-ReleasePrepare $repo @('itch-windows','notes') $stateRoot $engine
+        $state=Get-Content (Join-Path $store.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $store.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $store.statePath $state.plan) | Out-Null
+        $beforeExtension=New-NotesCheckout $repo $stateRoot $store.statePath 'missing-journal-before'
+        Expand-ReleaseDestinations $store.statePath @('itch-android') $engine | Out-Null
+        Invoke-FixtureGit $repo @('add','export_presets.cfg') | Out-Null
+        Invoke-FixtureGit $repo @('commit','--quiet','-m','Reserve the APK counter') | Out-Null
+        Expand-ReleaseDestinations $store.statePath @('itch-android') $engine | Out-Null
+        $state=Get-Content (Join-Path $store.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $store.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $store.statePath $state.plan) | Out-Null
+        $written=Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw
+        $current=Publish-NotesFromAnotherCheckout $repo $stateRoot $store.statePath 'missing-journal-current'
+        Assert ($current.result.status -eq 'published' -and $current.availability -ceq $written) 'The notes-only checkout did not publish while the publishing state was readable.'
+        $journal=Join-Path $store.statePath 'state.json'
+        Move-Item -LiteralPath $journal -Destination "$journal.away"
+        $retry=Invoke-ReleasePublish -StatePath $current.result.statePath -GhExecutable $gh
+        Assert ((Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw) -ceq $written) 'A missing publishing state let a retry rewrite availability.'
+        Assert ($retry.status -ne 'published' -and $retry.destinations.notes.error -match 'cannot be read') "The retry was not refused with its reason: $($retry.status) $($retry.destinations.notes.error)"
+        $obsolete=Publish-NotesCheckout $beforeExtension
+        Assert ($obsolete.availability -ceq $written -and $obsolete.result.status -ne 'published' -and $obsolete.result.destinations.notes.error -match 'cannot be read') "A checkout from before the extension wrote availability while the state holding its history was missing: $($obsolete.result.destinations.notes.error)"
+        Move-Item -LiteralPath "$journal.away" -Destination $journal
+        $journal=$null
+        $restored=Invoke-ReleasePublish -StatePath $current.result.statePath -GhExecutable $gh
+        Assert ($restored.status -eq 'published' -and (Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw) -ceq $written) "Restoring the publishing state did not let the retry complete: $($restored.status)"
+    } finally {if ($journal -and (Test-Path -LiteralPath "$journal.away")) {Move-Item -LiteralPath "$journal.away" -Destination $journal};Remove-Item Env:BA_FIXTURE_NOTE_STORE}
+}
+Test 'availability is left alone when the state behind an earlier receipt in a row''s history cannot be read' {
+    $repo=New-Fixture 'missing-history-journal'
+    $stateRoot=Join-Path $sandbox 'missing-history-journal-state'
+    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'missing-history-journal-note.md'
+    try {
+        $older=Invoke-ReleasePrepare $repo @('itch-windows','notes') $stateRoot $engine
+        $state=Get-Content (Join-Path $older.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $older.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $older.statePath $state.plan) | Out-Null
+        $written=Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw
+        $worktree=Join-Path $sandbox 'missing-history-journal-newer'
+        Invoke-FixtureGit $repo @('worktree','add','--quiet','-b','newer',$worktree) | Out-Null
+        Invoke-ReleasePrepare $worktree @('itch-windows') $stateRoot $engine -VersionChange patch | Out-Null
+        Invoke-FixtureGit $worktree @('add','project.godot') | Out-Null
+        Invoke-FixtureGit $worktree @('commit','--quiet','-m','Reserve the newer version') | Out-Null
+        $newer=Invoke-ReleasePrepare $worktree @('itch-windows') $stateRoot $engine -VersionChange patch
+        $newerState=Get-Content (Join-Path $newer.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $newer.statePath -ButlerExecutable $butler -ApprovedPlanId $newerState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $newer.statePath $newerState.plan) | Out-Null
+        $notes=New-NotesCheckout $repo $stateRoot $older.statePath 'missing-history-journal-notes'
+        Remove-Item -LiteralPath (Join-Path $older.statePath 'state.json')
+        $late=Publish-NotesCheckout $notes
+        Assert ($late.availability -ceq $written -and $late.result.status -ne 'published' -and $late.result.destinations.notes.error -match 'cannot be read') "A missing state behind an earlier receipt let availability be rewritten: $($late.result.status) $($late.result.destinations.notes.error)"
+    } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE}
+}

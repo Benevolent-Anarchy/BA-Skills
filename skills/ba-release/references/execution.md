@@ -274,7 +274,11 @@ publishing one does, including an extended release whose channels keep older
 artifact sources. A state whose source another checkout's state of the same
 version has since been extended past, as its history shows, writes nothing and
 says so: only the extended release's own state can describe what is available
-now. Re-run publish after console
+now. Likewise, while any state that recorded a store live for this version,
+current or kept in a ledger row's history, cannot be read, availability writes
+nothing and names that store channel: only that state holds the store's status,
+pending work and extension history, so restore it, or refresh availability from
+the checkout that holds it. Re-run publish after console
 confirmation to refresh availability without repeating uploads. Identical notes
 count as complete; different
 content is a failure. No source repository commit, tag or push operation exists

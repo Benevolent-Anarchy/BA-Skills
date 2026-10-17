@@ -83,6 +83,19 @@ function Get-ReleaseRelatedStates($State, [string]$StatePath) {
     @(Get-ReleaseVersionStates $State $StatePath | Where-Object {$_.plan.head -ceq $State.plan.head})
 }
 
+# Refuses to describe this release's availability while any state that recorded a store live for its version, current or
+# kept in a row's history, cannot be read. Only that state holds the store's status, its pending work and its extension
+# history, so missing it would report a live store as not live. The reason names the channel and version, never a path.
+function Assert-ReleaseJournalsReadable($State, [string]$StatePath) {
+    $own=[IO.Path]::GetFullPath($StatePath).TrimEnd('\','/')
+    foreach ($receipt in @(Get-ReleaseVersionReceipts $State $StatePath)) {
+        $path=[string]$receipt.entry.statePath
+        if ($path -and [IO.Path]::GetFullPath($path).TrimEnd('\','/') -eq $own) {continue}
+        if ($path -and $null -ne (Read-ReleaseStateObject (Join-Path $path 'state.json'))) {continue}
+        throw (New-ReleaseDiagnosticError "The release state that recorded $($receipt.key) live for $($State.plan.version) cannot be read; restore it, or refresh availability from the checkout that holds it. Nothing was written.")
+    }
+}
+
 # Refuses to describe a release that another checkout has since extended past this journal's source: the extended
 # journal, whose history holds this source, is the one that can say what is available now, and this older plan would
 # report its newer channels as not live and move the record's source back.
@@ -113,6 +126,7 @@ function Find-ReleaseRelatedDestinationRecord($Related, [string]$Id, [bool]$AnyS
 # A store another journal of this same release made live, or selected where this one did not, is reported as that journal
 # records it, so a checkout that did not publish there reports it as the publishing one does; this selection is unchanged.
 function Publish-ReleaseAvailability($State, [string]$StatePath, [string]$GhExecutable) {
+    Assert-ReleaseJournalsReadable $State $StatePath
     Assert-ReleaseNotSuperseded $State $StatePath
     $destinations=[ordered]@{}
     $related=@(Get-ReleaseRelatedStates $State $StatePath)
