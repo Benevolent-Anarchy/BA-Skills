@@ -458,3 +458,31 @@ Test 'availability is left alone when the state behind an earlier receipt in a r
         Assert ($late.availability -ceq $written -and $late.result.status -ne 'published' -and $late.result.destinations.notes.error -match 'cannot be read') "A missing state behind an earlier receipt let availability be rewritten: $($late.result.status) $($late.result.destinations.notes.error)"
     } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE}
 }
+Test 'a recovered availability refresh clears its earlier error, whether or not it writes' {
+    $repo=New-Fixture 'recovered-refresh'
+    $stateRoot=Join-Path $sandbox 'recovered-refresh-state'
+    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'recovered-refresh-note.md'
+    $journal=$null
+    try {
+        $store=Invoke-ReleasePrepare $repo @('itch-windows','notes') $stateRoot $engine
+        $state=Get-Content (Join-Path $store.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $store.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $store.statePath $state.plan) | Out-Null
+        $availabilityPath=$env:BA_FIXTURE_NOTE_STORE+'.availability'
+        $written=Get-Content $availabilityPath -Raw
+        $notes=Publish-NotesFromAnotherCheckout $repo $stateRoot $store.statePath 'recovered-refresh-notes'
+        $notesState=Join-Path $notes.result.statePath 'state.json'
+        $journal=Join-Path $store.statePath 'state.json'
+        # Each recovery follows a refused refresh, once with the record already right and once with it needing a write.
+        foreach ($recovery in @('identical','rewritten')) {
+            Move-Item -LiteralPath $journal -Destination "$journal.away"
+            $refused=Invoke-ReleasePublish -StatePath $notes.result.statePath -GhExecutable $gh
+            Assert ($refused.destinations.notes.error -match 'cannot be read') "The refresh was not refused while the state was missing: $($refused.destinations.notes.error)"
+            Move-Item -LiteralPath "$journal.away" -Destination $journal
+            if ($recovery -eq 'rewritten') {[IO.File]::WriteAllText($availabilityPath,$written.Replace('"live": true','"live": false'))}
+            $recovered=Invoke-ReleasePublish -StatePath $notes.result.statePath -GhExecutable $gh
+            $saved=(Get-Content $notesState -Raw | ConvertFrom-Json -AsHashtable).destinations.notes
+            Assert ($recovered.status -eq 'published' -and (Get-Content $availabilityPath -Raw) -ceq $written) "The $recovery recovery did not restore truthful availability: $($recovered.status)"
+            Assert ($null -eq $recovered.destinations.notes.error -and $null -eq $saved.error) "The $recovery recovery kept the earlier refresh error: $($recovered.destinations.notes.error) / $($saved.error)"
+        }
+    } finally {if ($journal -and (Test-Path -LiteralPath "$journal.away")) {Move-Item -LiteralPath "$journal.away" -Destination $journal};Remove-Item Env:BA_FIXTURE_NOTE_STORE}
+}

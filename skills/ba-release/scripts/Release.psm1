@@ -693,7 +693,8 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             if ($destination.type -eq 'notes') {
                 if (-not (Test-ReleaseShipped $state $StatePath)) {$record.status='awaiting-release';$record.error=$null;Write-ReleaseJson $stateFile $state;continue}
                 if ($record.status -eq 'succeeded') {
-                    try {Publish-ReleaseAvailability $state $StatePath $GhExecutable}
+                    # A refresh that succeeds, writing or finding the record already right, clears any earlier refresh error.
+                    try {Publish-ReleaseAvailability $state $StatePath $GhExecutable;$record.error=$null}
                     catch {
                         $record.error=if ($_.Exception.Data.Contains('releaseDiagnostic')) {'Public availability record was not updated. '+$_.Exception.Data['releaseDiagnostic']} else {'Public availability record update failed; rerun publication after inspecting GitHub access.'}
                         $state.status='partial-failure';Write-ReleaseJson $stateFile $state;return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}
