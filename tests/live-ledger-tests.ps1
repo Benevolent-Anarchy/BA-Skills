@@ -9,6 +9,19 @@ function Write-LegacyLiveLedger([string]$StateRoot, [string]$Checkout, [string]$
     Write-Json (Join-Path $folder 'live.json') @{'itch:example/real-game:windows'=@{sourceCommit=$Commit;version=$Version;destination='itch-windows';statePath=(Join-Path $folder $Version)}}
 }
 
+# Publishes only the notes of the release prepared at $StorePath, from a new worktree named $Name at that release's source,
+# with the same approved notes, and returns the publication result and the availability record it left.
+function Publish-NotesFromAnotherCheckout([string]$Repo, [string]$StateRoot, [string]$StorePath, [string]$Name) {
+    $storeState=Get-Content (Join-Path $StorePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+    $worktree=Join-Path $sandbox $Name
+    Invoke-FixtureGit $Repo @('worktree','add','--quiet','--detach',$worktree,$storeState.plan.head) | Out-Null
+    $notes=Invoke-ReleasePrepare $worktree @('notes') $StateRoot
+    Copy-Item (Join-Path $StorePath 'notes.md') (Join-Path $notes.statePath 'notes.md') -Force
+    $notesState=Get-Content (Join-Path $notes.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+    $result=Invoke-ReleasePublish -StatePath $notes.statePath -GhExecutable $gh -ApprovedPlanId $notesState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $notes.statePath $notesState.plan)
+    return @{result=$result;availability=(Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw)}
+}
+
 Test 'a worktree or clone of a game plans from the baselines another checkout published' {
     $repo=New-Fixture 'shared-ledger'
     $stateRoot=Join-Path $sandbox 'shared-ledger-state'
@@ -56,6 +69,40 @@ Test 'live records from two checkouts that disagree are refused rather than gues
     Write-LegacyLiveLedger $stateRoot 'C:\old\main-checkout' 'Example/Real-Game-release-notes' '1.2.3' $shipped
     Write-LegacyLiveLedger $stateRoot 'C:\old\side-checkout' 'Example/Real-Game-release-notes' '1.2.3' $side
     Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot} 'disagree'
+    # Only the channel whose records disagree is stopped; another channel still plans.
+    $plan=Get-ReleasePlan -Repository $repo -Destination @('itch-linux') -StateRoot $stateRoot
+    Assert ($plan.baselines['itch-linux'] -ceq (Invoke-FixtureGit $repo @('rev-parse','v1.2.2'))) 'Disagreeing records on one channel stopped planning another.'
+}
+Test 'an older release extends to a new channel after another checkout shipped newer on its existing one' {
+    $repo=New-StoreFixture 'staggered-extension'
+    $stateRoot=Join-Path $sandbox 'staggered-extension-state'
+    $env:BA_STEAM_USERNAME='fixture'
+    try {
+        $older=Invoke-ReleasePrepare $repo @('itch-windows') $stateRoot $engine
+        $olderState=Get-Content (Join-Path $older.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $older.statePath -ButlerExecutable $butler -ApprovedPlanId $olderState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $older.statePath $olderState.plan) | Out-Null
+        $worktree=Join-Path $sandbox 'staggered-extension-newer'
+        Invoke-FixtureGit $repo @('worktree','add','--quiet','-b','newer',$worktree) | Out-Null
+        'newer work' | Set-Content (Join-Path $worktree 'newer.txt')
+        Invoke-FixtureGit $worktree @('add','newer.txt') | Out-Null
+        Invoke-FixtureGit $worktree @('commit','--quiet','-m','Newer work') | Out-Null
+        Invoke-ReleasePrepare $worktree @('itch-windows','steam') $stateRoot $engine -VersionChange patch | Out-Null
+        Invoke-FixtureGit $worktree @('add','project.godot') | Out-Null
+        Invoke-FixtureGit $worktree @('commit','--quiet','-m','Reserve the newer version') | Out-Null
+        $newer=Invoke-ReleasePrepare $worktree @('itch-windows','steam') $stateRoot $engine -VersionChange patch
+        $newerState=Get-Content (Join-Path $newer.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $newerNotes=Get-ReleaseNotesHash $newer.statePath $newerState.plan
+        Invoke-ReleasePublish -StatePath $newer.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam -ApprovedPlanId $newerState.plan.planId -ApprovedNotesSha256 $newerNotes | Out-Null
+        $receipt=Join-Path $newer.statePath 'steam-observation.json'
+        Write-Json $receipt @{destination='steam';planId=$newerState.plan.planId;notesSha256=$newerNotes;observedAt=[DateTimeOffset]::UtcNow.ToString('o');live=$true;appId=100;buildId='999';branch='default';announcementUrl='https://store.steampowered.com/news/app/100/view/555'}
+        Confirm-ReleaseStoreCompletion $newer.statePath $receipt | Out-Null
+        # Steam already has the newer release, so the older one cannot catch it up; Linux has never shipped, so it can.
+        Expect-Error {Expand-ReleaseDestinations $older.statePath @('steam') $engine} 'ancestor|precede'
+        $extended=Expand-ReleaseDestinations $older.statePath @('itch-linux') $engine
+        $state=Get-Content (Join-Path $older.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Assert ($extended.status -eq 'prepared') "Extending the older release to Linux did not prepare: $($extended.status)"
+        Assert ($state.plan.baselines['itch-windows'] -ceq $olderState.plan.baselines['itch-windows'] -and $state.plan.baselines['itch-linux'] -ceq (Invoke-FixtureGit $repo @('rev-parse','v1.2.2'))) 'Extension did not keep frozen baselines and observe only the added channel.'
+    } finally {Remove-Item Env:BA_STEAM_USERNAME}
 }
 Test 'confirming an older release records its channel and keeps the newer release another checkout published' {
     $repo=New-StoreFixture 'older-confirmation'
@@ -135,14 +182,47 @@ Test 'a notes-only release in another checkout reports the stores the first chec
         Invoke-ReleasePublish -StatePath $store.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $storeState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $store.statePath $storeState.plan) | Out-Null
         $written=Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw
         Assert (($written | ConvertFrom-Json -AsHashtable).destinations['itch-windows'].live -eq $true) 'The publishing checkout did not record itch as live.'
-        $worktree=Join-Path $sandbox 'shared-availability-notes'
-        Invoke-FixtureGit $repo @('worktree','add','--quiet','--detach',$worktree,$storeState.plan.head) | Out-Null
-        $notes=Invoke-ReleasePrepare $worktree @('notes') $stateRoot
-        Copy-Item (Join-Path $store.statePath 'notes.md') (Join-Path $notes.statePath 'notes.md') -Force
-        $notesState=Get-Content (Join-Path $notes.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
-        $result=Invoke-ReleasePublish -StatePath $notes.statePath -GhExecutable $gh -ApprovedPlanId $notesState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $notes.statePath $notesState.plan)
-        Assert ($result.destinations.notes.status -eq 'succeeded') "Notes did not ship on the first checkout's live record: $($result.destinations.notes.status)"
-        $availability=Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw
-        Assert ($availability -ceq $written) "The notes-only checkout rewrote availability: $availability"
+        $notes=Publish-NotesFromAnotherCheckout $repo $stateRoot $store.statePath 'shared-availability-notes'
+        Assert ($notes.result.destinations.notes.status -eq 'succeeded') "Notes did not ship on the first checkout's live record: $($notes.result.destinations.notes.status)"
+        Assert ($notes.availability -ceq $written) "The notes-only checkout rewrote availability: $($notes.availability)"
+    } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE}
+}
+Test 'a notes-only checkout keeps availability for stores still awaiting console work' {
+    $repo=New-StoreFixture 'pending-availability'
+    $stateRoot=Join-Path $sandbox 'pending-availability-state'
+    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'pending-availability-note.md'
+    $env:BA_STEAM_USERNAME='fixture'
+    try {
+        $store=Invoke-ReleasePrepare $repo @('itch-windows','steam','notes') $stateRoot $engine
+        $storeState=Get-Content (Join-Path $store.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $store.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam -GhExecutable $gh -ApprovedPlanId $storeState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $store.statePath $storeState.plan) | Out-Null
+        $written=Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw
+        $steamRow=($written | ConvertFrom-Json -AsHashtable).destinations.steam
+        Assert ($steamRow.status -eq 'awaiting-store-action' -and $steamRow.selected -and $steamRow.buildId -eq '999') "The publishing checkout did not record Steam's pending work: $($steamRow | ConvertTo-Json -Compress)"
+        $notes=Publish-NotesFromAnotherCheckout $repo $stateRoot $store.statePath 'pending-availability-notes'
+        Assert ($notes.availability -ceq $written) "The notes-only checkout rewrote pending Steam work: $($notes.availability)"
+    } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE;Remove-Item Env:BA_STEAM_USERNAME}
+}
+Test 'a notes-only checkout keeps availability for an extended release whose channels have different sources' {
+    $repo=New-StoreFixture 'extended-availability';Add-FixtureApk $repo
+    $stateRoot=Join-Path $sandbox 'extended-availability-state'
+    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'extended-availability-note.md'
+    try {
+        $store=Invoke-ReleasePrepare $repo @('itch-windows','notes') $stateRoot $engine
+        $state=Get-Content (Join-Path $store.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $store.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $store.statePath $state.plan) | Out-Null
+        Expand-ReleaseDestinations $store.statePath @('itch-android') $engine | Out-Null
+        Invoke-FixtureGit $repo @('add','export_presets.cfg') | Out-Null
+        Invoke-FixtureGit $repo @('commit','--quiet','-m','Reserve the APK counter') | Out-Null
+        Expand-ReleaseDestinations $store.statePath @('itch-android') $engine | Out-Null
+        $state=Get-Content (Join-Path $store.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $store.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $store.statePath $state.plan) | Out-Null
+        $written=Get-Content ($env:BA_FIXTURE_NOTE_STORE+'.availability') -Raw
+        $rows=($written | ConvertFrom-Json -AsHashtable).destinations
+        Assert ($rows['itch-windows'].live -eq $true -and $rows['itch-android'].live -eq $true) "The extended release did not record both channels live: $written"
+        $windows=@($state.artifacts | Where-Object {$_.preset -ceq 'Windows existing'})[0].sourceCommit
+        Assert ($windows -cne $state.plan.head) 'The fixture did not keep Windows at an older source than the extended release.'
+        $notes=Publish-NotesFromAnotherCheckout $repo $stateRoot $store.statePath 'extended-availability-notes'
+        Assert ($notes.availability -ceq $written) "The notes-only checkout dropped the Windows build kept from the original source: $($notes.availability)"
     } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE}
 }

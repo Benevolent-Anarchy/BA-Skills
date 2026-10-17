@@ -53,18 +53,19 @@ function Get-ReleaseLiveRecords([string]$SourceRepository, [string]$StateRoot, [
 }
 
 # Keeps, for each store channel, the record of the latest source to go live. Records on sources that diverged, or that
-# this repository lacks, are refused rather than guessed between, since either could be the one players have.
+# this repository lacks, are not guessed between, since either could be the one players have: the channel keeps only a
+# 'disagreement', which stops planning that channel and no other.
 function Merge-ReleaseLiveRecords([string]$Repository, $Records) {
     $ledger=[ordered]@{}
     foreach ($record in $Records) {
         $key=$record.key;$entry=$record.entry
         if (-not $ledger.Contains($key)) {$ledger[$key]=$entry;continue}
         $kept=$ledger[$key]
-        if ($kept.sourceCommit -ceq $entry.sourceCommit) {continue}
+        if ($kept.Contains('disagreement') -or $kept.sourceCommit -ceq $entry.sourceCommit) {continue}
         $later=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$kept.sourceCommit,$entry.sourceCommit) $Repository
         if ($later.exitCode -eq 0) {$ledger[$key]=$entry;continue}
         $earlier=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$entry.sourceCommit,$kept.sourceCommit) $Repository
-        if ($earlier.exitCode -ne 0) {throw "Live records for $key disagree: $($kept.sourceCommit) and $($entry.sourceCommit) do not follow one from the other in this repository. Fetch them, or reconcile which went live last, before planning."}
+        if ($earlier.exitCode -ne 0) {$ledger[$key]=[ordered]@{disagreement="Live records for $key disagree: $($kept.sourceCommit) and $($entry.sourceCommit) do not follow one from the other in this repository. Fetch them, or reconcile which went live last, before planning."}}
     }
     return $ledger
 }
@@ -77,14 +78,17 @@ function Get-ReleaseLiveLedger([string]$Repository, [string]$StateRoot) {
     return Merge-ReleaseLiveRecords $Repository $records
 }
 
-# Resolves frozen or observed channel baselines; a configured null is never replaced by a guess.
+# Resolves frozen or observed channel baselines; a configured null is never replaced by a guess. A snapshot freezes the
+# channels it names, such as a prepared release's own; any other selected channel is observed in the live ledger.
 function Get-ReleaseDestinationBaselines($Settings, $Destinations, [string]$Head, $Snapshot, [string]$StateRoot) {
-    $ledger=if ($null -eq $Snapshot) {Get-ReleaseLiveLedger $Settings.repository $StateRoot} else {@{}}
+    $observed=@($Destinations | Where-Object {$_.selected -and $_.type -ne 'notes' -and ($null -eq $Snapshot -or -not $Snapshot.Contains($_.id))})
+    $ledger=if ($observed.Count) {Get-ReleaseLiveLedger $Settings.repository $StateRoot} else {@{}}
     $result=[ordered]@{}
     foreach ($destination in $Destinations) {
         if (-not $destination.selected -or $destination.type -eq 'notes') {continue}
         $key=Get-ReleaseStoreKey $destination
         $ref=if ($null -ne $Snapshot -and $Snapshot.Contains($destination.id)) {$Snapshot[$destination.id]}
+        elseif ($ledger.Contains($key) -and $ledger[$key].Contains('disagreement')) {throw $ledger[$key].disagreement}
         elseif ($ledger.Contains($key)) {$ledger[$key].sourceCommit}
         elseif ($Settings.config.Contains('destinationBaselines') -and $Settings.config.destinationBaselines.Contains($destination.id)) {$Settings.config.destinationBaselines[$destination.id]}
         else {$Settings.config.previousReleaseRef}
@@ -239,7 +243,11 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
     $added=@($selected | Where-Object {$_ -cnotin $state.plan.selectedDestinations})
     if (-not $added.Count) {$lock.Dispose();$lock=$null;return Invoke-ReleasePrepare $state.plan.repository $selected $stateRoot $GodotExecutable -ButlerExecutable $ButlerExecutable}
     if ($settings.version -cne $state.plan.version) {throw 'Extension requires the same version as the prepared release.'}
-    $fresh=Get-ReleasePlan $settings.repository $selected $null $stateRoot
+    # The release's own channels keep the baselines frozen with it, however far another checkout has since moved them;
+    # only the added channels are observed now.
+    $frozen=[ordered]@{}
+    foreach ($id in $state.plan.baselines.Keys) {$frozen[$id]=$state.plan.baselines[$id]}
+    $fresh=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot
     Assert-ReleaseAddedBaselines $state $fresh.baselines $added
     if ($settings.configHash -cne $state.plan.configSha256) {
         $migration=Get-ReleaseConfigurationMigration $state $settings $fresh.head
@@ -249,7 +257,7 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
         # Every introduced destination is frozen with the release, selected or not, so each must be complete now.
         $adopted=@(@($selected)+@($migration.addedDestinations) | Sort-Object -Unique -CaseSensitive)
         $introduced=@($adopted | Where-Object {$_ -cnotin $state.plan.selectedDestinations})
-        $observed=Get-ReleasePlan $settings.repository $adopted $null $stateRoot
+        $observed=Get-ReleasePlan $settings.repository $adopted $frozen $stateRoot
         Assert-ReleaseAddedBaselines $state $observed.baselines $introduced
         $snapshot=[ordered]@{}
         foreach ($id in $state.plan.baselines.Keys) {$snapshot[$id]=$state.plan.baselines[$id]}
@@ -311,7 +319,7 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
     }
     $snapshot=[ordered]@{}
     foreach ($id in $state.plan.baselines.Keys) {$snapshot[$id]=$state.plan.baselines[$id]}
-    $observed=Get-ReleasePlan $settings.repository $selected $null (Split-Path (Split-Path $StatePath -Parent) -Parent)
+    $observed=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot
     foreach ($id in $added) {if ($observed.baselines.Contains($id)) {$snapshot[$id]=$observed.baselines[$id]}}
     $plan=Get-ReleasePlan $settings.repository $selected $snapshot
     if (-not $plan.ready) {throw "Extension plan is blocked: $($plan.blockers -join ' ')"}

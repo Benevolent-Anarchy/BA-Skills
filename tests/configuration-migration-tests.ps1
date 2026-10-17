@@ -10,13 +10,15 @@ function Save-MigrationCommit([string]$Repo, [string]$Message) {
     Invoke-FixtureGit $Repo @('add','--all') | Out-Null
     Invoke-FixtureGit $Repo @('commit','--quiet','-m',$Message) | Out-Null
 }
-# Runs $Inject once inside the release module, just before it plans $Selection against a baseline snapshot.
+# Runs $Inject once inside the release module, just before it plans $Selection against a baseline snapshot naming every
+# selected destination, as the plan an extension or migration saves does. Earlier plans freeze only the release's own.
 function Set-PlannerCommitProbe([string]$Selection, [scriptblock]$Inject) {
     & (Get-Module Release) {param($selection,$inject)
         $script:PlannerProbe=@{planner=${function:Get-ReleasePlan};selection=$selection;inject=$inject}
         function script:Get-ReleasePlan([string]$Repository, [string[]]$Destination=@(), $BaselineSnapshot=$null, [string]$StateRoot, [string]$VersionChange='current') {
             $probe=$script:PlannerProbe
-            if ($probe.inject -and $null -ne $BaselineSnapshot -and ($Destination -join ',') -ceq $probe.selection) {$run=$probe.inject;$probe.inject=$null;& $run}
+            $complete=$null -ne $BaselineSnapshot -and -not @($Destination | Where-Object {$_ -cne 'notes' -and -not $BaselineSnapshot.Contains($_)}).Count
+            if ($probe.inject -and $complete -and ($Destination -join ',') -ceq $probe.selection) {$run=$probe.inject;$probe.inject=$null;& $run}
             & $probe.planner -Repository $Repository -Destination $Destination -BaselineSnapshot $BaselineSnapshot -StateRoot $StateRoot -VersionChange $VersionChange
         }
     } $Selection $Inject

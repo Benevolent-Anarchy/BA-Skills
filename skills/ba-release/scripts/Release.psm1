@@ -440,18 +440,18 @@ function Get-ReleaseEngine([string]$Executable) {
 
 # Runs verified local exports once per unchanged release and journals each preset for safe retries.
 function Invoke-ReleasePrepare([string]$Repository, [string[]]$Destination, [string]$StateRoot, [string]$GodotExecutable, [ValidateSet('current','patch','minor','major')][string]$VersionChange='current', [switch]$NewRelease, [string]$ButlerExecutable='butler') {
-    $plan = Get-ReleasePlan -Repository $Repository -Destination $Destination -StateRoot $StateRoot
-    if (-not $plan.configurationReady) { throw "Release plan is blocked: $($plan.blockers -join ' ')" }
     $settings = Get-ReleaseConfiguration $Repository
     $base = Get-ReleaseStateRoot $StateRoot
     $repositoryId = (Get-ReleaseTextHash $settings.repository).Substring(0,20)
     $repositoryState=Join-Path $base $repositoryId
-    $statePath = Join-Path $repositoryState $plan.version
+    $statePath = Join-Path $repositoryState $settings.version
     # User state must stay outside the source tree, keeping Git and planning stable.
     $relativeState = [IO.Path]::GetRelativePath((Resolve-ReleasePhysicalPath $settings.repository),(Resolve-ReleasePhysicalPath $statePath))
     if (-not [IO.Path]::IsPathRooted($relativeState) -and $relativeState -notmatch '^\.\.(?:[\\/]|$)') { throw 'StateRoot must be outside the source repository.' }
     $priorState=if (Test-Path -LiteralPath (Join-Path $statePath 'state.json')) {[IO.File]::ReadAllText((Join-Path $statePath 'state.json')) | ConvertFrom-Json -AsHashtable} else {$null}
-    if ($priorState -and -not $NewRelease) {$plan=Get-ReleasePlan $Repository $Destination $priorState.plan.baselines $StateRoot}
+    # A prepared release keeps its frozen baselines from the first plan on, however far another checkout has since moved them.
+    $plan = Get-ReleasePlan $Repository $Destination $(if ($priorState -and -not $NewRelease) {$priorState.plan.baselines} else {$null}) $StateRoot
+    if (-not $plan.configurationReady) { throw "Release plan is blocked: $($plan.blockers -join ' ')" }
     $sourceResult=if (-not $priorState -or $NewRelease) {Initialize-ReleaseSource $settings $plan $repositoryState $VersionChange -NewRelease:$NewRelease} else {$null}
     if ($sourceResult -and $sourceResult.status -eq 'source-update-required') {return $sourceResult}
     $plan=Get-ReleasePlan $Repository $Destination $(if ($priorState -and -not $NewRelease) {$priorState.plan.baselines} else {$null}) $StateRoot

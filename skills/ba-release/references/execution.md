@@ -171,8 +171,8 @@ advances the same one. Windows and WSL keep separate default roots. Ledgers
 that checkouts kept in their own directories before it was shared are read
 alongside it. A checkout's own one always counts; another's counts only where its
 release state names the same game. For each channel the latest source wins.
-Records on sources that diverged, or that this repository lacks, stop the plan
-until they are fetched or reconciled.
+Records on sources that diverged, or that this repository lacks, stop planning
+that channel, and no other, until they are fetched or reconciled.
 
 ## Extending a prepared release
 
@@ -190,7 +190,10 @@ Ordinary `extend` works only when each added destination was already declared in
 release.json when the release was prepared (or last migrated), and release.json is
 unchanged since.
 In every extension, each added destination's confirmed baseline must precede the
-release's original source commit, never a later settings commit.
+release's original source commit, never a later settings commit. The release's
+existing destinations keep the baselines frozen with it, as `prepare` retries do,
+so another checkout shipping a newer release on one of them does not stop the
+extension; only the added destinations are read from the live ledger.
 A store, or itch channel, first configured after preparation needs a configuration
 migration. Add it through setup (see [configuration](configuration.md#adding-a-store-to-a-prepared-release)),
 review the release.json diff with the user and commit it by itself. Then repeat
@@ -250,10 +253,13 @@ approved `releases/<version>.md` only after at least one store is actually live,
 or a matching live receipt already exists; until then notes are `awaiting-release`.
 Keep `[Release availability](../availability/<version>.json)` in canonical notes.
 Separate owned JSON records live, held, submitted and pending destinations;
-updates create ordinary subsequent commits. A store another checkout made live
-for the same version and source is recorded as that checkout's state has it, so
-a checkout that did not publish there reports that store as the publishing one
-does. Re-run publish after console
+updates create ordinary subsequent commits. Another checkout's state of this
+same release, found through its live receipts and now at the same version and
+source, supplies a store this one did not make live: a live record first, then,
+for a store this state did not select, whatever that state records, pending, held
+or submitted. A checkout that did not publish a store therefore reports it as the
+publishing one does, including an extended release whose channels keep older
+artifact sources. Re-run publish after console
 confirmation to refresh availability without repeating uploads. Identical notes
 count as complete; different
 content is a failure. No source repository commit, tag or push operation exists

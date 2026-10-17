@@ -42,41 +42,67 @@ function Test-ReleaseShipped($State, [string]$StatePath) {
     foreach ($destination in $State.plan.destinations) {
         if ($destination.selected -and $destination.type -ne 'notes' -and $State.destinations[$destination.id].remote.Contains('live') -and $State.destinations[$destination.id].remote.live -eq $true) {return $true}
     }
-    return @(Get-ReleaseShipmentReceipts $State $StatePath).Count -gt 0
+    if (@(Get-ReleaseShipmentReceipts $State $StatePath).Count) {return $true}
+    foreach ($other in @(Get-ReleaseRelatedStates $State $StatePath)) {
+        foreach ($destination in $other.plan.destinations) {
+            if ($destination.selected -and $destination.type -ne 'notes' -and $other.destinations[$destination.id].remote.Contains('live') -and $other.destinations[$destination.id].remote.live -eq $true) {return $true}
+        }
+    }
+    return $false
+}
+
+# Lists every live receipt any checkout of the game recorded for this release's version, current and kept in history.
+function Get-ReleaseVersionReceipts($State, [string]$StatePath) {
+    $repositoryState=Split-Path $StatePath -Parent
+    $records=Get-ReleaseLiveRecords (Get-ReleasePlanSourceRepository $State.plan) (Split-Path $repositoryState -Parent) (Split-Path $repositoryState -Leaf)
+    return @(Get-ReleaseLiveReceipts $records | Where-Object {$_.entry.version -ceq $State.plan.version})
 }
 
 # Lists the live receipts any checkout of the game recorded for this exact release: its version, from its source.
 function Get-ReleaseShipmentReceipts($State, [string]$StatePath) {
-    $repositoryState=Split-Path $StatePath -Parent
-    $records=Get-ReleaseLiveRecords (Get-ReleasePlanSourceRepository $State.plan) (Split-Path $repositoryState -Parent) (Split-Path $repositoryState -Leaf)
-    return @(Get-ReleaseLiveReceipts $records | Where-Object {$_.entry.version -ceq $State.plan.version -and $_.entry.sourceCommit -ceq $State.plan.head})
+    return @(Get-ReleaseVersionReceipts $State $StatePath | Where-Object {$_.entry.sourceCommit -ceq $State.plan.head})
 }
 
-# Finds the live destination record another checkout's state holds for this release on $Destination's store channel.
-function Find-ReleaseSharedDestinationRecord($Receipts, $Destination) {
-    $key=Get-ReleaseStoreKey $Destination
-    foreach ($receipt in @($Receipts | Where-Object {$_.key -ceq $key})) {
-        if (-not $receipt.entry.statePath -or -not $receipt.entry.destination) {continue}
-        $path=Join-Path ([string]$receipt.entry.statePath) 'state.json'
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {continue}
-        $other=[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
-        $record=$other.destinations[[string]$receipt.entry.destination]
-        if ($record -and $record.remote.Contains('live') -and $record.remote.live -eq $true) {return $record}
+# Reads the other journals of this same release that live receipts point to: the same version, now at the same source.
+# An extended release keeps each artifact's own source, so a channel's receipt can name an older commit than the release;
+# the journal it points to, not that commit, says which release it belongs to. Other same-version journals are ignored.
+function Get-ReleaseRelatedStates($State, [string]$StatePath) {
+    $own=[IO.Path]::GetFullPath($StatePath).TrimEnd('\','/')
+    $paths=@(Get-ReleaseVersionReceipts $State $StatePath | Where-Object {$_.entry.statePath} | ForEach-Object {[IO.Path]::GetFullPath([string]$_.entry.statePath).TrimEnd('\','/')} | Sort-Object -Unique)
+    foreach ($path in $paths) {
+        if ($path -eq $own) {continue}
+        $file=Join-Path $path 'state.json'
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {continue}
+        $other=[IO.File]::ReadAllText($file) | ConvertFrom-Json -AsHashtable
+        if ($other.plan.version -ceq $State.plan.version -and $other.plan.head -ceq $State.plan.head) {$other}
+    }
+}
+
+# Finds how another journal of this release records destination $Id: a live record first; then, where this checkout did
+# not select the destination itself ($AnyStatus), whatever a journal that selected it records, pending or held work included.
+function Find-ReleaseRelatedDestinationRecord($Related, [string]$Id, [bool]$AnyStatus) {
+    foreach ($liveOnly in @($true,$false)) {
+        if (-not $liveOnly -and -not $AnyStatus) {break}
+        foreach ($other in $Related) {
+            if (-not @($other.plan.destinations | Where-Object {$_.id -ceq $Id -and $_.selected}).Count -or -not $other.destinations.Contains($Id)) {continue}
+            $record=$other.destinations[$Id]
+            if (-not $liveOnly -or ($record.remote.Contains('live') -and $record.remote.live -eq $true)) {return $record}
+        }
     }
     return $null
 }
 
 # Writes changing factual availability with ordinary subsequent GitHub commits while preserving canonical notes.
-# A store another checkout made live for this same release is reported as that checkout's state records it, so whichever
-# checkout writes the record says the same of it; this release's own selection is unchanged.
+# A store another journal of this same release made live, or selected where this one did not, is reported as that journal
+# records it, so a checkout that did not publish there reports it as the publishing one does; this selection is unchanged.
 function Publish-ReleaseAvailability($State, [string]$StatePath, [string]$GhExecutable) {
     $destinations=[ordered]@{}
-    $receipts=@(Get-ReleaseShipmentReceipts $State $StatePath)
+    $related=@(Get-ReleaseRelatedStates $State $StatePath)
     foreach ($destination in $State.plan.destinations) {
         if ($destination.type -eq 'notes') {continue}
         $record=$State.destinations[$destination.id];$selected=$destination.selected
         if (-not ($record.remote.Contains('live') -and $record.remote.live -eq $true)) {
-            $shared=Find-ReleaseSharedDestinationRecord $receipts $destination
+            $shared=Find-ReleaseRelatedDestinationRecord $related $destination.id (-not $destination.selected)
             if ($shared) {$record=$shared;$selected=$true}
         }
         $destinations[$destination.id]=[ordered]@{type=$destination.type;selected=$selected;status=$record.status;live=($record.remote.Contains('live') -and $record.remote.live -eq $true)}
