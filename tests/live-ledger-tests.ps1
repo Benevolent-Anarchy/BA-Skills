@@ -9,6 +9,22 @@ function Write-LegacyLiveLedger([string]$StateRoot, [string]$Checkout, [string]$
     Write-Json (Join-Path $folder 'live.json') @{'itch:example/real-game:windows'=@{sourceCommit=$Commit;version=$Version;destination='itch-windows';statePath=(Join-Path $folder $Version)}}
 }
 
+# Writes a checkout folder of $Checkout as raw text, so either file can be damaged: a version's state, its live ledger,
+# or both. An empty text leaves that file out, since a [string] parameter turns $null into ''. Returns the folder's name.
+function Write-RawCheckout([string]$StateRoot, [string]$Checkout, [string]$Version, [string]$StateText, [string]$LedgerText) {
+    $id=& (Get-Module Release) {param($path) (Get-ReleaseTextHash $path).Substring(0,20)} $Checkout
+    $folder=Join-Path $StateRoot $id
+    New-Item -ItemType Directory -Path (Join-Path $folder $Version) -Force | Out-Null
+    if ($StateText) {[IO.File]::WriteAllText((Join-Path $folder "$Version/state.json"),$StateText)}
+    if ($LedgerText) {[IO.File]::WriteAllText((Join-Path $folder 'live.json'),$LedgerText)}
+    return $id
+}
+
+# Gives a legacy live ledger's text with one itch row on $Target at $Commit for $Version.
+function Get-LegacyLedgerText([string]$Target, [string]$Commit, [string]$Version) {
+    return (@{"itch:$Target"=@{sourceCommit=$Commit;version=$Version;destination='itch-windows'}} | ConvertTo-Json -Depth 5)
+}
+
 # Prepares only the notes of the release prepared at $StorePath, in a new worktree named $Name at that release's current
 # source, with the same canonical notes, and returns the notes-only state's path.
 function New-NotesCheckout([string]$Repo, [string]$StateRoot, [string]$StorePath, [string]$Name) {
@@ -263,4 +279,61 @@ Test 'a notes-only checkout from before the release was extended refuses to rewr
         Assert ($late.availability -ceq $written) 'A notes-only checkout prepared before the extension rewrote its availability.'
         Assert ($late.result.status -ne 'published' -and $late.result.destinations.notes.error -match 'extended') "The obsolete publication was not refused with its reason: $($late.result.status) $($late.result.destinations.notes.error)"
     } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE}
+}
+Test 'another game damaging its release state stops neither planning nor publishing this one' {
+    $repo=New-Fixture 'foreign-damage'
+    $stateRoot=Join-Path $sandbox 'foreign-damage-state'
+    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'foreign-damage-note.md'
+    $locked=$null
+    try {
+        $store=Invoke-ReleasePrepare $repo @('itch-windows','notes') $stateRoot $engine
+        $state=Get-Content (Join-Path $store.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $store.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $store.statePath $state.plan) | Out-Null
+        $other=Get-LegacyLedgerText 'example/other-game:windows' $state.plan.head '9.0.0'
+        $foreignState=(@{plan=@{notesRepository='Example/Other-Game-release-notes';version='9.0.0'}} | ConvertTo-Json -Depth 5)
+        Write-RawCheckout $stateRoot 'C:\old\no-state' '9.0.0' $null '{ not json' | Out-Null
+        Write-RawCheckout $stateRoot 'C:\old\other-game-ledger' '9.0.0' $foreignState '{ not json' | Out-Null
+        Write-RawCheckout $stateRoot 'C:\old\other-game-state' '9.0.0' '{ not json' $other | Out-Null
+        if ($IsWindows) {
+            $id=Write-RawCheckout $stateRoot 'C:\old\other-game-locked' '9.0.0' $foreignState $other
+            $locked=[IO.File]::Open((Join-Path $stateRoot "$id/9.0.0/state.json"),'Open','ReadWrite','None')
+        }
+        $plan=Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot
+        Assert ($plan.baselines['itch-windows'] -ceq $state.plan.head) "Another game's damaged state stopped or changed planning: $($plan.baselines['itch-windows'])"
+        $notes=Publish-NotesFromAnotherCheckout $repo $stateRoot $store.statePath 'foreign-damage-notes'
+        Assert ($notes.result.destinations.notes.status -eq 'succeeded') "Another game's damaged state stopped notes publication: $($notes.result.destinations.notes.error)"
+        $worktree=Join-Path $sandbox 'foreign-damage-newer'
+        Invoke-FixtureGit $repo @('worktree','add','--quiet','-b','newer',$worktree) | Out-Null
+        Invoke-ReleasePrepare $worktree @('itch-windows') $stateRoot $engine -VersionChange patch | Out-Null
+        Invoke-FixtureGit $worktree @('add','project.godot') | Out-Null
+        Invoke-FixtureGit $worktree @('commit','--quiet','-m','Reserve the newer version') | Out-Null
+        $newer=Invoke-ReleasePrepare $worktree @('itch-windows') $stateRoot $engine -VersionChange patch
+        $newerState=Get-Content (Join-Path $newer.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $newer.statePath -ButlerExecutable $butler -ApprovedPlanId $newerState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $newer.statePath $newerState.plan) | Out-Null
+        $plan=Get-ReleasePlan -Repository $worktree -Destination @('itch-windows') -StateRoot $stateRoot
+        Assert ($plan.baselines['itch-windows'] -ceq $newerState.plan.head) "Another game's damaged state stopped the newer release being recorded: $($plan.baselines['itch-windows'])"
+    } finally {if ($locked) {$locked.Dispose()};Remove-Item Env:BA_FIXTURE_NOTE_STORE}
+}
+Test 'damaged release state that may be this game''s stops planning and names the file' {
+    $repo=New-Fixture 'own-damage'
+    $stateRoot=Join-Path $sandbox 'own-damage-state'
+    $head=Invoke-FixtureGit $repo @('rev-parse','HEAD')
+    $ours=(@{plan=@{notesRepository='Example/Real-Game-release-notes';version='1.1.0'}} | ConvertTo-Json -Depth 5)
+    $id=Write-RawCheckout $stateRoot 'C:\old\damaged-ledger' '1.1.0' $ours '{ not json'
+    Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot} ([regex]::Escape("$id/live.json"))
+    Remove-Item -LiteralPath (Join-Path $stateRoot $id) -Recurse
+    $id=Write-RawCheckout $stateRoot 'C:\old\damaged-state' '1.1.0' '{ not json' (Get-LegacyLedgerText 'example/real-game:windows' $head '1.1.0')
+    Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot} ([regex]::Escape("$id/1.1.0/state.json"))
+}
+Test 'a damaged release state that may be this game''s does not stop a newly live channel being recorded' {
+    $repo=New-Fixture 'damage-while-publishing'
+    $stateRoot=Join-Path $sandbox 'damage-while-publishing-state'
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows') $stateRoot $engine
+    $state=Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+    $ours=(@{plan=@{notesRepository='Example/Real-Game-release-notes';version='1.1.0'}} | ConvertTo-Json -Depth 5)
+    Write-RawCheckout $stateRoot 'C:\old\damaged-ledger' '1.1.0' $ours '{ not json' | Out-Null
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
+    $shared=Join-Path (& (Get-Module Release) {param($root) Get-ReleaseLedgerDirectory 'Example/Real-Game' $root} $stateRoot) 'live.json'
+    $rows=Get-Content $shared -Raw | ConvertFrom-Json -AsHashtable
+    Assert ($result.destinations['itch-windows'].status -eq 'succeeded' -and $rows['itch:example/real-game:windows'].sourceCommit -ceq $state.plan.head) 'Damaged older state stranded a newly live channel outside the ledger.'
 }

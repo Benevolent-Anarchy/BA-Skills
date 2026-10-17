@@ -170,7 +170,13 @@ checkout, worktree and clone of the game that uses that state root reads and
 advances the same one. Windows and WSL keep separate default roots. Ledgers
 that checkouts kept in their own directories before it was shared are read
 alongside it. A checkout's own one always counts; another's counts only where its
-release state names the same game. For each channel the latest source wins.
+release state names the same game. That folder is attributed by its release states
+before its ledger is read, and only rows on this game's store channels are looked
+into, so a damaged or unreadable file in another game's folder stops nothing.
+Damage that may be this game's stops the plan, naming the file by its place under
+the state root, rather than being read as proof that nothing shipped; recording a
+newly live channel reads those older ledgers only when a replay needs them, so it
+is saved even then. For each channel the latest source wins.
 Records on sources that diverged, or that this repository lacks, stop planning
 that channel, and no other, until they are fetched or reconciled.
 

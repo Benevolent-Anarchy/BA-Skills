@@ -21,14 +21,32 @@ function Get-ReleasePlanSourceRepository($Plan) {
     return $Plan.notesRepository -replace '-release-notes$',''
 }
 
+# Reads a JSON object from a release state file, or gives $null where it cannot be read, parsed, or is not an object.
+function Read-ReleaseStateObject([string]$Path) {
+    try {$value=[IO.File]::ReadAllText($Path) | ConvertFrom-Json -AsHashtable -ErrorAction Stop} catch {return $null}
+    if ($value -is [Collections.IDictionary]) {return $value}
+    return $null
+}
+
+# Makes the classified error for a damaged state file that may record this game's live releases. It names the file by its
+# place under the state root, never by its private absolute path, since the reason can be kept in a release journal.
+function New-ReleaseDamagedStateError([string]$Root, [string]$Path) {
+    $place=[IO.Path]::GetRelativePath($Root,$Path).Replace('\','/')
+    return (New-ReleaseDiagnosticError "Release state '$place' under the state root cannot be read and may record this game's live releases; repair it, or move it out of the state root, then retry.")
+}
+
 # Gathers a game's live records, its shared ledger's first. Before ledgers were shared, each checkout kept one in the
 # folder named by its own path's hash ($OwnId); another such folder counts only where its state says it released this game.
-function Get-ReleaseLiveRecords([string]$SourceRepository, [string]$StateRoot, [string]$OwnId) {
+# That folder is attributed by the states it holds before its ledger is read, and only rows on $Keys, this game's store
+# channels where given, are looked into, so damage in another game's folder never stops this one. Damage that may be this
+# game's still stops it, naming the file, rather than being read as proof that nothing shipped.
+function Get-ReleaseLiveRecords([string]$SourceRepository, [string]$StateRoot, [string]$OwnId, [string[]]$Keys=@()) {
     $root=Get-ReleaseStateRoot $StateRoot
     $records=[Collections.Generic.List[object]]::new()
     $shared=Join-Path (Get-ReleaseLedgerDirectory $SourceRepository $root) 'live.json'
     if (Test-Path -LiteralPath $shared -PathType Leaf) {
-        $ledger=[IO.File]::ReadAllText($shared) | ConvertFrom-Json -AsHashtable
+        $ledger=Read-ReleaseStateObject $shared
+        if ($null -eq $ledger) {throw (New-ReleaseDamagedStateError $root $shared)}
         foreach ($key in $ledger.Keys) {$records.Add(@{key=$key;entry=$ledger[$key]})}
     }
     if (-not (Test-Path -LiteralPath $root -PathType Container)) {return ,$records}
@@ -36,20 +54,42 @@ function Get-ReleaseLiveRecords([string]$SourceRepository, [string]$StateRoot, [
     foreach ($folder in @(Get-ChildItem -LiteralPath $root -Directory | Where-Object {$_.Name -cmatch '^[0-9a-f]{20}$'} | Sort-Object Name)) {
         $path=Join-Path $folder.FullName 'live.json'
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {continue}
-        $ledger=[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
+        $own=$folder.Name -ceq $OwnId
+        $games=@{}
+        if (-not $own) {
+            $damaged=$false
+            foreach ($version in @(Get-ChildItem -LiteralPath $folder.FullName -Directory)) {
+                $statePath=Join-Path $version.FullName 'state.json'
+                if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {continue}
+                $state=Read-ReleaseStateObject $statePath
+                $named=if ($null -ne $state -and $state.plan -is [Collections.IDictionary]) {[string]$state.plan.notesRepository} else {''}
+                if ($named) {$games[$version.Name]=$named} else {$damaged=$true}
+            }
+            # Another game's folder, or one with no state to say whose it is, cannot hold this game's records.
+            if (-not @($games.Values | Where-Object {$_ -ieq $notesRepository}).Count -and ($games.Count -or -not $damaged)) {continue}
+        }
+        $ledger=Read-ReleaseStateObject $path
+        if ($null -eq $ledger) {throw (New-ReleaseDamagedStateError $root $path)}
         foreach ($key in $ledger.Keys) {
             $entry=$ledger[$key]
-            if ($folder.Name -cne $OwnId) {
-                if ([string]$entry.version -cnotmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {continue}
-                $statePath=Join-Path (Join-Path $folder.FullName $entry.version) 'state.json'
-                if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {continue}
-                $state=[IO.File]::ReadAllText($statePath) | ConvertFrom-Json -AsHashtable
-                if ([string]$state.plan.notesRepository -ine $notesRepository) {continue}
+            if (-not $own) {
+                if (($Keys.Count -and $key -cnotin $Keys) -or $entry -isnot [Collections.IDictionary] -or [string]$entry.version -cnotmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {continue}
+                if (-not $games.Contains([string]$entry.version)) {
+                    $statePath=Join-Path (Join-Path $folder.FullName $entry.version) 'state.json'
+                    if (Test-Path -LiteralPath $statePath -PathType Leaf) {throw (New-ReleaseDamagedStateError $root $statePath)}
+                    continue
+                }
+                if ($games[[string]$entry.version] -ine $notesRepository) {continue}
             }
             $records.Add(@{key=$key;entry=$entry})
         }
     }
     return ,$records
+}
+
+# Lists the store channels a plan's destinations name, selected or not, so only their rows are looked into.
+function Get-ReleaseStoreKeys($Destinations) {
+    return @($Destinations | ForEach-Object {Get-ReleaseStoreKey $_} | Where-Object {$_})
 }
 
 # Keeps, for each store channel, the record of the latest source to go live. Records on sources that diverged, or that
@@ -70,11 +110,12 @@ function Merge-ReleaseLiveRecords([string]$Repository, $Records) {
     return $ledger
 }
 
-# Reads the game's live records without network operations or writes: its shared ledger, and those checkouts kept before it.
-function Get-ReleaseLiveLedger([string]$Repository, [string]$StateRoot) {
+# Reads the game's live records without network operations or writes: its shared ledger, and those checkouts kept before it,
+# looking into older checkouts' rows only on $Keys where given.
+function Get-ReleaseLiveLedger([string]$Repository, [string]$StateRoot, [string[]]$Keys=@()) {
     $Repository=(Get-Item -LiteralPath $Repository).FullName
     $ownId=(Get-ReleaseTextHash $Repository).Substring(0,20)
-    $records=Get-ReleaseLiveRecords (Get-ReleaseSourceRepository $Repository) $StateRoot $ownId
+    $records=Get-ReleaseLiveRecords (Get-ReleaseSourceRepository $Repository) $StateRoot $ownId $Keys
     return Merge-ReleaseLiveRecords $Repository $records
 }
 
@@ -82,7 +123,7 @@ function Get-ReleaseLiveLedger([string]$Repository, [string]$StateRoot) {
 # channels it names, such as a prepared release's own; any other selected channel is observed in the live ledger.
 function Get-ReleaseDestinationBaselines($Settings, $Destinations, [string]$Head, $Snapshot, [string]$StateRoot) {
     $observed=@($Destinations | Where-Object {$_.selected -and $_.type -ne 'notes' -and ($null -eq $Snapshot -or -not $Snapshot.Contains($_.id))})
-    $ledger=if ($observed.Count) {Get-ReleaseLiveLedger $Settings.repository $StateRoot} else {@{}}
+    $ledger=if ($observed.Count) {Get-ReleaseLiveLedger $Settings.repository $StateRoot (Get-ReleaseStoreKeys $Destinations)} else {@{}}
     $result=[ordered]@{}
     foreach ($destination in $Destinations) {
         if (-not $destination.selected -or $destination.type -eq 'notes') {continue}
@@ -125,9 +166,11 @@ function Update-ReleaseLiveLedger([string]$StatePath, $State) {
     $lock=Lock-ReleaseState $directory
     try {
         $path=Join-Path $directory 'live.json'
-        $ledger=if (Test-Path -LiteralPath $path) {[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable} else {[ordered]@{}}
-        # Receipts a checkout recorded for itself before the ledger was shared were recorded too.
-        $receipts=@(Get-ReleaseLiveReceipts (Get-ReleaseLiveRecords $sourceRepository (Split-Path $repositoryState -Parent) (Split-Path $repositoryState -Leaf)))
+        $ledger=if (Test-Path -LiteralPath $path) {Read-ReleaseStateObject $path} else {[ordered]@{}}
+        if ($null -eq $ledger) {throw (New-ReleaseDamagedStateError (Split-Path $repositoryState -Parent) $path)}
+        # Receipts a checkout recorded for itself before the ledger was shared were recorded too. They are read only when a
+        # row's own history cannot settle a replay, and damage there refuses that channel alone, after the rest are saved.
+        $earlierReceipts=$null;$earlierProblem=$null
         $refused=[Collections.Generic.List[string]]::new()
         foreach ($destination in $State.plan.destinations) {
             if (-not $destination.selected -or $destination.type -eq 'notes') {continue}
@@ -140,7 +183,15 @@ function Update-ReleaseLiveLedger([string]$StatePath, $State) {
                 $ancestor=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$State.plan.repository,'merge-base','--is-ancestor',$row.sourceCommit,$sourceCommit) $State.plan.repository
                 if ($ancestor.exitCode -ne 0) {
                     # An older release completing late must not roll a channel's baseline backwards silently.
-                    $replayed=@($receipts | Where-Object {$_.key -ceq $key -and $_.entry.sourceCommit -ceq $sourceCommit -and $_.entry.version -ceq $State.plan.version}).Count -gt 0
+                    $isReceipt={param($receipts) @($receipts | Where-Object {$_.key -ceq $key -and $_.entry.sourceCommit -ceq $sourceCommit -and $_.entry.version -ceq $State.plan.version}).Count -gt 0}
+                    $replayed=& $isReceipt @(Get-ReleaseLiveReceipts @(@{key=$key;entry=$row}))
+                    if (-not $replayed) {
+                        if ($null -eq $earlierReceipts) {
+                            try {$earlierReceipts=@(Get-ReleaseLiveReceipts (Get-ReleaseLiveRecords $sourceRepository (Split-Path $repositoryState -Parent) (Split-Path $repositoryState -Leaf) (Get-ReleaseStoreKeys $State.plan.destinations)))}
+                            catch {$earlierReceipts=@();$earlierProblem=$_.Exception.Message}
+                        }
+                        $replayed=& $isReceipt $earlierReceipts
+                    }
                     if (-not $replayed) {$refused.Add($destination.id)}
                     continue
                 }
@@ -151,7 +202,7 @@ function Update-ReleaseLiveLedger([string]$StatePath, $State) {
             $ledger[$key]=[ordered]@{sourceCommit=$sourceCommit;version=$State.plan.version;statePath=$StatePath;destination=$destination.id;observedAt=$receipt.observedAt;recorded=@($earlier)+@($receipt)}
         }
         Write-ReleaseJson $path $ledger
-        if ($refused.Count) {throw "An older live release cannot replace a newer channel baseline without explicit reconciliation: $($refused -join ', ')."}
+        if ($refused.Count) {throw "An older live release cannot replace a newer channel baseline without explicit reconciliation: $($refused -join ', ').$(if ($earlierProblem) {' '+$earlierProblem})"}
     } finally {$lock.Dispose()}
 }
 
