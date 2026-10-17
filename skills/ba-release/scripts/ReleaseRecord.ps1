@@ -35,12 +35,28 @@ function New-ReleaseDamagedStateError([string]$Root, [string]$Path) {
     return (New-ReleaseDiagnosticError "Release state '$place' under the state root cannot be read and may record this game's live releases; repair it, or move it out of the state root, then retry.")
 }
 
+# Names the store a channel key is on, its last segment (the channel, branch or track) left off: an itch page, a Steam app
+# or a Play package. A channel later removed from release.json is still on its game's store.
+function Get-ReleaseStoreOf([string]$Key) {
+    $last=$Key.LastIndexOf(':')
+    return $(if ($last -gt 0) {$Key.Substring(0,$last)} else {$Key})
+}
+
+# Says which game a release state names through its notes repository, or '' where the state cannot be read.
+function Get-ReleaseStateGame([string]$Path) {
+    $state=Read-ReleaseStateObject $Path
+    if ($null -ne $state -and $state.plan -is [Collections.IDictionary]) {return [string]$state.plan.notesRepository}
+    return ''
+}
+
 # Gathers a game's live records, its shared ledger's first. Before ledgers were shared, each checkout kept one in the
-# folder named by its own path's hash ($OwnId); another such folder counts only where its state says it released this game.
-# That folder is attributed by the states it holds before its ledger is read, and only rows on $Keys, this game's store
-# channels where given, are looked into, so damage that can be told to be another game's never stops this one. Damage that
-# may be this game's, including a folder whose states are all unreadable, still stops it, naming the file, rather than
-# being read as proof that nothing shipped.
+# folder named by its own path's hash ($OwnId); another such folder's rows count only where the state each row names says
+# it released this game, whatever channel the row is on, so a channel since removed from release.json still counts.
+# Ownership is settled row by row, since a reused checkout path can leave releases of different games in one folder. A row
+# whose state cannot be read is this game's damaged evidence when it is on one of this game's stores ($Keys' stores, or any
+# where none are given), and stops it, naming the file, rather than being read as proof that nothing shipped; on another
+# store it is ignored. A folder whose ledger cannot be read is judged by its states alone: one naming this game, or one
+# that cannot be read, may make it this game's.
 function Get-ReleaseLiveRecords([string]$SourceRepository, [string]$StateRoot, [string]$OwnId, [string[]]$Keys=@()) {
     $root=Get-ReleaseStateRoot $StateRoot
     $records=[Collections.Generic.List[object]]::new()
@@ -52,35 +68,33 @@ function Get-ReleaseLiveRecords([string]$SourceRepository, [string]$StateRoot, [
     }
     if (-not (Test-Path -LiteralPath $root -PathType Container)) {return ,$records}
     $notesRepository="$SourceRepository-release-notes"
+    $stores=@($Keys | ForEach-Object {Get-ReleaseStoreOf $_} | Sort-Object -Unique)
     foreach ($folder in @(Get-ChildItem -LiteralPath $root -Directory | Where-Object {$_.Name -cmatch '^[0-9a-f]{20}$'} | Sort-Object Name)) {
         $path=Join-Path $folder.FullName 'live.json'
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {continue}
         $own=$folder.Name -ceq $OwnId
-        $games=@{}
-        if (-not $own) {
-            $damaged=$false
-            foreach ($version in @(Get-ChildItem -LiteralPath $folder.FullName -Directory)) {
-                $statePath=Join-Path $version.FullName 'state.json'
-                if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {continue}
-                $state=Read-ReleaseStateObject $statePath
-                $named=if ($null -ne $state -and $state.plan -is [Collections.IDictionary]) {[string]$state.plan.notesRepository} else {''}
-                if ($named) {$games[$version.Name]=$named} else {$damaged=$true}
-            }
-            # Another game's folder, or one with no state to say whose it is, cannot hold this game's records.
-            if (-not @($games.Values | Where-Object {$_ -ieq $notesRepository}).Count -and ($games.Count -or -not $damaged)) {continue}
-        }
         $ledger=Read-ReleaseStateObject $path
-        if ($null -eq $ledger) {throw (New-ReleaseDamagedStateError $root $path)}
+        if ($null -eq $ledger) {
+            if (-not $own) {
+                $games=@(Get-ChildItem -LiteralPath $folder.FullName -Directory | ForEach-Object {Join-Path $_.FullName 'state.json'} | Where-Object {Test-Path -LiteralPath $_ -PathType Leaf} | ForEach-Object {Get-ReleaseStateGame $_})
+                if (-not @($games | Where-Object {-not $_ -or $_ -ieq $notesRepository}).Count) {continue}
+            }
+            throw (New-ReleaseDamagedStateError $root $path)
+        }
+        $games=@{}
         foreach ($key in $ledger.Keys) {
             $entry=$ledger[$key]
             if (-not $own) {
-                if (($Keys.Count -and $key -cnotin $Keys) -or $entry -isnot [Collections.IDictionary] -or [string]$entry.version -cnotmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {continue}
-                if (-not $games.Contains([string]$entry.version)) {
-                    $statePath=Join-Path (Join-Path $folder.FullName $entry.version) 'state.json'
-                    if (Test-Path -LiteralPath $statePath -PathType Leaf) {throw (New-ReleaseDamagedStateError $root $statePath)}
+                if ($entry -isnot [Collections.IDictionary] -or [string]$entry.version -cnotmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {continue}
+                $statePath=Join-Path (Join-Path $folder.FullName $entry.version) 'state.json'
+                if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {continue}
+                if (-not $games.Contains([string]$entry.version)) {$games[[string]$entry.version]=Get-ReleaseStateGame $statePath}
+                $game=$games[[string]$entry.version]
+                if (-not $game) {
+                    if (-not $stores.Count -or (Get-ReleaseStoreOf $key) -cin $stores) {throw (New-ReleaseDamagedStateError $root $statePath)}
                     continue
                 }
-                if ($games[[string]$entry.version] -ine $notesRepository) {continue}
+                if ($game -ine $notesRepository) {continue}
             }
             $records.Add(@{key=$key;entry=$entry})
         }
@@ -88,7 +102,7 @@ function Get-ReleaseLiveRecords([string]$SourceRepository, [string]$StateRoot, [
     return ,$records
 }
 
-# Lists the store channels a plan's destinations name, selected or not, so only their rows are looked into.
+# Lists the store channels a plan's destinations name, selected or not, whose stores say which unreadable rows may be this game's.
 function Get-ReleaseStoreKeys($Destinations) {
     return @($Destinations | ForEach-Object {Get-ReleaseStoreKey $_} | Where-Object {$_})
 }

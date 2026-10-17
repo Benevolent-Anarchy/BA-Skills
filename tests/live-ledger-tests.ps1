@@ -379,3 +379,27 @@ Test 'canonical notes wait for previousRelease when two published sources neithe
     $plan=Get-ReleasePlan -Repository $repo -Destination @('notes') -StateRoot $stateRoot
     Assert ($plan.previousCommit -ceq $merge -and -not @($plan.blockers | Where-Object {$_ -match 'ambiguous'}).Count) "previousRelease containing both did not settle the boundary: $($plan.previousCommit) $($plan.blockers -join ' ')"
 }
+Test 'canonical notes keep a publication on a channel since removed from release.json' {
+    $repo=New-Fixture 'retired-channel'
+    $stateRoot=Join-Path $sandbox 'retired-channel-state'
+    $shipped=Invoke-FixtureGit $repo @('rev-parse','HEAD')
+    $ours=(@{plan=@{notesRepository='Example/Real-Game-release-notes';version='1.2.3'}} | ConvertTo-Json -Depth 5)
+    Write-RawCheckout $stateRoot 'C:\old\linux-release' '1.2.3' $ours (Get-LegacyLedgerText 'example/real-game:linux' $shipped '1.2.3') | Out-Null
+    $plan=Get-ReleasePlan -Repository $repo -Destination @('notes') -StateRoot $stateRoot -VersionChange patch
+    Assert ($plan.previousCommit -ceq $shipped) "The Linux publication did not set the boundary while Linux was configured: $($plan.previousCommit)"
+    Change-Config $repo {param($c) $c.distributions.itch.channels.Remove('linux')}
+    'a new feature' | Set-Content (Join-Path $repo 'feature.txt')
+    Invoke-FixtureGit $repo @('add','release.json','feature.txt') | Out-Null
+    Invoke-FixtureGit $repo @('commit','--quiet','-m','Retire Linux and add a feature') | Out-Null
+    $plan=Get-ReleasePlan -Repository $repo -Destination @('notes') -StateRoot $stateRoot -VersionChange patch
+    Assert ($plan.previousCommit -ceq $shipped -and $plan.notesDraft -notmatch 'Fix controller focus') "Retiring Linux dropped its publication from the canonical notes: $($plan.previousCommit)"
+}
+Test 'a readable journal for another game does not hide a damaged one this game''s row points at' {
+    $repo=New-Fixture 'mixed-ownership'
+    $stateRoot=Join-Path $sandbox 'mixed-ownership-state'
+    $head=Invoke-FixtureGit $repo @('rev-parse','HEAD')
+    $id=Write-RawCheckout $stateRoot 'C:\old\reused-path' '1.1.0' '{ not json' (Get-LegacyLedgerText 'example/real-game:windows' $head '1.1.0')
+    New-Item -ItemType Directory -Path (Join-Path $stateRoot "$id/9.0.0") | Out-Null
+    Write-Json (Join-Path $stateRoot "$id/9.0.0/state.json") @{plan=@{notesRepository='Example/Other-Game-release-notes';version='9.0.0'}}
+    Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot} ([regex]::Escape("$id/1.1.0/state.json"))
+}
