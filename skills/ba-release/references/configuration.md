@@ -117,8 +117,9 @@ with an inspected script, or the plan blocks; it runs on the export as built.
 
 Each store may override `previousRelease`; an itch channel may override it again.
 Omission inherits the enclosing baseline. Explicit `null` remains unknown and
-never falls back. The live ledger tracks destination/channel history separately
-and supplies subsequent baselines, including stores that skipped versions. Null
+never falls back. The live ledger tracks destination/channel history separately,
+for every checkout of the game that shares a state root, and supplies subsequent baselines,
+including stores that skipped versions. Null
 does not mean publish all development history. First-ever releases need a
 reviewed baseline policy.
 

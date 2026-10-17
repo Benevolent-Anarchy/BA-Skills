@@ -163,6 +163,17 @@ lock. HEAD, config bytes, version, previous-release commit and sorted selection
 identify the plan. A different plan for the same version is refused; resolve it
 explicitly instead of bumping a version to retry. Do not edit state.json by hand.
 
+That directory, and the version reservation beside it, belong to one checkout.
+The live ledger does not: `repositories/<id>/live.json` under the state root
+holds it for the game's GitHub repository, as its origin names it, so every
+checkout, worktree and clone of the game that uses that state root reads and
+advances the same one. Windows and WSL keep separate default roots. Ledgers
+that checkouts kept in their own directories before it was shared are read
+alongside it. A checkout's own one always counts; another's counts only where its
+release state names the same game. For each channel the latest source wins.
+Records on sources that diverged, or that this repository lacks, stop the plan
+until they are fetched or reconciled.
+
 ## Extending a prepared release
 
 `extend` explicitly adds destinations while retaining canonical notes, artifact
@@ -311,7 +322,7 @@ whose exact remote result is known. See the receipt shapes in the store referenc
 Overall `submitted` and `needs-store-action` preserve pending store work; only
 all verified/completed destinations become `published`.
 
-Local `live.json` advances only channels with live evidence, keyed by exact Butler
+The game's `live.json` advances only channels with live evidence, keyed by exact Butler
 target, Steam app/branch or Play package/track. Held/submitted stores retain their
 older baseline and the actual artifact source commit. Later plans use that baseline
 for missed-change evidence; frozen plans keep their original baselines on retry.

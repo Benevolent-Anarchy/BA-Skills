@@ -233,10 +233,21 @@ function Get-ReleaseConfiguration([string]$Repository, $Configuration = $null) {
             if ($id -cnotin @($config.destinations | ForEach-Object {$_.id}) -or ($null -ne $ref -and ($ref -isnot [string] -or [string]::IsNullOrWhiteSpace($ref) -or $ref.StartsWith('-')))) {throw 'destinationBaselines requires known destination IDs and Git refs or null.'}
         }
     }
-    if ($origin -match '^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$' -or $origin -match '^(?:git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$') {
-        $notesRepository = "$($Matches[1])/$($Matches[2])-release-notes"
-    } else { throw 'A credential-free github.com origin is required to derive the public release-notes repository.' }
+    $notesRepository = "$(ConvertTo-ReleaseSourceRepository $origin)-release-notes"
     return @{repository=$Repository; projectPath=$project; version=$version; title=$title; config=$config; document=$document; configHash=(Get-ReleaseTextHash $raw); presets=$presets.ToArray(); notesRepository=$notesRepository; verificationPath=$verificationPath}
+}
+
+# Names the github.com repository an origin URL points at as owner/name, whichever URL form a checkout uses.
+function ConvertTo-ReleaseSourceRepository([string]$Origin) {
+    if ($Origin -match '^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$' -or $Origin -match '^(?:git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$') {
+        return "$($Matches[1])/$($Matches[2])"
+    }
+    throw 'A credential-free github.com origin is required to derive the public release-notes repository.'
+}
+
+# Names the github.com repository a checkout's origin points at; every checkout, worktree and clone of one game names the same one.
+function Get-ReleaseSourceRepository([string]$Repository) {
+    return ConvertTo-ReleaseSourceRepository (Read-ReleaseGit $Repository @('remote','get-url','origin'))
 }
 
 # Emits a reproducible plan without exports, checks, writes, Git mutations or network access.

@@ -42,12 +42,9 @@ function Test-ReleaseShipped($State, [string]$StatePath) {
     foreach ($destination in $State.plan.destinations) {
         if ($destination.selected -and $destination.type -ne 'notes' -and $State.destinations[$destination.id].remote.Contains('live') -and $State.destinations[$destination.id].remote.live -eq $true) {return $true}
     }
-    $path=Join-Path (Split-Path $StatePath -Parent) 'live.json'
-    if (Test-Path -LiteralPath $path) {
-        $ledger=[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
-        return @($ledger.Values | Where-Object {$_.version -ceq $State.plan.version -and $_.sourceCommit -ceq $State.plan.head}).Count -gt 0
-    }
-    return $false
+    $repositoryState=Split-Path $StatePath -Parent
+    $records=Get-ReleaseLiveRecords (Get-ReleasePlanSourceRepository $State.plan) (Split-Path $repositoryState -Parent) (Split-Path $repositoryState -Leaf)
+    return @($records | Where-Object {$_.entry.version -ceq $State.plan.version -and $_.entry.sourceCommit -ceq $State.plan.head}).Count -gt 0
 }
 
 # Writes changing factual availability with ordinary subsequent GitHub commits while preserving canonical notes.

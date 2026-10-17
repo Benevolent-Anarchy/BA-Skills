@@ -10,13 +10,71 @@ function Get-ReleaseStoreKey($Destination) {
     }
 }
 
-# Reads per-user live receipts without network operations or writes.
+# Places a game's live ledger by its GitHub repository, so every checkout, worktree and clone of the game under one state root reads and advances the same one.
+function Get-ReleaseLedgerDirectory([string]$SourceRepository, [string]$StateRoot) {
+    $id=(Get-ReleaseTextHash ('github.com/'+$SourceRepository.ToLowerInvariant())).Substring(0,20)
+    return Join-Path (Join-Path (Get-ReleaseStateRoot $StateRoot) 'repositories') $id
+}
+
+# Names a prepared plan's GitHub repository, which its notes repository always names as "<owner>/<name>-release-notes".
+function Get-ReleasePlanSourceRepository($Plan) {
+    return $Plan.notesRepository -replace '-release-notes$',''
+}
+
+# Gathers a game's live records, its shared ledger's first. Before ledgers were shared, each checkout kept one in the
+# folder named by its own path's hash ($OwnId); another such folder counts only where its state says it released this game.
+function Get-ReleaseLiveRecords([string]$SourceRepository, [string]$StateRoot, [string]$OwnId) {
+    $root=Get-ReleaseStateRoot $StateRoot
+    $records=[Collections.Generic.List[object]]::new()
+    $shared=Join-Path (Get-ReleaseLedgerDirectory $SourceRepository $root) 'live.json'
+    if (Test-Path -LiteralPath $shared -PathType Leaf) {
+        $ledger=[IO.File]::ReadAllText($shared) | ConvertFrom-Json -AsHashtable
+        foreach ($key in $ledger.Keys) {$records.Add(@{key=$key;entry=$ledger[$key]})}
+    }
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {return ,$records}
+    $notesRepository="$SourceRepository-release-notes"
+    foreach ($folder in @(Get-ChildItem -LiteralPath $root -Directory | Where-Object {$_.Name -cmatch '^[0-9a-f]{20}$'} | Sort-Object Name)) {
+        $path=Join-Path $folder.FullName 'live.json'
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {continue}
+        $ledger=[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
+        foreach ($key in $ledger.Keys) {
+            $entry=$ledger[$key]
+            if ($folder.Name -cne $OwnId) {
+                if ([string]$entry.version -cnotmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {continue}
+                $statePath=Join-Path (Join-Path $folder.FullName $entry.version) 'state.json'
+                if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {continue}
+                $state=[IO.File]::ReadAllText($statePath) | ConvertFrom-Json -AsHashtable
+                if ([string]$state.plan.notesRepository -ine $notesRepository) {continue}
+            }
+            $records.Add(@{key=$key;entry=$entry})
+        }
+    }
+    return ,$records
+}
+
+# Keeps, for each store channel, the record of the latest source to go live. Records on sources that diverged, or that
+# this repository lacks, are refused rather than guessed between, since either could be the one players have.
+function Merge-ReleaseLiveRecords([string]$Repository, $Records) {
+    $ledger=[ordered]@{}
+    foreach ($record in $Records) {
+        $key=$record.key;$entry=$record.entry
+        if (-not $ledger.Contains($key)) {$ledger[$key]=$entry;continue}
+        $kept=$ledger[$key]
+        if ($kept.sourceCommit -ceq $entry.sourceCommit) {continue}
+        $later=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$kept.sourceCommit,$entry.sourceCommit) $Repository
+        if ($later.exitCode -eq 0) {$ledger[$key]=$entry;continue}
+        $earlier=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$entry.sourceCommit,$kept.sourceCommit) $Repository
+        if ($earlier.exitCode -ne 0) {throw "Live records for $key disagree: $($kept.sourceCommit) and $($entry.sourceCommit) do not follow one from the other in this repository. Fetch them, or reconcile which went live last, before planning."}
+    }
+    return $ledger
+}
+
+# Reads the game's live records without network operations or writes: its shared ledger, and those checkouts kept before it.
 function Get-ReleaseLiveLedger([string]$Repository, [string]$StateRoot) {
     $Repository=(Get-Item -LiteralPath $Repository).FullName
-    $id=(Get-ReleaseTextHash $Repository).Substring(0,20)
-    $path=Join-Path (Join-Path (Get-ReleaseStateRoot $StateRoot) $id) 'live.json'
-    if (Test-Path -LiteralPath $path -PathType Leaf) {return [IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable}
-    return [ordered]@{}
+    $ownId=(Get-ReleaseTextHash $Repository).Substring(0,20)
+    $records=Get-ReleaseLiveRecords (Get-ReleaseSourceRepository $Repository) $StateRoot $ownId
+    return Merge-ReleaseLiveRecords $Repository $records
 }
 
 # Resolves frozen or observed channel baselines; a configured null is never replaced by a guess.
@@ -41,12 +99,13 @@ function Get-ReleaseDestinationBaselines($Settings, $Destinations, [string]$Head
     return $result
 }
 
-# Advances only channels with actual live evidence, preserving unselected and submitted channels.
+# Advances only channels with actual live evidence, preserving unselected and submitted channels, in the game's shared ledger.
 function Update-ReleaseLiveLedger([string]$StatePath, $State) {
-    $repositoryState=Split-Path $StatePath -Parent
-    $lock=Lock-ReleaseState $repositoryState
+    $directory=Get-ReleaseLedgerDirectory (Get-ReleasePlanSourceRepository $State.plan) (Split-Path (Split-Path $StatePath -Parent) -Parent)
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $lock=Lock-ReleaseState $directory
     try {
-        $path=Join-Path $repositoryState 'live.json'
+        $path=Join-Path $directory 'live.json'
         $ledger=if (Test-Path -LiteralPath $path) {[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable} else {[ordered]@{}}
         foreach ($destination in $State.plan.destinations) {
             if (-not $destination.selected -or $destination.type -eq 'notes') {continue}
