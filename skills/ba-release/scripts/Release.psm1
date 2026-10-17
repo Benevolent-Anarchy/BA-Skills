@@ -250,8 +250,11 @@ function Get-ReleaseSourceRepository([string]$Repository) {
     return ConvertTo-ReleaseSourceRepository (Read-ReleaseGit $Repository @('remote','get-url','origin'))
 }
 
-# Emits a reproducible plan without exports, checks, writes, Git mutations or network access.
-function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $BaselineSnapshot=$null, [string]$StateRoot, [ValidateSet('current','patch','minor','major')][string]$VersionChange='current') {
+# Emits a reproducible plan without exports, checks, writes, Git mutations or network access. A prepared release passes its
+# own canonical boundary as $FrozenPrevious, as it passes its baselines, so what later ships elsewhere never changes its plan.
+# $ReleaseVersion names the version being released where it is not yet the plan's own, as before a bump is reserved, so the
+# boundary leaves out only that release's receipts.
+function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $BaselineSnapshot=$null, [string]$StateRoot, [ValidateSet('current','patch','minor','major')][string]$VersionChange='current', $FrozenPrevious, [string]$ReleaseVersion) {
     $settings = Get-ReleaseConfiguration $Repository
     $version = Get-ReleaseVersion $settings.version $VersionChange
     $Repository = $settings.repository
@@ -264,22 +267,11 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
     $dirty = Read-ReleaseGit $Repository @('status','--porcelain=v1','--untracked-files=all')
     $shallow = Read-ReleaseGit $Repository @('rev-parse','--is-shallow-repository')
     if ($shallow -eq 'true') { $blockers.Add('Shallow history cannot establish a complete previous-release comparison.') }
-    $previous = $null
-    $changes = @()
-    $changedFiles = @()
-    if ($null -eq $settings.config.previousReleaseRef) { $blockers.Add('previousRelease is unconfirmed; identify the previous published release source commit/ref.') }
-    else {
-        $previous = Read-ReleaseGit $Repository @('rev-parse','--verify',"$($settings.config.previousReleaseRef)^{commit}")
-        $ancestor = Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$previous,$head) $Repository
+    $configured = $null
+    if ($null -ne $settings.config.previousReleaseRef) {
+        $configured = Read-ReleaseGit $Repository @('rev-parse','--verify',"$($settings.config.previousReleaseRef)^{commit}")
+        $ancestor = Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$configured,$head) $Repository
         if ($ancestor.exitCode -ne 0) { throw 'Previous release ref must be an ancestor of HEAD.' }
-        $log = Read-ReleaseGit $Repository @('log','--no-merges','--reverse','--format=%H%x1f%s',"$previous..$head")
-        $changes = @(foreach ($line in $log.Split("`n")) {
-            if (-not $line) {continue}
-            $parts = $line.Split([char]31,2)
-            [ordered]@{commit=$parts[0]; subject=$parts[1]}
-        })
-        $diff = Read-ReleaseGit $Repository @('diff','--name-only',$previous,$head,'--')
-        $changedFiles = @($diff.Split("`n") | Where-Object {$_})
     }
     $destinations = @(foreach ($item in $settings.config.destinations) {
         $record = [ordered]@{id=$item.id; type=$item.type; selected=($item.id -cin $selected); status='not-selected'}
@@ -318,6 +310,28 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
         }
         $record
     })
+    # The canonical notes count from the newest release of this game that went live anywhere, or from previousRelease.
+    $previous = $null
+    $changes = @()
+    $changedFiles = @()
+    $ambiguous = $null
+    if ($PSBoundParameters.ContainsKey('FrozenPrevious')) { $previous = $FrozenPrevious }
+    else {
+        $boundary = Get-ReleasePublishedBoundary $settings $destinations $head $(if ($ReleaseVersion) {$ReleaseVersion} else {$version}) $configured $StateRoot
+        $previous = $boundary.commit; $ambiguous = $boundary.ambiguous
+    }
+    if ($ambiguous) { $blockers.Add($ambiguous) }
+    elseif (-not $previous) { $blockers.Add('previousRelease is unconfirmed; identify the previous published release source commit/ref.') }
+    else {
+        $log = Read-ReleaseGit $Repository @('log','--no-merges','--reverse','--format=%H%x1f%s',"$previous..$head")
+        $changes = @(foreach ($line in $log.Split("`n")) {
+            if (-not $line) {continue}
+            $parts = $line.Split([char]31,2)
+            [ordered]@{commit=$parts[0]; subject=$parts[1]}
+        })
+        $diff = Read-ReleaseGit $Repository @('diff','--name-only',$previous,$head,'--')
+        $changedFiles = @($diff.Split("`n") | Where-Object {$_})
+    }
     $baselines=Get-ReleaseDestinationBaselines $settings $destinations $head $BaselineSnapshot $StateRoot
     foreach ($record in $destinations) {
         if (-not $record.selected -or $record.type -eq 'notes') {continue}
@@ -449,12 +463,15 @@ function Invoke-ReleasePrepare([string]$Repository, [string[]]$Destination, [str
     $relativeState = [IO.Path]::GetRelativePath((Resolve-ReleasePhysicalPath $settings.repository),(Resolve-ReleasePhysicalPath $statePath))
     if (-not [IO.Path]::IsPathRooted($relativeState) -and $relativeState -notmatch '^\.\.(?:[\\/]|$)') { throw 'StateRoot must be outside the source repository.' }
     $priorState=if (Test-Path -LiteralPath (Join-Path $statePath 'state.json')) {[IO.File]::ReadAllText((Join-Path $statePath 'state.json')) | ConvertFrom-Json -AsHashtable} else {$null}
-    # A prepared release keeps its frozen baselines from the first plan on, however far another checkout has since moved them.
-    $plan = Get-ReleasePlan $Repository $Destination $(if ($priorState -and -not $NewRelease) {$priorState.plan.baselines} else {$null}) $StateRoot
+    # A prepared release keeps its frozen baselines and canonical boundary from the first plan on, however far another checkout
+    # has since moved them. A new one is checked at the version it is about to reserve.
+    $frozen=if ($priorState -and -not $NewRelease) {@{BaselineSnapshot=$priorState.plan.baselines;FrozenPrevious=$priorState.plan.previousCommit}} else {@{}}
+    $releasing=if ($frozen.Count) {@{}} else {@{ReleaseVersion=(Get-ReleaseVersion $settings.version $VersionChange)}}
+    $plan = Get-ReleasePlan -Repository $Repository -Destination $Destination -StateRoot $StateRoot @frozen @releasing
     if (-not $plan.configurationReady) { throw "Release plan is blocked: $($plan.blockers -join ' ')" }
     $sourceResult=if (-not $priorState -or $NewRelease) {Initialize-ReleaseSource $settings $plan $repositoryState $VersionChange -NewRelease:$NewRelease} else {$null}
     if ($sourceResult -and $sourceResult.status -eq 'source-update-required') {return $sourceResult}
-    $plan=Get-ReleasePlan $Repository $Destination $(if ($priorState -and -not $NewRelease) {$priorState.plan.baselines} else {$null}) $StateRoot
+    $plan=Get-ReleasePlan -Repository $Repository -Destination $Destination -StateRoot $StateRoot @frozen
     if (-not $plan.ready) {throw "Release plan is blocked: $($plan.blockers -join ' ')"}
     $settings=Get-ReleaseConfiguration $Repository
     $statePath=Join-Path $repositoryState $plan.version
@@ -522,7 +539,7 @@ function Invoke-ReleasePrepare([string]$Repository, [string[]]$Destination, [str
             } catch { $state.exports[$preset.name].status='failed'; $state.exports[$preset.name].error='Local export failed; inspect the engine and preset.' }
             Write-ReleaseJson $stateFile $state
         }
-        $fresh = Get-ReleasePlan $settings.repository $plan.selectedDestinations $plan.baselines
+        $fresh = Get-ReleasePlan $settings.repository $plan.selectedDestinations $plan.baselines -FrozenPrevious $plan.previousCommit
         if (-not $fresh.ready -or $fresh.planId -cne $plan.planId) { $state.status='preparation-failed'; Write-ReleaseJson $stateFile $state; throw 'Source or configuration changed during preparation.' }
         $state.status = if (@($state.exports.Values | Where-Object {$_.status -ne 'succeeded'}).Count) {'preparation-failed'} else {'prepared'}
         if ($state.status -eq 'prepared') {
@@ -623,7 +640,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
         $stateFile = Join-Path $StatePath 'state.json'
         $state = [IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable
         if ($state.schemaVersion -ne 1 -or $state.status -in @('preparing','preparation-failed') -or $state.verification -ne 'succeeded') { throw 'Release has not been prepared successfully.' }
-        $fresh = Get-ReleasePlan $state.plan.repository $state.plan.selectedDestinations $state.plan.baselines
+        $fresh = Get-ReleasePlan $state.plan.repository $state.plan.selectedDestinations $state.plan.baselines -FrozenPrevious $state.plan.previousCommit
         if (-not $fresh.ready -or $fresh.planId -cne $state.plan.planId) { throw 'Source or release configuration changed after preparation.' }
         foreach ($destination in $state.plan.destinations) {
             $record=$state.destinations[$destination.id]

@@ -16,7 +16,7 @@ blockers, including deliberately unknown publication facts.
 | --- | --- |
 | `schemaVersion` | Integer `1`. |
 | `project` | Relative Godot directory inside the source Git root. |
-| `previousRelease` | Confirmed previous published source commit/ref, or `null` until confirmed; must be an ancestor of the selected source. |
+| `previousRelease` | Confirmed previous published source commit/ref, or `null` until confirmed; must be an ancestor of the selected source. Canonical notes count from the newer of this and the game's newest recorded live release, so it is needed only until a release is recorded. |
 | `exports` | Object mapping lowercase aliases such as `windows`, `linux`, `apk`, `aab` to distinct, exact inspected preset names. |
 | `verification.gate` | `{script, arguments?}`: inspected repository-relative PowerShell script and string arguments, defaulting to `[]`. |
 | `verification.standalone` | Shared `{exports, script, arguments?}` hook, or array of those objects for different scripts. `exports` contains aliases. An unknown script may remain `null`. |
@@ -122,6 +122,14 @@ for every checkout of the game that shares a state root, and supplies subsequent
 including stores that skipped versions. Null
 does not mean publish all development history. First-ever releases need a
 reviewed baseline policy.
+
+The canonical notes, and the plan's top-level `previousCommit`, `changes` and
+`changedFiles`, count from the newest of the root `previousRelease` and every
+source the ledger records live for another version, on any channel, among the
+selected source's ancestors. Each store's own catch-up range still runs from
+its channel baseline. Two recorded sources that neither contains block the plan
+as ambiguous until `previousRelease` names a commit containing both. A prepared
+release keeps the boundary it was prepared with.
 
 Paths resolve inside the repository, including link ancestors. Nested Godot
 export paths may use `..` only when they stay inside the Git root. Do not commit

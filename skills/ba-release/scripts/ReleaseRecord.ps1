@@ -119,6 +119,34 @@ function Get-ReleaseLiveLedger([string]$Repository, [string]$StateRoot, [string[
     return Merge-ReleaseLiveRecords $Repository $records
 }
 
+# Finds where a release's canonical notes count from: the newest of release.json's previousRelease ($Configured) and every
+# source of this game any checkout recorded live, on any channel, for another version, among $Head's ancestors. This
+# version's own receipts are left out, so publishing it never moves its own boundary. Sources that neither contains the
+# other cannot be ordered, so the boundary is then reported as ambiguous rather than guessed.
+function Get-ReleasePublishedBoundary($Settings, $Destinations, [string]$Head, [string]$Version, [string]$Configured, [string]$StateRoot) {
+    $repository=$Settings.repository
+    $isAncestor={param($ancestor,$descendant) (Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$repository,'merge-base','--is-ancestor',$ancestor,$descendant) $repository).exitCode -eq 0}
+    $candidates=[Collections.Generic.List[string]]::new()
+    if ($Configured) {$candidates.Add($Configured)}
+    $ownId=(Get-ReleaseTextHash $repository).Substring(0,20)
+    $records=Get-ReleaseLiveRecords (Get-ReleasePlanSourceRepository $Settings) $StateRoot $ownId (Get-ReleaseStoreKeys $Destinations)
+    foreach ($receipt in @(Get-ReleaseLiveReceipts $records)) {
+        $entry=$receipt.entry
+        if ($entry -isnot [Collections.IDictionary] -or [string]$entry.version -ceq $Version) {continue}
+        $commit=[string]$entry.sourceCommit
+        if ($commit -cnotmatch '^[0-9a-f]{40}(?:[0-9a-f]{24})?$' -or $commit -cin $candidates) {continue}
+        if (& $isAncestor $commit $Head) {$candidates.Add($commit)}
+    }
+    # Keep only the sources no other contains; exactly one left is the boundary.
+    $newest=@()
+    foreach ($commit in $candidates) {
+        if (@($newest | Where-Object {& $isAncestor $commit $_}).Count) {continue}
+        $newest=@(@($newest | Where-Object {-not (& $isAncestor $_ $commit)})+@($commit))
+    }
+    if ($newest.Count -gt 1) {return @{commit=$null;ambiguous="The previous published release is ambiguous: $($newest -join ' and ') each went live and neither contains the other. Set previousRelease in release.json to a commit containing them, from which the canonical notes should count."}}
+    return @{commit=$(if ($newest.Count) {$newest[0]} else {$null});ambiguous=$null}
+}
+
 # Resolves frozen or observed channel baselines; a configured null is never replaced by a guess. A snapshot freezes the
 # channels it names, such as a prepared release's own; any other selected channel is observed in the live ledger.
 function Get-ReleaseDestinationBaselines($Settings, $Destinations, [string]$Head, $Snapshot, [string]$StateRoot) {
@@ -298,7 +326,7 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
     # only the added channels are observed now.
     $frozen=[ordered]@{}
     foreach ($id in $state.plan.baselines.Keys) {$frozen[$id]=$state.plan.baselines[$id]}
-    $fresh=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot
+    $fresh=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit
     Assert-ReleaseAddedBaselines $state $fresh.baselines $added
     if ($settings.configHash -cne $state.plan.configSha256) {
         $migration=Get-ReleaseConfigurationMigration $state $settings $fresh.head
@@ -308,15 +336,15 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
         # Every introduced destination is frozen with the release, selected or not, so each must be complete now.
         $adopted=@(@($selected)+@($migration.addedDestinations) | Sort-Object -Unique -CaseSensitive)
         $introduced=@($adopted | Where-Object {$_ -cnotin $state.plan.selectedDestinations})
-        $observed=Get-ReleasePlan $settings.repository $adopted $frozen $stateRoot
+        $observed=Get-ReleasePlan $settings.repository $adopted $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit
         Assert-ReleaseAddedBaselines $state $observed.baselines $introduced
         $snapshot=[ordered]@{}
         foreach ($id in $state.plan.baselines.Keys) {$snapshot[$id]=$state.plan.baselines[$id]}
         foreach ($id in $introduced) {if ($observed.baselines.Contains($id)) {$snapshot[$id]=$observed.baselines[$id]}}
-        $expanded=Get-ReleasePlan $settings.repository $adopted $snapshot $stateRoot
+        $expanded=Get-ReleasePlan $settings.repository $adopted $snapshot $stateRoot -FrozenPrevious $state.plan.previousCommit
         if (-not $expanded.ready) {throw "Configuration migration adopts every added destination, selected or not; complete them or leave them out of the committed change. Plan is blocked: $($expanded.blockers -join ' ')"}
         # Phase one rebinds only the original selection, keeping its frozen baselines and notes boundary.
-        $migrated=Get-ReleasePlan $settings.repository $state.plan.selectedDestinations $state.plan.baselines $stateRoot
+        $migrated=Get-ReleasePlan $settings.repository $state.plan.selectedDestinations $state.plan.baselines $stateRoot -FrozenPrevious $state.plan.previousCommit
         if (-not $migrated.ready) {throw "Migrated release plan is blocked: $($migrated.blockers -join ' ')"}
         if ($migrated.previousCommit -cne $state.plan.previousCommit) {throw 'Configuration migration cannot move the previous-release boundary of the prepared release.'}
         # Planning rereads HEAD and release.json, so save only plans built from the snapshot that passed validation.
@@ -370,9 +398,9 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
     }
     $snapshot=[ordered]@{}
     foreach ($id in $state.plan.baselines.Keys) {$snapshot[$id]=$state.plan.baselines[$id]}
-    $observed=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot
+    $observed=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit
     foreach ($id in $added) {if ($observed.baselines.Contains($id)) {$snapshot[$id]=$observed.baselines[$id]}}
-    $plan=Get-ReleasePlan $settings.repository $selected $snapshot
+    $plan=Get-ReleasePlan $settings.repository $selected $snapshot -FrozenPrevious $state.plan.previousCommit
     if (-not $plan.ready) {throw "Extension plan is blocked: $($plan.blockers -join ' ')"}
     if ($plan.head -cne $head -or $plan.configSha256 -cne $state.plan.configSha256) {throw 'Source or release.json changed during extension; nothing was saved. Inspect the change, then retry.'}
         $current=[IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable

@@ -216,9 +216,10 @@ leaving state.json unchanged; prepare a new version instead:
 
 - an uncommitted change, any other changed file, or source that does not descend
   from the prepared commit;
-- any change to an existing destination or its baseline, root `previousRelease`
-  (or the commit it resolves to), `verification.gate`, an existing standalone
-  check, `androidVersionCodePolicy` or `project`;
+- any change to an existing destination or its baseline, root `previousRelease`,
+  `verification.gate`, an existing standalone check, `androidVersionCodePolicy`
+  or `project`. The release keeps the canonical boundary it was prepared with,
+  wherever its ref points later;
 - changed artifacts or published notes, as for any extension;
 - a source or release.json change that arrives while migration runs: the saved
   plans must come from the exact commit and configuration it validated.

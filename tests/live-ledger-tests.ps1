@@ -337,3 +337,45 @@ Test 'a damaged release state that may be this game''s does not stop a newly liv
     $rows=Get-Content $shared -Raw | ConvertFrom-Json -AsHashtable
     Assert ($result.destinations['itch-windows'].status -eq 'succeeded' -and $rows['itch:example/real-game:windows'].sourceCommit -ceq $state.plan.head) 'Damaged older state stranded a newly live channel outside the ledger.'
 }
+Test 'canonical notes count from the newest release any checkout published, previousRelease or not' {
+    $repo=New-Fixture 'canonical-boundary'
+    $stateRoot=Join-Path $sandbox 'canonical-boundary-state'
+    $published=Invoke-ReleasePrepare $repo @('itch-windows') $stateRoot $engine
+    $state=Get-Content (Join-Path $published.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+    Invoke-ReleasePublish -StatePath $published.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $published.statePath $state.plan) | Out-Null
+    $worktree=Join-Path $sandbox 'canonical-boundary-newer'
+    Invoke-FixtureGit $repo @('worktree','add','--quiet','-b','newer',$worktree) | Out-Null
+    'a new feature' | Set-Content (Join-Path $worktree 'feature.txt')
+    Invoke-FixtureGit $worktree @('add','feature.txt') | Out-Null
+    Invoke-FixtureGit $worktree @('commit','--quiet','-m','Add a new feature') | Out-Null
+    $plan=Get-ReleasePlan -Repository $worktree -Destination @('itch-windows','notes') -StateRoot $stateRoot -VersionChange patch
+    Assert ($plan.previousCommit -ceq $state.plan.head) "Canonical notes did not count from the published release: $($plan.previousCommit)"
+    Assert ((@($plan.changes | ForEach-Object {$_.subject}) -join '|') -ceq 'Add a new feature' -and $plan.notesDraft -notmatch 'Fix controller focus' -and $plan.notesDraft -match 'Add a new feature') "Canonical notes repeated what was already published: $($plan.notesDraft)"
+    Change-Config $worktree {param($c) $c.previousRelease=$null}
+    Invoke-FixtureGit $worktree @('add','release.json') | Out-Null
+    Invoke-FixtureGit $worktree @('commit','--quiet','-m','Leave previousRelease unconfirmed') | Out-Null
+    $plan=Get-ReleasePlan -Repository $worktree -Destination @('itch-windows','notes') -StateRoot $stateRoot -VersionChange patch
+    Assert ($plan.previousCommit -ceq $state.plan.head -and -not @($plan.blockers | Where-Object {$_ -match 'unconfirmed'}).Count) "An unconfirmed previousRelease ignored the published release: $($plan.previousCommit) $($plan.blockers -join ' ')"
+}
+Test 'canonical notes wait for previousRelease when two published sources neither contains the other' {
+    $repo=New-Fixture 'ambiguous-boundary'
+    $stateRoot=Join-Path $sandbox 'ambiguous-boundary-state'
+    $main=Invoke-FixtureGit $repo @('rev-parse','HEAD')
+    Invoke-FixtureGit $repo @('switch','--quiet','-c','hotfix','v1.2.2') | Out-Null
+    'hotfix' | Set-Content (Join-Path $repo 'hotfix.txt')
+    Invoke-FixtureGit $repo @('add','hotfix.txt') | Out-Null
+    Invoke-FixtureGit $repo @('commit','--quiet','-m','Hotfix') | Out-Null
+    $hotfix=Invoke-FixtureGit $repo @('rev-parse','HEAD')
+    Invoke-FixtureGit $repo @('switch','--quiet','main') | Out-Null
+    Invoke-FixtureGit $repo @('merge','--quiet','--no-edit','hotfix') | Out-Null
+    $merge=Invoke-FixtureGit $repo @('rev-parse','HEAD')
+    Write-LegacyLiveLedger $stateRoot 'C:\old\main-release' 'Example/Real-Game-release-notes' '1.1.0' $main
+    Write-LegacyLiveLedger $stateRoot 'C:\old\hotfix-release' 'Example/Real-Game-release-notes' '1.1.1' $hotfix
+    $plan=Get-ReleasePlan -Repository $repo -Destination @('notes') -StateRoot $stateRoot
+    Assert (@($plan.blockers | Where-Object {$_ -match 'ambiguous'}).Count -and -not $plan.ready) "Two unordered published sources did not block the canonical notes: $($plan.previousCommit)"
+    Change-Config $repo {param($c) $c.previousRelease=$merge}
+    Invoke-FixtureGit $repo @('add','release.json') | Out-Null
+    Invoke-FixtureGit $repo @('commit','--quiet','-m','Count notes from the merge') | Out-Null
+    $plan=Get-ReleasePlan -Repository $repo -Destination @('notes') -StateRoot $stateRoot
+    Assert ($plan.previousCommit -ceq $merge -and -not @($plan.blockers | Where-Object {$_ -match 'ambiguous'}).Count) "previousRelease containing both did not settle the boundary: $($plan.previousCommit) $($plan.blockers -join ' ')"
+}
