@@ -32,10 +32,50 @@ function Get-ReleaseJournalGame($Journal) {
     return ($notes -replace '-release-notes$','').ToLowerInvariant()
 }
 
+# Tells whether a journal of this game holds everything seeding reads: its plan's version, source and destinations, each
+# selected store's channel settings, and that store's record with a status and, where present, remote progress. Records
+# from before remote progress was kept are still read by their status.
+function Test-ReleaseJournalComplete($Journal) {
+    $plan=$Journal['plan'];$records=$Journal['destinations']
+    if ($records -isnot [Collections.IDictionary] -or $plan['version'] -isnot [string] -or [string]$plan['head'] -cnotmatch '^[0-9a-f]{40}(?:[0-9a-f]{24})?$') {return $false}
+    $destinations=$plan['destinations']
+    if ($destinations -isnot [array] -or -not $destinations.Count) {return $false}
+    foreach ($destination in $destinations) {
+        if ($destination -isnot [Collections.IDictionary] -or $destination['id'] -isnot [string] -or $destination['type'] -isnot [string] -or $destination['selected'] -isnot [bool]) {return $false}
+        if (-not $destination['selected'] -or $destination['type'] -notin @('itch','steam','google-play')) {continue}
+        $keyed=switch ($destination['type']) {
+            'itch' {$destination['target'] -is [string]}
+            'steam' {($destination['appId'] -is [long] -or $destination['appId'] -is [int]) -and $destination['branch'] -is [string]}
+            default {$destination['packageName'] -is [string] -and $destination['track'] -is [string]}
+        }
+        $record=$records[$destination['id']]
+        if (-not $keyed -or $record -isnot [Collections.IDictionary] -or $record['status'] -isnot [string] -or -not $record['status']) {return $false}
+        if ($record.Contains('remote')) {
+            $remote=$record['remote']
+            if ($remote -isnot [Collections.IDictionary] -or ($remote.Contains('sourceCommit') -and $null -ne $remote['sourceCommit'] -and $remote['sourceCommit'] -isnot [string])) {return $false}
+        }
+    }
+    return $true
+}
+
+# Tells whether two journal paths name the same release state, however each was spelled.
+function Test-ReleaseSameStatePath([string]$Left, [string]$Right) {
+    if (-not $Left -or -not $Right) {return $false}
+    $comparison=if ($IsWindows) {[StringComparison]::OrdinalIgnoreCase} else {[StringComparison]::Ordinal}
+    return [IO.Path]::GetFullPath($Left).TrimEnd('\','/').Equals([IO.Path]::GetFullPath($Right).TrimEnd('\','/'),$comparison)
+}
+
+# Tells whether an entry in the record of store writes is the one release state $StatePath keeps for destination $Id.
+# Each state's attempts at a destination have their own entry, so two checkouts sending the same source and version stay
+# apart, and reconciling one leaves the other's pending upload in force.
+function Test-ReleaseSentEntryOf($Entry, [string]$StatePath, [string]$Id) {
+    return ($Entry -is [Collections.IDictionary] -and [string]$Entry['destination'] -ceq $Id -and (Test-ReleaseSameStatePath ([string]$Entry['statePath']) $StatePath))
+}
+
 # Builds a game's first record of store writes from every journal under the state root. Releases published before the
 # record existed may already have sent builds that are not live, such as a Steam build awaiting activation or a Play edit
-# in review. A journal that cannot be read stops this, naming it, rather than being read as proof that nothing was sent,
-# unless the other journals of its checkout show the checkout belongs to another game.
+# in review. A journal that cannot be read, or that lacks a record seeding needs, stops this, naming it, rather than being
+# read as proof that nothing was sent, unless the other journals of its checkout show the checkout belongs to another game.
 function Get-ReleaseSentSeed([string]$StatePath, $State) {
     $root=Split-Path (Split-Path $StatePath -Parent) -Parent
     $game=(Get-ReleasePlanSourceRepository $State.plan).ToLowerInvariant()
@@ -54,14 +94,15 @@ function Get-ReleaseSentSeed([string]$StatePath, $State) {
                 throw (New-ReleaseDamagedStateError $root $journal.path)
             }
             if ($journalGame -cne $game) {continue}
+            if (-not (Test-ReleaseJournalComplete $journal.state)) {throw (New-ReleaseDamagedStateError $root $journal.path)}
             $plan=$journal.state['plan']
             $records=$journal.state['destinations']
-            foreach ($destination in @($plan['destinations'])) {
-                if ($destination -isnot [Collections.IDictionary] -or $destination['selected'] -ne $true -or $destination['type'] -notin @('itch','steam','google-play')) {continue}
-                $record=if ($records -is [Collections.IDictionary]) {$records[[string]$destination['id']]} else {$null}
+            foreach ($destination in $plan['destinations']) {
+                if (-not $destination['selected'] -or $destination['type'] -notin @('itch','steam','google-play')) {continue}
+                $record=$records[$destination['id']]
                 if (-not (Test-ReleaseStoreWriteStarted $record)) {continue}
                 $key=Get-ReleaseStoreKey $destination
-                $entry=[ordered]@{sourceCommit=(Get-ReleaseRecordSource $plan $record);version=[string]$plan['version'];statePath=(Split-Path $journal.path -Parent);destination=[string]$destination['id'];seededAt=$seededAt}
+                $entry=[ordered]@{sourceCommit=(Get-ReleaseRecordSource $plan $record);version=$plan['version'];planId=[string]$plan['planId'];statePath=(Split-Path $journal.path -Parent);destination=$destination['id'];seededAt=$seededAt}
                 if ($record['remote'] -is [Collections.IDictionary] -and $record['remote']['abandonment']) {$entry.abandoned=$record['remote']['abandonment']}
                 $sent[$key]=@(if ($sent.Contains($key)) {$sent[$key]})+@($entry)
             }
@@ -87,25 +128,25 @@ function Read-ReleaseSentRecord([string]$StatePath, $State) {
     return $sent
 }
 
-# Records, under the ledger lock the caller holds, that this release sends or has sent $Destination's build from
-# $SourceCommit to its channel. Gives whether this call added the entry, so an attempt that never reached the store can
-# take it back.
+# Records, under the ledger lock the caller holds, that this release state sends or has sent $Destination's build from
+# $SourceCommit to its channel, in the entry it keeps for that destination. Gives whether this call added the entry, so an
+# attempt that never reached the store can take it back.
 function Add-ReleaseSentReceipt([string]$StatePath, $State, $Destination, [string]$SourceCommit) {
     $sent=Read-ReleaseSentRecord $StatePath $State
     $key=Get-ReleaseStoreKey $Destination
     $entries=@(if ($sent.Contains($key)) {$sent[$key]})
-    if (@($entries | Where-Object {$_ -is [Collections.IDictionary] -and $_['sourceCommit'] -ceq $SourceCommit -and $_['version'] -ceq $State.plan.version}).Count) {return $false}
-    $sent[$key]=@($entries)+@([ordered]@{sourceCommit=$SourceCommit;version=$State.plan.version;statePath=$StatePath;destination=$Destination.id;sentAt=[DateTimeOffset]::UtcNow.ToString('o')})
+    if (@($entries | Where-Object {Test-ReleaseSentEntryOf $_ $StatePath $Destination.id}).Count) {return $false}
+    $sent[$key]=@($entries)+@([ordered]@{sourceCommit=$SourceCommit;version=$State.plan.version;planId=$State.plan.planId;statePath=$StatePath;destination=$Destination.id;sentAt=[DateTimeOffset]::UtcNow.ToString('o')})
     Write-ReleaseJson (Get-ReleaseSentPath $StatePath $State) $sent
     return $true
 }
 
 # Takes back the entry Add-ReleaseSentReceipt added for an attempt that failed before reaching the store.
-function Remove-ReleaseSentReceipt([string]$StatePath, $State, $Destination, [string]$SourceCommit) {
+function Remove-ReleaseSentReceipt([string]$StatePath, $State, $Destination) {
     $sent=Read-ReleaseSentRecord $StatePath $State
     $key=Get-ReleaseStoreKey $Destination
     if (-not $sent.Contains($key)) {return}
-    $sent[$key]=@(@($sent[$key]) | Where-Object {-not ($_ -is [Collections.IDictionary] -and $_['sourceCommit'] -ceq $SourceCommit -and $_['version'] -ceq $State.plan.version)})
+    $sent[$key]=@(@($sent[$key]) | Where-Object {-not (Test-ReleaseSentEntryOf $_ $StatePath $Destination.id)})
     if (-not $sent[$key].Count) {$sent.Remove($key)}
     Write-ReleaseJson (Get-ReleaseSentPath $StatePath $State) $sent
 }
@@ -175,21 +216,28 @@ function Confirm-ReleaseAbandonment([string]$StatePath, [string]$ReceiptPath, [s
         }
         $key=Get-ReleaseStoreKey $destination
         if (-not $Authorized) {throw "Abandoning this build lets a release whose source does not contain it be sent to $key. Repeat with -AbandonAuthorized only once the user has explicitly authorized that; nothing was recorded."}
+        $ledgerLock=Lock-ReleaseLiveLedger $StatePath $state
+        Initialize-ReleaseSentRecord $StatePath $state
+        $sent=Read-ReleaseSentRecord $StatePath $state
+        $entries=@(if ($sent.Contains($key)) {$sent[$key]})
+        # Only this state's entry for this destination is marked: another checkout's upload, even of the same source and
+        # version, still stops the channel until it is reconciled for itself.
+        $own=@($entries | Where-Object {Test-ReleaseSentEntryOf $_ $StatePath $destination.id})
+        foreach ($entry in $own) {
+            # JSON reading can turn the recorded time into a DateTime; either form is the moment the build was sent.
+            $sentAt=$entry['sentAt'];$at=[DateTimeOffset]::MinValue
+            if ($sentAt -is [DateTime]) {$at=[DateTimeOffset]$sentAt} elseif ($sentAt -is [DateTimeOffset]) {$at=$sentAt} elseif ($sentAt) {$null=[DateTimeOffset]::TryParse([string]$sentAt,[ref]$at)}
+            if ($observed -lt $at) {throw 'observedAt precedes the upload being abandoned; observe the store console after it.'}
+        }
+        if (-not $own.Count) {
+            $own=@([ordered]@{sourceCommit=(Get-ReleaseRecordSource $state.plan $record);version=$state.plan.version;planId=$state.plan.planId;statePath=$StatePath;destination=$destination.id;sentAt=$null})
+            $entries+=$own
+        }
         if ($record.status -ne 'abandoned') {
             $record.remote.abandonment=[ordered]@{receipt=$receipt;authorizedAt=[DateTimeOffset]::UtcNow.ToString('o')}
             $record.status='abandoned';$record.error=$null
             $state.status=Get-ReleaseOverallStatus $state
             Write-ReleaseJson $stateFile $state
-        }
-        $ledgerLock=Lock-ReleaseLiveLedger $StatePath $state
-        Initialize-ReleaseSentRecord $StatePath $state
-        $sent=Read-ReleaseSentRecord $StatePath $state
-        $source=Get-ReleaseRecordSource $state.plan $record
-        $entries=@(if ($sent.Contains($key)) {$sent[$key]})
-        $own=@($entries | Where-Object {$_ -is [Collections.IDictionary] -and $_['sourceCommit'] -ceq $source -and $_['version'] -ceq $state.plan.version})
-        if (-not $own.Count) {
-            $own=@([ordered]@{sourceCommit=$source;version=$state.plan.version;statePath=$StatePath;destination=$destination.id;sentAt=$null})
-            $entries+=$own
         }
         foreach ($entry in $own) {$entry['abandoned']=$record.remote.abandonment}
         $sent[$key]=$entries

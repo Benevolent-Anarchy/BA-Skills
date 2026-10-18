@@ -194,8 +194,10 @@ Every receipt names the destination, the approved `planId`, `observedAt`,
 Play receipts carry `packageName`, `versionCode` and `track` instead of the app,
 build and branch, with a `https://play.google.com/console` evidence URL. Itch
 receipts carry `target`, with the `https://<owner>.itch.io/<game>` page. Each
-value must match the approved destination and the recorded attempt. The mode
-records the observation; it never queries or changes the store.
+value must match the approved destination and the recorded attempt, and
+`observedAt` must come after the upload. The mode records the observation for
+that release state only: another checkout's upload to the same channel needs its
+own receipt from its own state. It never queries or changes the store.
 
 ## Public release record
 

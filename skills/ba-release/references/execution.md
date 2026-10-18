@@ -292,13 +292,18 @@ Beside the live ledger, `repositories/<id>/sent.json` records every build any
 checkout has started sending to each store channel, live or not, such as a Steam
 build awaiting activation or a Play edit in review. Publication records a build
 there as it starts each store attempt, and takes the entry back only if the
-attempt failed before reaching the store. A replay records a store write its
-release already made, without making it again. A game that has no `sent.json`
-yet, such as one released before it existed, gets one built from every release
-journal under the state root. A journal that cannot be read stops that
-publication, naming the journal by its place under the state root. The only
-exception is when the other journals of its checkout name a different game.
-Repair or remove the journal, then retry.
+attempt failed before reaching the store. Each release state keeps its own entry
+per destination, so two checkouts sending the same source and version are
+recorded, and reconciled, separately. A replay records a store write its release
+already made, without making it again. A game that has no `sent.json` yet, such
+as one released before it existed, gets one built from every release journal
+under the state root. Some journals stop that publication, naming the journal by
+its place under the state root: one that cannot be read, and one of this game
+that lacks a record seeding reads or holds one of the wrong type. That record
+can be a selected store's record, its status or its remote progress. A journal
+whose checkout's other journals name a different game does not stop it. Repair
+or remove the journal, then retry. Notes-only journals, and store records from
+before remote progress was kept, are read as they are.
 
 Before any store write, publication reads that channel's row in the live ledger
 and its entries in `sent.json`. If any of them comes from a source this build's
@@ -317,8 +322,10 @@ Then obtain the user's explicit authorization, since abandoning lets a release
 that does not contain that build replace it. Without `-AbandonAuthorized` the
 mode checks the receipt and records nothing. The receipt must name the release's
 approved plan and the exact recorded attempt. That destination becomes
-`abandoned`, keeping its attempts and remote evidence. Its `sent.json` entries
-are marked, not removed, and the channel check passes over them. The mode never
+`abandoned`, keeping its attempts and remote evidence. Only that state's
+`sent.json` entry for it is marked, not removed, and the channel check passes
+over it. Another checkout's upload to the same channel, even of the same source
+and version, keeps stopping it until abandoned from its own state. The mode never
 calls a store. A live release is never abandoned: only a newer one replaces it.
 Publication holds the game's ledger lock from
 its first channel check to its last receipt, and records each channel an upload

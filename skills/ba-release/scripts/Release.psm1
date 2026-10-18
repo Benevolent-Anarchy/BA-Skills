@@ -791,7 +791,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             }
             Write-ReleaseJson $stateFile $state
             # An attempt that failed before its first store operation sent nothing, so it takes back its store-write entry.
-            if ($sentNow -and $record.status -eq 'failed' -and -not (Test-ReleaseStoreWriteStarted $record)) {Remove-ReleaseSentReceipt $StatePath $state $destination $source}
+            if ($sentNow -and $record.status -eq 'failed' -and -not (Test-ReleaseStoreWriteStarted $record)) {Remove-ReleaseSentReceipt $StatePath $state $destination}
             # A channel this upload made live is recorded at once, so a later check elsewhere sees it even if this run stops.
             if ($record.remote.Contains('live') -and $record.remote.live -eq $true) {Save-ReleaseLiveReceipts $StatePath $state @($destination.id)}
         }

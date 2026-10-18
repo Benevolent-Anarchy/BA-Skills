@@ -514,7 +514,7 @@ foreach ($id in @('101','102')) {
 if ($env:BA_FIXTURE_STEAM_FALSE_SUCCESS) { 'ERROR! App build failed.'; exit 0 }
 if ($env:BA_FIXTURE_STEAM_LATE_ERROR) { 'Successfully finished AppID 100 build (BuildID 999).';exit 9 }
 if ($env:BA_FIXTURE_UPLOAD_LOG) {Add-Content $env:BA_FIXTURE_UPLOAD_LOG "steamcmd 100 $(if ($vdf -match '"Desc"\s+"Version ([^"]+)"') {$Matches[1]})"}
-'Successfully finished AppID 100 build (BuildID 999).'; exit 0
+"Successfully finished AppID 100 build (BuildID $(if ($env:BA_FIXTURE_STEAM_BUILD) {$env:BA_FIXTURE_STEAM_BUILD} else {'999'}))."; exit 0
 '@ | Set-Content $steam
 function New-PlayServer {
     $server = @{calls=[Collections.Generic.List[object]]::new();version='1.2.3';bundles=@();uploads=0;commits=0;failCommit=$false;creates=0;expired=$false;deletes=0;failDelete=$false;workTrack=@{track='production';releases=@(@{versionCodes=@('11')})};deployedTrack=@{track='production';releases=@(@{versionCodes=@('11')})}}
