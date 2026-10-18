@@ -163,6 +163,21 @@ lock. HEAD, config bytes, version, previous-release commit and sorted selection
 identify the plan. A different plan for the same version is refused; resolve it
 explicitly instead of bumping a version to retry. Do not edit state.json by hand.
 
+That directory, and the version reservation beside it, belong to one checkout.
+The live ledger does not: `repositories/<id>/live.json` under the state root
+holds it for the game's GitHub repository, as its origin names it, so every
+checkout, worktree and clone of the game that uses that state root reads and
+advances the same one. Windows and WSL keep separate default roots. A damaged
+shared ledger stops the plan, naming the file by its place under the state root,
+rather than being read as proof that nothing shipped.
+
+Ledgers that each checkout kept in its own directory, before the ledger was
+shared, are not read. A game released that way sets `previousRelease` in
+release.json once, through setup, to the source its last release's public notes
+name (the `sourceCommit` comment in `releases/<version>.md`), and commits it; from
+its next release on, the shared ledger supplies baselines and the canonical
+boundary.
+
 ## Extending a prepared release
 
 `extend` explicitly adds destinations while retaining canonical notes, artifact
@@ -179,7 +194,10 @@ Ordinary `extend` works only when each added destination was already declared in
 release.json when the release was prepared (or last migrated), and release.json is
 unchanged since.
 In every extension, each added destination's confirmed baseline must precede the
-release's original source commit, never a later settings commit.
+release's original source commit, never a later settings commit. The release's
+existing destinations keep the baselines frozen with it, as `prepare` retries do,
+so another checkout shipping a newer release on one of them does not stop the
+extension; only the added destinations are read from the live ledger.
 A store, or itch channel, first configured after preparation needs a configuration
 migration. Add it through setup (see [configuration](configuration.md#adding-a-store-to-a-prepared-release)),
 review the release.json diff with the user and commit it by itself. Then repeat
@@ -196,9 +214,10 @@ leaving state.json unchanged; prepare a new version instead:
 
 - an uncommitted change, any other changed file, or source that does not descend
   from the prepared commit;
-- any change to an existing destination or its baseline, root `previousRelease`
-  (or the commit it resolves to), `verification.gate`, an existing standalone
-  check, `androidVersionCodePolicy` or `project`;
+- any change to an existing destination or its baseline, root `previousRelease`,
+  `verification.gate`, an existing standalone check, `androidVersionCodePolicy`
+  or `project`. The release keeps the canonical boundary it was prepared with,
+  wherever its ref points later;
 - changed artifacts or published notes, as for any extension;
 - a source or release.json change that arrives while migration runs: the saved
   plans must come from the exact commit and configuration it validated.
@@ -239,7 +258,20 @@ approved `releases/<version>.md` only after at least one store is actually live,
 or a matching live receipt already exists; until then notes are `awaiting-release`.
 Keep `[Release availability](../availability/<version>.json)` in canonical notes.
 Separate owned JSON records live, held, submitted and pending destinations;
-updates create ordinary subsequent commits. Re-run publish after console
+updates create ordinary subsequent commits. Another checkout's state of this
+same release, found through its live receipts and now at the same version and
+source, supplies a store this one did not make live: a live record first, then,
+for a store this state did not select, whatever that state records, pending, held
+or submitted. A checkout that did not publish a store therefore reports it as the
+publishing one does, including an extended release whose channels keep older
+artifact sources. A state whose source another checkout's state of the same
+version has since been extended past, as its history shows, writes nothing and
+says so: only the extended release's own state can describe what is available
+now. Likewise, while any state that recorded a store live for this version,
+current or kept in a ledger row's history, cannot be read, availability writes
+nothing and names that store channel: only that state holds the store's status,
+pending work and extension history, so restore it, or refresh availability from
+the checkout that holds it. Re-run publish after console
 confirmation to refresh availability without repeating uploads. Identical notes
 count as complete; different
 content is a failure. No source repository commit, tag or push operation exists
@@ -309,13 +341,19 @@ It performs no remote writes or uploads. Only record what the user or agent has
 actually verified. A receipt can also reconcile an uncertain store operation
 whose exact remote result is known. See the receipt shapes in the store reference.
 Overall `submitted` and `needs-store-action` preserve pending store work; only
-all verified/completed destinations become `published`.
+all verified/completed destinations become `published`. Repeating `confirm` for a
+destination already confirmed records it in the live ledger again, which repairs
+a ledger write interrupted after the first confirmation was saved.
 
-Local `live.json` advances only channels with live evidence, keyed by exact Butler
+The game's `live.json` advances only channels with live evidence, keyed by exact Butler
 target, Steam app/branch or Play package/track. Held/submitted stores retain their
 older baseline and the actual artifact source commit. Later plans use that baseline
 for missed-change evidence; frozen plans keep their original baselines on retry.
-Do not roll a channel backwards without explicit reconciliation. Canonical note
+Do not roll a channel backwards without explicit reconciliation. Each channel's
+row keeps every receipt recorded for it, so a release whose receipts are recorded
+again, after a newer release went live on one of its channels, leaves that newer
+row alone. A release going live on an older or diverged source for the first time
+is refused instead, once the other channels have been saved. Canonical note
 corrections belong in explicit subsequent public-repo commits, preserving history
 instead of duplicate entries. The automatic writer refuses conflicting canonical
 content and foreign availability files.

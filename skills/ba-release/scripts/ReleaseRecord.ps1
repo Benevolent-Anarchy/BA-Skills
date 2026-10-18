@@ -10,18 +10,81 @@ function Get-ReleaseStoreKey($Destination) {
     }
 }
 
-# Reads per-user live receipts without network operations or writes.
-function Get-ReleaseLiveLedger([string]$Repository, [string]$StateRoot) {
-    $Repository=(Get-Item -LiteralPath $Repository).FullName
-    $id=(Get-ReleaseTextHash $Repository).Substring(0,20)
-    $path=Join-Path (Join-Path (Get-ReleaseStateRoot $StateRoot) $id) 'live.json'
-    if (Test-Path -LiteralPath $path -PathType Leaf) {return [IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable}
-    return [ordered]@{}
+# Places a game's live ledger by its GitHub repository, so every checkout, worktree and clone of the game under one state root reads and advances the same one.
+function Get-ReleaseLedgerDirectory([string]$SourceRepository, [string]$StateRoot) {
+    $id=(Get-ReleaseTextHash ('github.com/'+$SourceRepository.ToLowerInvariant())).Substring(0,20)
+    return Join-Path (Join-Path (Get-ReleaseStateRoot $StateRoot) 'repositories') $id
 }
 
-# Resolves frozen or observed channel baselines; a configured null is never replaced by a guess.
+# Names a prepared plan's GitHub repository, which its notes repository always names as "<owner>/<name>-release-notes".
+function Get-ReleasePlanSourceRepository($Plan) {
+    return $Plan.notesRepository -replace '-release-notes$',''
+}
+
+# Reads a JSON object from a release state file, or gives $null where it cannot be read, parsed, or is not an object.
+function Read-ReleaseStateObject([string]$Path) {
+    try {$value=[IO.File]::ReadAllText($Path) | ConvertFrom-Json -AsHashtable -ErrorAction Stop} catch {return $null}
+    if ($value -is [Collections.IDictionary]) {return $value}
+    return $null
+}
+
+# Makes the classified error for a damaged live ledger. It names the file by its place under the state root, never by its
+# private absolute path, since the reason can be kept in a release journal.
+function New-ReleaseDamagedStateError([string]$Root, [string]$Path) {
+    $place=[IO.Path]::GetRelativePath($Root,$Path).Replace('\','/')
+    return (New-ReleaseDiagnosticError "Release state '$place' under the state root cannot be read, and it records this game's live releases; repair it, then retry.")
+}
+
+# Reads a game's shared live ledger: one row per store channel, each keeping in 'recorded' every receipt recorded for it.
+# Ledgers each checkout kept in its own state directory before ledgers were shared are not read; a game moving from them
+# sets release.json's previousRelease once, to the source its last release's public notes name. A damaged ledger stops,
+# naming the file, rather than being read as proof that nothing shipped.
+function Read-ReleaseSharedLedger([string]$SourceRepository, [string]$StateRoot) {
+    $root=Get-ReleaseStateRoot $StateRoot
+    $path=Join-Path (Get-ReleaseLedgerDirectory $SourceRepository $root) 'live.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {return [ordered]@{}}
+    $ledger=Read-ReleaseStateObject $path
+    if ($null -eq $ledger) {throw (New-ReleaseDamagedStateError $root $path)}
+    return $ledger
+}
+
+# Reads the game's shared live ledger without network operations or writes.
+function Get-ReleaseLiveLedger([string]$Repository, [string]$StateRoot) {
+    $Repository=(Get-Item -LiteralPath $Repository).FullName
+    return Read-ReleaseSharedLedger (Get-ReleaseSourceRepository $Repository) $StateRoot
+}
+
+# Finds where a release's canonical notes count from: the newest of release.json's previousRelease ($Configured) and every
+# source of this game any checkout recorded live, on any channel, for another version, among $Head's ancestors. This
+# version's own receipts are left out, so publishing it never moves its own boundary. Sources that neither contains the
+# other cannot be ordered, so the boundary is then reported as ambiguous rather than guessed.
+function Get-ReleasePublishedBoundary($Settings, [string]$Head, [string]$Version, [string]$Configured, [string]$StateRoot) {
+    $repository=$Settings.repository
+    $isAncestor={param($ancestor,$descendant) (Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$repository,'merge-base','--is-ancestor',$ancestor,$descendant) $repository).exitCode -eq 0}
+    $candidates=[Collections.Generic.List[string]]::new()
+    if ($Configured) {$candidates.Add($Configured)}
+    foreach ($receipt in @(Get-ReleaseLiveReceipts (Read-ReleaseSharedLedger (Get-ReleasePlanSourceRepository $Settings) $StateRoot))) {
+        $entry=$receipt.entry
+        if ($entry -isnot [Collections.IDictionary] -or [string]$entry.version -ceq $Version) {continue}
+        $commit=[string]$entry.sourceCommit
+        if ($commit -cnotmatch '^[0-9a-f]{40}(?:[0-9a-f]{24})?$' -or $commit -cin $candidates) {continue}
+        if (& $isAncestor $commit $Head) {$candidates.Add($commit)}
+    }
+    # Keep only the sources no other contains; exactly one left is the boundary.
+    $newest=@()
+    foreach ($commit in $candidates) {
+        if (@($newest | Where-Object {& $isAncestor $commit $_}).Count) {continue}
+        $newest=@(@($newest | Where-Object {-not (& $isAncestor $_ $commit)})+@($commit))
+    }
+    if ($newest.Count -gt 1) {return @{commit=$null;ambiguous="The previous published release is ambiguous: $($newest -join ' and ') each went live and neither contains the other. Set previousRelease in release.json to a commit containing them, from which the canonical notes should count."}}
+    return @{commit=$(if ($newest.Count) {$newest[0]} else {$null});ambiguous=$null}
+}
+
+# Resolves frozen or observed channel baselines; a configured null is never replaced by a guess. A snapshot freezes the
+# channels it names, such as a prepared release's own; any other selected channel is observed in the live ledger.
 function Get-ReleaseDestinationBaselines($Settings, $Destinations, [string]$Head, $Snapshot, [string]$StateRoot) {
-    $ledger=if ($null -eq $Snapshot) {Get-ReleaseLiveLedger $Settings.repository $StateRoot} else {@{}}
+    $observed=@($Destinations | Where-Object {$_.selected -and $_.type -ne 'notes' -and ($null -eq $Snapshot -or -not $Snapshot.Contains($_.id))})
+    $ledger=if ($observed.Count) {Get-ReleaseLiveLedger $Settings.repository $StateRoot} else {@{}}
     $result=[ordered]@{}
     foreach ($destination in $Destinations) {
         if (-not $destination.selected -or $destination.type -eq 'notes') {continue}
@@ -41,28 +104,55 @@ function Get-ReleaseDestinationBaselines($Settings, $Destinations, [string]$Head
     return $result
 }
 
-# Advances only channels with actual live evidence, preserving unselected and submitted channels.
+# Lists every live receipt in a shared ledger: each row's own, and the earlier ones it keeps in 'recorded'.
+function Get-ReleaseLiveReceipts($Ledger) {
+    foreach ($key in @($Ledger.Keys)) {
+        $row=$Ledger[$key]
+        @{key=$key;entry=$row}
+        if ($row -is [Collections.IDictionary] -and $row.Contains('recorded')) {
+            foreach ($receipt in @($row.recorded)) {if ($receipt) {@{key=$key;entry=$receipt}}}
+        }
+    }
+}
+
+# Advances only channels with actual live evidence, preserving unselected and submitted channels, in the game's shared ledger.
+# Each row keeps every receipt recorded for its channel, so a release whose receipts are replayed after a newer release went
+# live on one of its channels leaves that newer row alone. Only a receipt recorded for the first time on an older or diverged
+# source is refused, and only once every other channel has been saved, so retrying the step that failed repairs the rest.
 function Update-ReleaseLiveLedger([string]$StatePath, $State) {
     $repositoryState=Split-Path $StatePath -Parent
-    $lock=Lock-ReleaseState $repositoryState
+    $sourceRepository=Get-ReleasePlanSourceRepository $State.plan
+    $directory=Get-ReleaseLedgerDirectory $sourceRepository (Split-Path $repositoryState -Parent)
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $lock=Lock-ReleaseState $directory
     try {
-        $path=Join-Path $repositoryState 'live.json'
-        $ledger=if (Test-Path -LiteralPath $path) {[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable} else {[ordered]@{}}
+        $path=Join-Path $directory 'live.json'
+        $ledger=Read-ReleaseSharedLedger $sourceRepository (Split-Path $repositoryState -Parent)
+        $refused=[Collections.Generic.List[string]]::new()
         foreach ($destination in $State.plan.destinations) {
             if (-not $destination.selected -or $destination.type -eq 'notes') {continue}
             $record=$State.destinations[$destination.id]
             if (-not $record.remote.Contains('live') -or $record.remote.live -ne $true) {continue}
             $key=Get-ReleaseStoreKey $destination
             $sourceCommit=if ($record.remote.Contains('sourceCommit') -and $record.remote.sourceCommit) {$record.remote.sourceCommit} else {$State.plan.head}
-            # An older release completing late must not roll a channel's baseline backwards silently.
-            if ($ledger.Contains($key) -and $ledger[$key].sourceCommit -cne $sourceCommit) {
-                $ancestor=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$State.plan.repository,'merge-base','--is-ancestor',$ledger[$key].sourceCommit,$sourceCommit) $State.plan.repository
-                if ($ancestor.exitCode -ne 0) {throw 'An older live release cannot replace a newer channel baseline without explicit reconciliation.'}
+            $row=if ($ledger.Contains($key)) {$ledger[$key]} else {$null}
+            if ($row -and $row.sourceCommit -cne $sourceCommit) {
+                $ancestor=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$State.plan.repository,'merge-base','--is-ancestor',$row.sourceCommit,$sourceCommit) $State.plan.repository
+                if ($ancestor.exitCode -ne 0) {
+                    # An older release completing late must not roll a channel's baseline backwards silently; one whose
+                    # receipt the row already keeps is only being recorded again.
+                    $replayed=@(Get-ReleaseLiveReceipts ([ordered]@{$key=$row}) | Where-Object {$_.entry.sourceCommit -ceq $sourceCommit -and $_.entry.version -ceq $State.plan.version}).Count -gt 0
+                    if (-not $replayed) {$refused.Add($destination.id)}
+                    continue
+                }
             }
-            if ($ledger.Contains($key) -and $ledger[$key].sourceCommit -ceq $sourceCommit -and $ledger[$key].version -ceq $State.plan.version) {continue}
-            $ledger[$key]=@{sourceCommit=$sourceCommit;version=$State.plan.version;statePath=$StatePath;destination=$destination.id;observedAt=[DateTimeOffset]::UtcNow.ToString('o')}
+            if ($row -and $row.sourceCommit -ceq $sourceCommit -and $row.version -ceq $State.plan.version) {continue}
+            $receipt=[ordered]@{sourceCommit=$sourceCommit;version=$State.plan.version;statePath=$StatePath;destination=$destination.id;observedAt=[DateTimeOffset]::UtcNow.ToString('o')}
+            $earlier=if (-not $row) {@()} elseif ($row.Contains('recorded')) {@($row.recorded)} else {@([ordered]@{sourceCommit=$row.sourceCommit;version=$row.version;statePath=$row.statePath;destination=$row.destination;observedAt=$row.observedAt})}
+            $ledger[$key]=[ordered]@{sourceCommit=$sourceCommit;version=$State.plan.version;statePath=$StatePath;destination=$destination.id;observedAt=$receipt.observedAt;recorded=@($earlier)+@($receipt)}
         }
         Write-ReleaseJson $path $ledger
+        if ($refused.Count) {throw "An older live release cannot replace a newer channel baseline without explicit reconciliation: $($refused -join ', ')."}
     } finally {$lock.Dispose()}
 }
 
@@ -154,7 +244,11 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
     $added=@($selected | Where-Object {$_ -cnotin $state.plan.selectedDestinations})
     if (-not $added.Count) {$lock.Dispose();$lock=$null;return Invoke-ReleasePrepare $state.plan.repository $selected $stateRoot $GodotExecutable -ButlerExecutable $ButlerExecutable}
     if ($settings.version -cne $state.plan.version) {throw 'Extension requires the same version as the prepared release.'}
-    $fresh=Get-ReleasePlan $settings.repository $selected $null $stateRoot
+    # The release's own channels keep the baselines frozen with it, however far another checkout has since moved them;
+    # only the added channels are observed now.
+    $frozen=[ordered]@{}
+    foreach ($id in $state.plan.baselines.Keys) {$frozen[$id]=$state.plan.baselines[$id]}
+    $fresh=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit
     Assert-ReleaseAddedBaselines $state $fresh.baselines $added
     if ($settings.configHash -cne $state.plan.configSha256) {
         $migration=Get-ReleaseConfigurationMigration $state $settings $fresh.head
@@ -164,15 +258,15 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
         # Every introduced destination is frozen with the release, selected or not, so each must be complete now.
         $adopted=@(@($selected)+@($migration.addedDestinations) | Sort-Object -Unique -CaseSensitive)
         $introduced=@($adopted | Where-Object {$_ -cnotin $state.plan.selectedDestinations})
-        $observed=Get-ReleasePlan $settings.repository $adopted $null $stateRoot
+        $observed=Get-ReleasePlan $settings.repository $adopted $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit
         Assert-ReleaseAddedBaselines $state $observed.baselines $introduced
         $snapshot=[ordered]@{}
         foreach ($id in $state.plan.baselines.Keys) {$snapshot[$id]=$state.plan.baselines[$id]}
         foreach ($id in $introduced) {if ($observed.baselines.Contains($id)) {$snapshot[$id]=$observed.baselines[$id]}}
-        $expanded=Get-ReleasePlan $settings.repository $adopted $snapshot $stateRoot
+        $expanded=Get-ReleasePlan $settings.repository $adopted $snapshot $stateRoot -FrozenPrevious $state.plan.previousCommit
         if (-not $expanded.ready) {throw "Configuration migration adopts every added destination, selected or not; complete them or leave them out of the committed change. Plan is blocked: $($expanded.blockers -join ' ')"}
         # Phase one rebinds only the original selection, keeping its frozen baselines and notes boundary.
-        $migrated=Get-ReleasePlan $settings.repository $state.plan.selectedDestinations $state.plan.baselines $stateRoot
+        $migrated=Get-ReleasePlan $settings.repository $state.plan.selectedDestinations $state.plan.baselines $stateRoot -FrozenPrevious $state.plan.previousCommit
         if (-not $migrated.ready) {throw "Migrated release plan is blocked: $($migrated.blockers -join ' ')"}
         if ($migrated.previousCommit -cne $state.plan.previousCommit) {throw 'Configuration migration cannot move the previous-release boundary of the prepared release.'}
         # Planning rereads HEAD and release.json, so save only plans built from the snapshot that passed validation.
@@ -226,9 +320,9 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
     }
     $snapshot=[ordered]@{}
     foreach ($id in $state.plan.baselines.Keys) {$snapshot[$id]=$state.plan.baselines[$id]}
-    $observed=Get-ReleasePlan $settings.repository $selected $null (Split-Path (Split-Path $StatePath -Parent) -Parent)
+    $observed=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit
     foreach ($id in $added) {if ($observed.baselines.Contains($id)) {$snapshot[$id]=$observed.baselines[$id]}}
-    $plan=Get-ReleasePlan $settings.repository $selected $snapshot
+    $plan=Get-ReleasePlan $settings.repository $selected $snapshot -FrozenPrevious $state.plan.previousCommit
     if (-not $plan.ready) {throw "Extension plan is blocked: $($plan.blockers -join ' ')"}
     if ($plan.head -cne $head -or $plan.configSha256 -cne $state.plan.configSha256) {throw 'Source or release.json changed during extension; nothing was saved. Inspect the change, then retry.'}
         $current=[IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable

@@ -42,21 +42,101 @@ function Test-ReleaseShipped($State, [string]$StatePath) {
     foreach ($destination in $State.plan.destinations) {
         if ($destination.selected -and $destination.type -ne 'notes' -and $State.destinations[$destination.id].remote.Contains('live') -and $State.destinations[$destination.id].remote.live -eq $true) {return $true}
     }
-    $path=Join-Path (Split-Path $StatePath -Parent) 'live.json'
-    if (Test-Path -LiteralPath $path) {
-        $ledger=[IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
-        return @($ledger.Values | Where-Object {$_.version -ceq $State.plan.version -and $_.sourceCommit -ceq $State.plan.head}).Count -gt 0
+    if (@(Get-ReleaseShipmentReceipts $State $StatePath).Count) {return $true}
+    foreach ($other in @(Get-ReleaseRelatedStates $State $StatePath)) {
+        foreach ($destination in $other.plan.destinations) {
+            if ($destination.selected -and $destination.type -ne 'notes' -and $other.destinations[$destination.id].remote.Contains('live') -and $other.destinations[$destination.id].remote.live -eq $true) {return $true}
+        }
     }
     return $false
 }
 
+# Lists every live receipt the game's shared ledger holds for this release's version, current and kept in history.
+function Get-ReleaseVersionReceipts($State, [string]$StatePath) {
+    $ledger=Read-ReleaseSharedLedger (Get-ReleasePlanSourceRepository $State.plan) (Split-Path (Split-Path $StatePath -Parent) -Parent)
+    return @(Get-ReleaseLiveReceipts $ledger | Where-Object {$_.entry.version -ceq $State.plan.version})
+}
+
+# Lists the live receipts any checkout of the game recorded for this exact release: its version, from its source.
+function Get-ReleaseShipmentReceipts($State, [string]$StatePath) {
+    return @(Get-ReleaseVersionReceipts $State $StatePath | Where-Object {$_.entry.sourceCommit -ceq $State.plan.head})
+}
+
+# Reads the other journals, of any checkout, that live receipts for this release's version point to, at that version now.
+function Get-ReleaseVersionStates($State, [string]$StatePath) {
+    $own=[IO.Path]::GetFullPath($StatePath).TrimEnd('\','/')
+    $paths=@(Get-ReleaseVersionReceipts $State $StatePath | Where-Object {$_.entry.statePath} | ForEach-Object {[IO.Path]::GetFullPath([string]$_.entry.statePath).TrimEnd('\','/')} | Sort-Object -Unique)
+    foreach ($path in $paths) {
+        if ($path -eq $own) {continue}
+        $file=Join-Path $path 'state.json'
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {continue}
+        $other=[IO.File]::ReadAllText($file) | ConvertFrom-Json -AsHashtable
+        if ($other.plan.version -ceq $State.plan.version) {$other}
+    }
+}
+
+# Reads the other journals of this same release that live receipts point to: the same version, now at the same source.
+# An extended release keeps each artifact's own source, so a channel's receipt can name an older commit than the release;
+# the journal it points to, not that commit, says which release it belongs to. Other same-version journals are ignored.
+function Get-ReleaseRelatedStates($State, [string]$StatePath) {
+    @(Get-ReleaseVersionStates $State $StatePath | Where-Object {$_.plan.head -ceq $State.plan.head})
+}
+
+# Refuses to describe this release's availability while any state that recorded a store live for its version, current or
+# kept in a row's history, cannot be read. Only that state holds the store's status, its pending work and its extension
+# history, so missing it would report a live store as not live. The reason names the channel and version, never a path.
+function Assert-ReleaseJournalsReadable($State, [string]$StatePath) {
+    $own=[IO.Path]::GetFullPath($StatePath).TrimEnd('\','/')
+    foreach ($receipt in @(Get-ReleaseVersionReceipts $State $StatePath)) {
+        $path=[string]$receipt.entry.statePath
+        if ($path -and [IO.Path]::GetFullPath($path).TrimEnd('\','/') -eq $own) {continue}
+        if ($path -and $null -ne (Read-ReleaseStateObject (Join-Path $path 'state.json'))) {continue}
+        throw (New-ReleaseDiagnosticError "The release state that recorded $($receipt.key) live for $($State.plan.version) cannot be read; restore it, or refresh availability from the checkout that holds it. Nothing was written.")
+    }
+}
+
+# Refuses to describe a release that another checkout has since extended past this journal's source: the extended
+# journal, whose history holds this source, is the one that can say what is available now, and this older plan would
+# report its newer channels as not live and move the record's source back.
+function Assert-ReleaseNotSuperseded($State, [string]$StatePath) {
+    foreach ($other in @(Get-ReleaseVersionStates $State $StatePath)) {
+        if ($other.plan.head -ceq $State.plan.head -or -not $other.Contains('history')) {continue}
+        if (@($other.history | Where-Object {$_.plan.head -ceq $State.plan.head}).Count) {
+            throw (New-ReleaseDiagnosticError "Release $($State.plan.version) has since been extended from $($State.plan.head) to $($other.plan.head) in another checkout; publish from that release's own state to refresh its availability. Nothing was written.")
+        }
+    }
+}
+
+# Finds how another journal of this release records destination $Id: a live record first; then, where this checkout did
+# not select the destination itself ($AnyStatus), whatever a journal that selected it records, pending or held work included.
+function Find-ReleaseRelatedDestinationRecord($Related, [string]$Id, [bool]$AnyStatus) {
+    foreach ($liveOnly in @($true,$false)) {
+        if (-not $liveOnly -and -not $AnyStatus) {break}
+        foreach ($other in $Related) {
+            if (-not @($other.plan.destinations | Where-Object {$_.id -ceq $Id -and $_.selected}).Count -or -not $other.destinations.Contains($Id)) {continue}
+            $record=$other.destinations[$Id]
+            if (-not $liveOnly -or ($record.remote.Contains('live') -and $record.remote.live -eq $true)) {return $record}
+        }
+    }
+    return $null
+}
+
 # Writes changing factual availability with ordinary subsequent GitHub commits while preserving canonical notes.
+# A store another journal of this same release made live, or selected where this one did not, is reported as that journal
+# records it, so a checkout that did not publish there reports it as the publishing one does; this selection is unchanged.
 function Publish-ReleaseAvailability($State, [string]$StatePath, [string]$GhExecutable) {
+    Assert-ReleaseJournalsReadable $State $StatePath
+    Assert-ReleaseNotSuperseded $State $StatePath
     $destinations=[ordered]@{}
+    $related=@(Get-ReleaseRelatedStates $State $StatePath)
     foreach ($destination in $State.plan.destinations) {
         if ($destination.type -eq 'notes') {continue}
-        $record=$State.destinations[$destination.id]
-        $destinations[$destination.id]=[ordered]@{type=$destination.type;selected=$destination.selected;status=$record.status;live=($record.remote.Contains('live') -and $record.remote.live -eq $true)}
+        $record=$State.destinations[$destination.id];$selected=$destination.selected
+        if (-not ($record.remote.Contains('live') -and $record.remote.live -eq $true)) {
+            $shared=Find-ReleaseRelatedDestinationRecord $related $destination.id (-not $destination.selected)
+            if ($shared) {$record=$shared;$selected=$true}
+        }
+        $destinations[$destination.id]=[ordered]@{type=$destination.type;selected=$selected;status=$record.status;live=($record.remote.Contains('live') -and $record.remote.live -eq $true)}
         if ($record.status -eq 'held') {Assert-ReleaseHoldReason $record.hold.reason;$destinations[$destination.id].holdReason=$record.hold.reason}
         if ($record.remote.Contains('buildId')) {$destinations[$destination.id].buildId=$record.remote.buildId}
         if ($destination.Contains('versionCode')) {$destinations[$destination.id].versionCode=$destination.versionCode}
