@@ -38,10 +38,19 @@ Test 'without the setting a Play submission leaves Play''s baseline where releas
     Assert ($newer.state.plan.baselines['google-play'] -ceq $fixture.configured) "A submission moved Play's baseline without the setting: $($newer.state.plan.baselines['google-play'])"
 }
 
-Test 'a submission made before the store-write record existed still counts, and an abandoned one stops counting' {
+Test 'a submission recorded before submissions were marked counts once replayed or seeded, and stops once abandoned' {
     $fixture=Publish-SubmittedPlayFixture 'submitted-baseline-seeded' -AdvanceOnSubmission
-    # A release submitted before the record existed left nothing in it; planning reads the journals instead, writing nothing.
+    # A record written before submissions were marked holds the build unmarked; replaying the release marks it.
     $sentPath=Get-SentRecordPath $fixture.stateRoot
+    $sent=Get-Content $sentPath -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($entry in @($sent['play:com.example.realgame:production'])) {$entry.Remove('submittedAt')}
+    Write-Json $sentPath $sent
+    $plan=Get-ReleasePlan -Repository $fixture.repo -Destination @('google-play') -StateRoot $fixture.stateRoot
+    Assert ($plan.baselines['google-play'] -ceq $fixture.configured) "An unmarked build counted as submitted: $($plan.baselines['google-play'])"
+    Invoke-ReleasePublish -StatePath $fixture.statePath -PlayTransport (New-PlayServer).handler | Out-Null
+    $plan=Get-ReleasePlan -Repository $fixture.repo -Destination @('google-play') -StateRoot $fixture.stateRoot
+    Assert ($plan.baselines['google-play'] -ceq $fixture.head) "Replaying the release did not mark its submission: $($plan.baselines['google-play'])"
+    # A release submitted before the record existed left nothing in it; planning reads the journals instead, writing nothing.
     Remove-Item -LiteralPath $sentPath
     $plan=Get-ReleasePlan -Repository $fixture.repo -Destination @('google-play') -StateRoot $fixture.stateRoot
     Assert ($plan.baselines['google-play'] -ceq $fixture.head) "A submission seeded from its journal did not count: $($plan.baselines['google-play'])"
