@@ -287,16 +287,21 @@ content is a failure. No source repository commit, tag or push operation exists
 in this workflow. Publication of notes does create a commit in the public notes
 repository, only after release approval.
 
-Before any store write, publication reads that store channel's row in the shared
-live ledger. If the release live there comes from a source this build's source
-does not contain, or that this checkout cannot show it contains, the destination
-fails with nothing sent and nothing recorded, and its error names the live
-version. An interrupted attempt refused this way stays `uncertain`. Replacing a
-newer live release with an older one needs explicit reconciliation, never a
-retry. Other channels proceed. The ledger holds only live receipts, so a newer
-Steam build or Play edit not yet confirmed live does not count. Publication holds
-the game's ledger lock from its first channel check to its last receipt, and
-records each channel an upload makes live as soon as that result is saved.
+Beside the live ledger, `repositories/<id>/sent.json` records every build any
+checkout has started sending to each store channel, live or not, such as a Steam
+build awaiting activation or a Play edit in review. Publication records a build
+there as it starts each store attempt, and takes the entry back only if the
+attempt failed before reaching the store.
+
+Before any store write, publication reads that channel's row in the live ledger
+and its entries in `sent.json`. If any of them comes from a source this build's
+source does not contain, or that this checkout cannot show it contains, the
+destination fails with nothing sent and nothing recorded, and its error names
+that version. An interrupted attempt refused this way stays `uncertain`.
+Replacing a newer release with an older one needs explicit reconciliation, never
+a retry. Other channels proceed. Publication holds the game's ledger lock from
+its first channel check to its last receipt, and records each channel an upload
+makes live as soon as that result is saved.
 Meanwhile another checkout publishing under the same state root stops before any
 store write; one confirming a receipt saves it, but repeats `confirm` to record
 it in the ledger. Both are asked to retry once this one finishes. Checkouts with
@@ -378,7 +383,7 @@ row keeps every receipt recorded for it, so a release whose receipts are recorde
 again, after a newer release went live on one of its channels, leaves that newer
 row alone. A first receipt for an older or diverged source is refused instead,
 once the other channels have been saved. That happens when a Steam build or Play
-edit uploaded before the newer release is confirmed after it. Canonical note
+edit uploaded before the newer release was sent is confirmed after it. Canonical note
 corrections belong in explicit subsequent public-repo commits, preserving history
 instead of duplicate entries. The automatic writer refuses conflicting canonical
 content and foreign availability files.

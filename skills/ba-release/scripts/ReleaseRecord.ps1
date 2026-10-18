@@ -32,7 +32,7 @@ function Read-ReleaseStateObject([string]$Path) {
 # private absolute path, since the reason can be kept in a release journal.
 function New-ReleaseDamagedStateError([string]$Root, [string]$Path) {
     $place=[IO.Path]::GetRelativePath($Root,$Path).Replace('\','/')
-    return (New-ReleaseDiagnosticError "Release state '$place' under the state root cannot be read, and it records this game's live releases; repair it, then retry.")
+    return (New-ReleaseDiagnosticError "Release state '$place' under the state root cannot be read, and it records which of this game's releases reached its stores; repair it, then retry.")
 }
 
 # Reads a game's shared live ledger: one row per store channel, each keeping in 'recorded' every receipt recorded for it.
@@ -123,19 +123,65 @@ function Lock-ReleaseLiveLedger([string]$StatePath, $State) {
     catch {throw 'Another checkout of this game is publishing or confirming a release under this state root; retry once it finishes.'}
 }
 
-# Explains why sending $Destination's build from $SourceCommit would roll its store channel back, or gives $null. The
-# channel's row in the shared ledger, read under the lock the caller holds, names the newest source live there; a build
-# whose source does not contain it, or cannot be shown to contain it, would replace a newer release.
-function Get-ReleaseChannelConflict([string]$StatePath, $State, $Destination, [string]$SourceCommit) {
-    $ledger=Read-ReleaseSharedLedger (Get-ReleasePlanSourceRepository $State.plan) (Split-Path (Split-Path $StatePath -Parent) -Parent)
+# Places the game's record of store writes beside its live ledger: for each store channel, every build any checkout under
+# the state root has started sending there, live or not, such as a Steam build or Play edit still awaiting console work.
+function Get-ReleaseSentPath([string]$StatePath, $State) {
+    return Join-Path (Get-ReleaseLedgerDirectory (Get-ReleasePlanSourceRepository $State.plan) (Split-Path (Split-Path $StatePath -Parent) -Parent)) 'sent.json'
+}
+
+# Reads the game's record of store writes, whose ledger lock the caller holds. A damaged record stops, naming the file,
+# rather than being read as proof that nothing was sent.
+function Read-ReleaseSentRecord([string]$StatePath, $State) {
+    $path=Get-ReleaseSentPath $StatePath $State
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {return [ordered]@{}}
+    $sent=Read-ReleaseStateObject $path
+    if ($null -eq $sent) {throw (New-ReleaseDamagedStateError (Split-Path (Split-Path $StatePath -Parent) -Parent) $path)}
+    return $sent
+}
+
+# Records, under the ledger lock the caller holds, that this release is about to send $Destination's build from $SourceCommit
+# to its channel. Gives whether this call added the entry, so an attempt that never reached the store can take it back.
+function Add-ReleaseSentReceipt([string]$StatePath, $State, $Destination, [string]$SourceCommit) {
+    $sent=Read-ReleaseSentRecord $StatePath $State
     $key=Get-ReleaseStoreKey $Destination
-    if (-not $ledger.Contains($key)) {return $null}
-    $row=$ledger[$key]
-    $live=if ($row -is [Collections.IDictionary]) {[string]$row['sourceCommit']} else {''}
-    if ($live -and $live -ceq $SourceCommit) {return $null}
-    if ($live -cmatch '^[0-9a-f]{40}(?:[0-9a-f]{24})?$' -and (Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$State.plan.repository,'merge-base','--is-ancestor',$live,$SourceCommit) $State.plan.repository).exitCode -eq 0) {return $null}
-    $version=if ($row -is [Collections.IDictionary] -and [string]$row['version'] -match '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {"Version $($row['version'])"} else {'A release'}
-    return "$version is live on $key from a source this build's source does not contain; nothing was sent. Replacing it with this older release needs explicit reconciliation."
+    $entries=@(if ($sent.Contains($key)) {$sent[$key]})
+    if (@($entries | Where-Object {$_ -is [Collections.IDictionary] -and $_['sourceCommit'] -ceq $SourceCommit -and $_['version'] -ceq $State.plan.version}).Count) {return $false}
+    $sent[$key]=@($entries)+@([ordered]@{sourceCommit=$SourceCommit;version=$State.plan.version;statePath=$StatePath;destination=$Destination.id;sentAt=[DateTimeOffset]::UtcNow.ToString('o')})
+    Write-ReleaseJson (Get-ReleaseSentPath $StatePath $State) $sent
+    return $true
+}
+
+# Takes back the entry Add-ReleaseSentReceipt added for an attempt that failed before reaching the store.
+function Remove-ReleaseSentReceipt([string]$StatePath, $State, $Destination, [string]$SourceCommit) {
+    $sent=Read-ReleaseSentRecord $StatePath $State
+    $key=Get-ReleaseStoreKey $Destination
+    if (-not $sent.Contains($key)) {return}
+    $sent[$key]=@(@($sent[$key]) | Where-Object {-not ($_ -is [Collections.IDictionary] -and $_['sourceCommit'] -ceq $SourceCommit -and $_['version'] -ceq $State.plan.version)})
+    if (-not $sent[$key].Count) {$sent.Remove($key)}
+    Write-ReleaseJson (Get-ReleaseSentPath $StatePath $State) $sent
+}
+
+# Explains why sending $Destination's build from $SourceCommit would roll its store channel back, or gives $null. Read under
+# the lock the caller holds, the channel's row in the shared ledger names the newest source live there, and the record of
+# store writes every build sent there, live or not; a build whose source does not contain one of them, or cannot be shown
+# to contain it, would replace a newer release.
+function Get-ReleaseChannelConflict([string]$StatePath, $State, $Destination, [string]$SourceCommit) {
+    $key=Get-ReleaseStoreKey $Destination
+    $ledger=Read-ReleaseSharedLedger (Get-ReleasePlanSourceRepository $State.plan) (Split-Path (Split-Path $StatePath -Parent) -Parent)
+    $sent=Read-ReleaseSentRecord $StatePath $State
+    $newer=@(
+        if ($ledger.Contains($key)) {@{entry=$ledger[$key];reached='is live on'}}
+        if ($sent.Contains($key)) {foreach ($entry in @($sent[$key])) {@{entry=$entry;reached='has been sent to'}}}
+    )
+    foreach ($candidate in $newer) {
+        $entry=$candidate.entry
+        $commit=if ($entry -is [Collections.IDictionary]) {[string]$entry['sourceCommit']} else {''}
+        if ($commit -and $commit -ceq $SourceCommit) {continue}
+        if ($commit -cmatch '^[0-9a-f]{40}(?:[0-9a-f]{24})?$' -and (Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$State.plan.repository,'merge-base','--is-ancestor',$commit,$SourceCommit) $State.plan.repository).exitCode -eq 0) {continue}
+        $version=if ($entry -is [Collections.IDictionary] -and [string]$entry['version'] -match '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {"Version $($entry['version'])"} else {'A release'}
+        return "$version $($candidate.reached) $key from a source this build's source does not contain; this build was not sent. Replacing it with this older release needs explicit reconciliation."
+    }
+    return $null
 }
 
 # Records live evidence in the game's shared ledger, whose lock the caller holds: for every selected channel, or only the

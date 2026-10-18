@@ -509,3 +509,39 @@ Test 'no store receives an older build while a newer release is live on its chan
         Assert ($result.status -eq 'publication-failed') "Refusing every store was reported as $($result.status)."
     } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG;Remove-Item Env:BA_STEAM_USERNAME}
 }
+Test 'an older build is refused where a newer Steam build or Play edit was sent but is not yet live' {
+    $repo=New-StoreFixture 'stale-unconfirmed'
+    $stateRoot=Join-Path $sandbox 'stale-unconfirmed-state'
+    $env:BA_FIXTURE_UPLOAD_LOG=Join-Path $sandbox 'stale-unconfirmed.log'
+    try {
+        $stores=@('steam','google-play')
+        $older=Invoke-ReleasePrepare $repo $stores $stateRoot $engine
+        $olderState=Get-Content (Join-Path $older.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $worktree=Join-Path $sandbox 'stale-unconfirmed-newer'
+        Invoke-FixtureGit $repo @('worktree','add','--quiet','-b','newer',$worktree) | Out-Null
+        Invoke-ReleasePrepare $worktree $stores $stateRoot $engine -VersionChange patch | Out-Null
+        Invoke-FixtureGit $worktree @('add','project.godot') | Out-Null
+        Invoke-FixtureGit $worktree @('commit','--quiet','-m','Reserve the newer version') | Out-Null
+        $newer=Invoke-ReleasePrepare $worktree $stores $stateRoot $engine -VersionChange patch
+        $newerState=Get-Content (Join-Path $newer.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $newerApi=New-PlayServer;$newerApi.server.version='1.2.4'
+        # Without a SteamCMD account the newer Steam attempt fails before uploading, so it records nothing as sent.
+        Remove-Item Env:BA_STEAM_USERNAME -ErrorAction SilentlyContinue
+        Invoke-ReleasePublish -StatePath $newer.statePath -SteamCmdExecutable $steam -PlayTransport $newerApi.handler -ApprovedPlanId $newerState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $newer.statePath $newerState.plan) | Out-Null
+        $sentPath=Join-Path (Split-Path (Get-SharedLedgerPath $stateRoot) -Parent) 'sent.json'
+        $sent=Get-Content $sentPath -Raw | ConvertFrom-Json -AsHashtable
+        Assert (-not $sent.Contains('steam:100:default') -and @($sent['play:com.example.realgame:production']).Count -eq 1) "The store-write record does not match what reached the stores: $($sent.Keys -join ', ')"
+        $env:BA_STEAM_USERNAME='fixture'
+        $newerResult=Invoke-ReleasePublish -StatePath $newer.statePath -SteamCmdExecutable $steam -PlayTransport $newerApi.handler
+        Assert ($newerResult.destinations.steam.status -eq 'awaiting-store-action' -and $newerResult.destinations['google-play'].status -eq 'submitted') "The newer release did not upload without going live: $($newerResult.destinations.steam.status) $($newerResult.destinations['google-play'].status)"
+        Assert (-not (Get-ReleaseLiveLedger $repo $stateRoot).Count) 'An upload awaiting console work or review was recorded live.'
+        $olderApi=New-PlayServer
+        $result=Invoke-ReleasePublish -StatePath $older.statePath -SteamCmdExecutable $steam -PlayTransport $olderApi.handler -ApprovedPlanId $olderState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $older.statePath $olderState.plan)
+        $uploads=@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG)
+        Assert (($uploads -join '|') -ceq 'steamcmd 100 1.2.4' -and $olderApi.server.calls.Count -eq 0) "The older release reached a store: $($uploads -join '|') $($olderApi.server.calls.Count) Play calls"
+        foreach ($id in $stores) {
+            $record=$result.destinations[$id]
+            Assert ($record.status -eq 'failed' -and $record.attempts -eq 0 -and $record.error -match 'Version 1\.2\.4 has been sent to.*reconciliation') "$id was not refused before its store write: $($record.status) $($record.error)"
+        }
+    } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG;Remove-Item Env:BA_STEAM_USERNAME -ErrorAction SilentlyContinue}
+}

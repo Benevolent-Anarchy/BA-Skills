@@ -723,9 +723,10 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                     $artifact=@($state.artifacts | Where-Object {$_.preset -ceq $preset})[0]
                     $record.remote.sourceCommit=if ($artifact.Contains('sourceCommit')) {$artifact.sourceCommit} else {$state.plan.head}
                 }
-                # A newer release live on this channel refuses the older build before any store write, so nothing is sent
-                # or recorded; an interrupted earlier attempt stays uncertain.
-                $conflict=Get-ReleaseChannelConflict $StatePath $state $destination $(if ($record.remote.sourceCommit) {$record.remote.sourceCommit} else {$state.plan.head})
+                # A newer release live on this channel, or sent there and not yet live, refuses the older build before any
+                # store write, so nothing is sent or recorded; an interrupted earlier attempt stays uncertain.
+                $source=if ($record.remote.sourceCommit) {$record.remote.sourceCommit} else {$state.plan.head}
+                $conflict=Get-ReleaseChannelConflict $StatePath $state $destination $source
                 if ($conflict) {
                     if ($record.status -ne 'uncertain') {$record.status='failed'}
                     $record.error=$conflict;Write-ReleaseJson $stateFile $state;continue
@@ -738,6 +739,8 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 $record.remote.notesHashes=@{$path=(Get-FileHash (Join-Path $StatePath $path)).Hash.ToLowerInvariant()}
             }
             Write-ReleaseJson $stateFile $state
+            # Recorded before the store write, so the channel's check elsewhere sees this build even if this run stops.
+            $sentNow=($destination.type -ne 'notes') -and (Add-ReleaseSentReceipt $StatePath $state $destination $source)
             try {
                 $outcome='succeeded'
                 if ($destination.type -eq 'itch') {
@@ -781,6 +784,8 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 }
             }
             Write-ReleaseJson $stateFile $state
+            # An attempt that failed before its first store operation sent nothing, so it takes back its store-write entry.
+            if ($sentNow -and $record.status -eq 'failed' -and -not $record.remote.Contains('phase')) {Remove-ReleaseSentReceipt $StatePath $state $destination $source}
             # A channel this upload made live is recorded at once, so a later check elsewhere sees it even if this run stops.
             if ($record.remote.Contains('live') -and $record.remote.live -eq $true) {Save-ReleaseLiveReceipts $StatePath $state @($destination.id)}
         }
