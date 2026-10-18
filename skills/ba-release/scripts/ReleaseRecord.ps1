@@ -115,45 +115,70 @@ function Get-ReleaseLiveReceipts($Ledger) {
     }
 }
 
-# Advances only channels with actual live evidence, preserving unselected and submitted channels, in the game's shared ledger.
+# Holds the game's shared ledger lock, so only one checkout at a time can check a store channel, change it and record it.
+function Lock-ReleaseLiveLedger([string]$StatePath, $State) {
+    $directory=Get-ReleaseLedgerDirectory (Get-ReleasePlanSourceRepository $State.plan) (Split-Path (Split-Path $StatePath -Parent) -Parent)
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    try {return Lock-ReleaseState $directory}
+    catch {throw 'Another checkout of this game is publishing or confirming a release under this state root; retry once it finishes.'}
+}
+
+# Explains why sending $Destination's build from $SourceCommit would roll its store channel back, or gives $null. The
+# channel's row in the shared ledger, read under the lock the caller holds, names the newest source live there; a build
+# whose source does not contain it, or cannot be shown to contain it, would replace a newer release.
+function Get-ReleaseChannelConflict([string]$StatePath, $State, $Destination, [string]$SourceCommit) {
+    $ledger=Read-ReleaseSharedLedger (Get-ReleasePlanSourceRepository $State.plan) (Split-Path (Split-Path $StatePath -Parent) -Parent)
+    $key=Get-ReleaseStoreKey $Destination
+    if (-not $ledger.Contains($key)) {return $null}
+    $row=$ledger[$key]
+    $live=if ($row -is [Collections.IDictionary]) {[string]$row['sourceCommit']} else {''}
+    if ($live -and $live -ceq $SourceCommit) {return $null}
+    if ($live -cmatch '^[0-9a-f]{40}(?:[0-9a-f]{24})?$' -and (Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$State.plan.repository,'merge-base','--is-ancestor',$live,$SourceCommit) $State.plan.repository).exitCode -eq 0) {return $null}
+    $version=if ($row -is [Collections.IDictionary] -and [string]$row['version'] -match '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {"Version $($row['version'])"} else {'A release'}
+    return "$version is live on $key from a source this build's source does not contain; nothing was sent. Replacing it with this older release needs explicit reconciliation."
+}
+
+# Records live evidence in the game's shared ledger, whose lock the caller holds: for every selected channel, or only the
+# destinations $Only names. Advances only channels with actual live evidence, preserving unselected and submitted channels.
 # Each row keeps every receipt recorded for its channel, so a release whose receipts are replayed after a newer release went
 # live on one of its channels leaves that newer row alone. Only a receipt recorded for the first time on an older or diverged
 # source is refused, and only once every other channel has been saved, so retrying the step that failed repairs the rest.
-function Update-ReleaseLiveLedger([string]$StatePath, $State) {
-    $repositoryState=Split-Path $StatePath -Parent
+function Save-ReleaseLiveReceipts([string]$StatePath, $State, [string[]]$Only=@()) {
     $sourceRepository=Get-ReleasePlanSourceRepository $State.plan
-    $directory=Get-ReleaseLedgerDirectory $sourceRepository (Split-Path $repositoryState -Parent)
-    New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    $lock=Lock-ReleaseState $directory
-    try {
-        $path=Join-Path $directory 'live.json'
-        $ledger=Read-ReleaseSharedLedger $sourceRepository (Split-Path $repositoryState -Parent)
-        $refused=[Collections.Generic.List[string]]::new()
-        foreach ($destination in $State.plan.destinations) {
-            if (-not $destination.selected -or $destination.type -eq 'notes') {continue}
-            $record=$State.destinations[$destination.id]
-            if (-not $record.remote.Contains('live') -or $record.remote.live -ne $true) {continue}
-            $key=Get-ReleaseStoreKey $destination
-            $sourceCommit=if ($record.remote.Contains('sourceCommit') -and $record.remote.sourceCommit) {$record.remote.sourceCommit} else {$State.plan.head}
-            $row=if ($ledger.Contains($key)) {$ledger[$key]} else {$null}
-            if ($row -and $row.sourceCommit -cne $sourceCommit) {
-                $ancestor=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$State.plan.repository,'merge-base','--is-ancestor',$row.sourceCommit,$sourceCommit) $State.plan.repository
-                if ($ancestor.exitCode -ne 0) {
-                    # An older release completing late must not roll a channel's baseline backwards silently; one whose
-                    # receipt the row already keeps is only being recorded again.
-                    $replayed=@(Get-ReleaseLiveReceipts ([ordered]@{$key=$row}) | Where-Object {$_.entry.sourceCommit -ceq $sourceCommit -and $_.entry.version -ceq $State.plan.version}).Count -gt 0
-                    if (-not $replayed) {$refused.Add($destination.id)}
-                    continue
-                }
+    $stateRoot=Split-Path (Split-Path $StatePath -Parent) -Parent
+    $path=Join-Path (Get-ReleaseLedgerDirectory $sourceRepository $stateRoot) 'live.json'
+    $ledger=Read-ReleaseSharedLedger $sourceRepository $stateRoot
+    $refused=[Collections.Generic.List[string]]::new()
+    foreach ($destination in $State.plan.destinations) {
+        if (-not $destination.selected -or $destination.type -eq 'notes' -or ($Only.Count -and $destination.id -cnotin $Only)) {continue}
+        $record=$State.destinations[$destination.id]
+        if (-not $record.remote.Contains('live') -or $record.remote.live -ne $true) {continue}
+        $key=Get-ReleaseStoreKey $destination
+        $sourceCommit=if ($record.remote.Contains('sourceCommit') -and $record.remote.sourceCommit) {$record.remote.sourceCommit} else {$State.plan.head}
+        $row=if ($ledger.Contains($key)) {$ledger[$key]} else {$null}
+        if ($row -and $row.sourceCommit -cne $sourceCommit) {
+            $ancestor=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$State.plan.repository,'merge-base','--is-ancestor',$row.sourceCommit,$sourceCommit) $State.plan.repository
+            if ($ancestor.exitCode -ne 0) {
+                # An older release completing late must not roll a channel's baseline backwards silently; one whose
+                # receipt the row already keeps is only being recorded again.
+                $replayed=@(Get-ReleaseLiveReceipts ([ordered]@{$key=$row}) | Where-Object {$_.entry.sourceCommit -ceq $sourceCommit -and $_.entry.version -ceq $State.plan.version}).Count -gt 0
+                if (-not $replayed) {$refused.Add($destination.id)}
+                continue
             }
-            if ($row -and $row.sourceCommit -ceq $sourceCommit -and $row.version -ceq $State.plan.version) {continue}
-            $receipt=[ordered]@{sourceCommit=$sourceCommit;version=$State.plan.version;statePath=$StatePath;destination=$destination.id;observedAt=[DateTimeOffset]::UtcNow.ToString('o')}
-            $earlier=if (-not $row) {@()} elseif ($row.Contains('recorded')) {@($row.recorded)} else {@([ordered]@{sourceCommit=$row.sourceCommit;version=$row.version;statePath=$row.statePath;destination=$row.destination;observedAt=$row.observedAt})}
-            $ledger[$key]=[ordered]@{sourceCommit=$sourceCommit;version=$State.plan.version;statePath=$StatePath;destination=$destination.id;observedAt=$receipt.observedAt;recorded=@($earlier)+@($receipt)}
         }
-        Write-ReleaseJson $path $ledger
-        if ($refused.Count) {throw "An older live release cannot replace a newer channel baseline without explicit reconciliation: $($refused -join ', ')."}
-    } finally {$lock.Dispose()}
+        if ($row -and $row.sourceCommit -ceq $sourceCommit -and $row.version -ceq $State.plan.version) {continue}
+        $receipt=[ordered]@{sourceCommit=$sourceCommit;version=$State.plan.version;statePath=$StatePath;destination=$destination.id;observedAt=[DateTimeOffset]::UtcNow.ToString('o')}
+        $earlier=if (-not $row) {@()} elseif ($row.Contains('recorded')) {@($row.recorded)} else {@([ordered]@{sourceCommit=$row.sourceCommit;version=$row.version;statePath=$row.statePath;destination=$row.destination;observedAt=$row.observedAt})}
+        $ledger[$key]=[ordered]@{sourceCommit=$sourceCommit;version=$State.plan.version;statePath=$StatePath;destination=$destination.id;observedAt=$receipt.observedAt;recorded=@($earlier)+@($receipt)}
+    }
+    Write-ReleaseJson $path $ledger
+    if ($refused.Count) {throw "An older live release cannot replace a newer channel baseline without explicit reconciliation: $($refused -join ', ')."}
+}
+
+# Records every selected channel's live evidence in the game's shared ledger, taking its lock for the write.
+function Update-ReleaseLiveLedger([string]$StatePath, $State) {
+    $lock=Lock-ReleaseLiveLedger $StatePath $State
+    try {Save-ReleaseLiveReceipts $StatePath $State} finally {$lock.Dispose()}
 }
 
 # Reads a committed file as checkout would write it, without touching the index or working tree.

@@ -644,6 +644,7 @@ function Update-ReleaseDerivedPlanMetadata($State, $Fresh) {
 function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [string]$ApprovedNotesSha256, [string]$ButlerExecutable='butler', [string]$GhExecutable='gh', [switch]$RetryUncertain, [string]$SteamCmdExecutable='steamcmd', [scriptblock]$PlayTransport, [switch]$ReplacePlayEdit) {
     $StatePath = (Get-Item -LiteralPath $StatePath).FullName
     $lock = Lock-ReleaseState $StatePath
+    $ledgerLock = $null
     try {
         $stateFile = Join-Path $StatePath 'state.json'
         $state = [IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable
@@ -694,6 +695,9 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}
             }
         }
+        # Hold the game's shared ledger from the first channel check to the last receipt: no other checkout under this state
+        # root can change a channel between this one's check and its write, or check a channel before this one records it.
+        $ledgerLock=Lock-ReleaseLiveLedger $StatePath $state
         foreach ($destination in @($state.plan.destinations | Sort-Object { $_.type -eq 'notes' })) {
             if (-not $destination.selected) { continue }
             $record = $state.destinations[$destination.id]
@@ -713,13 +717,22 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             if (-not $record.Contains('remote')) {$record.remote=[ordered]@{}}
             if ($record.status -eq 'in-progress') { $record.status='uncertain'; $record.error='Interrupted external operation; reconcile its remote result before retrying.'; Write-ReleaseJson $stateFile $state }
             if ($record.status -eq 'uncertain' -and -not $RetryUncertain) { continue }
+            if ($destination.type -ne 'notes') {
+                if (-not $record.remote.Contains('sourceCommit')) {
+                    $preset=if ($destination.type -eq 'steam') {$destination.depots[0].preset} else {$destination.preset}
+                    $artifact=@($state.artifacts | Where-Object {$_.preset -ceq $preset})[0]
+                    $record.remote.sourceCommit=if ($artifact.Contains('sourceCommit')) {$artifact.sourceCommit} else {$state.plan.head}
+                }
+                # A newer release live on this channel refuses the older build before any store write, so nothing is sent
+                # or recorded; an interrupted earlier attempt stays uncertain.
+                $conflict=Get-ReleaseChannelConflict $StatePath $state $destination $(if ($record.remote.sourceCommit) {$record.remote.sourceCommit} else {$state.plan.head})
+                if ($conflict) {
+                    if ($record.status -ne 'uncertain') {$record.status='failed'}
+                    $record.error=$conflict;Write-ReleaseJson $stateFile $state;continue
+                }
+            }
             $record.status='in-progress'; $record.attempts++; $record.error=$null
             $state.canonicalNotesSha256=$canonicalHash
-            if ($destination.type -ne 'notes' -and -not $record.remote.Contains('sourceCommit')) {
-                $preset=if ($destination.type -eq 'steam') {$destination.depots[0].preset} else {$destination.preset}
-                $artifact=@($state.artifacts | Where-Object {$_.preset -ceq $preset})[0]
-                $record.remote.sourceCommit=if ($artifact.Contains('sourceCommit')) {$artifact.sourceCommit} else {$state.plan.head}
-            }
             if ($destination.type -eq 'google-play') {
                 $path="notes.$($destination.id).txt"
                 $record.remote.notesHashes=@{$path=(Get-FileHash (Join-Path $StatePath $path)).Hash.ToLowerInvariant()}
@@ -768,12 +781,14 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 }
             }
             Write-ReleaseJson $stateFile $state
+            # A channel this upload made live is recorded at once, so a later check elsewhere sees it even if this run stops.
+            if ($record.remote.Contains('live') -and $record.remote.live -eq $true) {Save-ReleaseLiveReceipts $StatePath $state @($destination.id)}
         }
         $state.status = Get-ReleaseOverallStatus $state
         Write-ReleaseJson $stateFile $state
-        Update-ReleaseLiveLedger $StatePath $state
+        Save-ReleaseLiveReceipts $StatePath $state
         return @{status=$state.status; statePath=$StatePath; version=$state.plan.version; destinations=$state.destinations}
-    } finally { $lock.Dispose() }
+    } finally { if ($ledgerLock) {$ledgerLock.Dispose()}; $lock.Dispose() }
 }
 # Records only an explicitly observed, approval-bound store result; never invokes a store API.
 function Confirm-ReleaseStoreCompletion([string]$StatePath, [string]$ReceiptPath) {

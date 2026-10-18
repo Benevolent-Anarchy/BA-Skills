@@ -1,5 +1,5 @@
 # Verifies that every checkout of a game shares one live ledger, that ledgers kept per checkout before it are not read, and
-# that a prepared release keeps its boundary wherever its previousRelease ref later points.
+# that a prepared release keeps its boundary and never replaces a newer release live on one of its channels.
 
 # Writes a live ledger as a checkout at $Checkout kept it before ledgers were shared: under the hash of its path, beside a state naming its game's notes repository.
 function Write-LegacyLiveLedger([string]$StateRoot, [string]$Checkout, [string]$NotesRepository, [string]$Version, [string]$Commit) {
@@ -437,4 +437,75 @@ Test 'a prepared release keeps its boundary after previousRelease moves past its
     try {$published=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)}
     finally {Remove-Item Env:BA_FIXTURE_ALLOW_LINUX}
     Assert ($published.status -eq 'published') "Publication without the ref failed: $($published.status)"
+}
+Test 'an older approved release sends nothing to a channel where a newer release is live, and still reaches an unaffected one' {
+    $repo=New-Fixture 'stale-upload'
+    $stateRoot=Join-Path $sandbox 'stale-upload-state'
+    $env:BA_FIXTURE_UPLOAD_LOG=Join-Path $sandbox 'stale-upload.log'
+    try {
+        $older=Invoke-ReleasePrepare $repo @('itch-windows') $stateRoot $engine
+        $olderState=Get-Content (Join-Path $older.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $olderNotes=Get-ReleaseNotesHash $older.statePath $olderState.plan
+        $worktree=Join-Path $sandbox 'stale-upload-newer'
+        Invoke-FixtureGit $repo @('worktree','add','--quiet','-b','newer',$worktree) | Out-Null
+        Invoke-ReleasePrepare $worktree @('itch-windows') $stateRoot $engine -VersionChange patch | Out-Null
+        Invoke-FixtureGit $worktree @('add','project.godot') | Out-Null
+        Invoke-FixtureGit $worktree @('commit','--quiet','-m','Reserve the newer version') | Out-Null
+        $newer=Invoke-ReleasePrepare $worktree @('itch-windows') $stateRoot $engine -VersionChange patch
+        $newerState=Get-Content (Join-Path $newer.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Invoke-ReleasePublish -StatePath $newer.statePath -ButlerExecutable $butler -ApprovedPlanId $newerState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $newer.statePath $newerState.plan) | Out-Null
+        $result=Invoke-ReleasePublish -StatePath $older.statePath -ButlerExecutable $butler -ApprovedPlanId $olderState.plan.planId -ApprovedNotesSha256 $olderNotes
+        $uploads=@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG)
+        Assert (($uploads -join '|') -ceq 'butler example/real-game:windows 1.2.4') "The older release reached the newer channel: $($uploads -join '|')"
+        $saved=(Get-Content (Join-Path $older.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable).destinations['itch-windows']
+        Assert ($saved.status -eq 'failed' -and -not $saved.remote.Contains('live') -and $saved.attempts -eq 0 -and $saved.error -match 'Version 1\.2\.4 is live.*reconciliation') "The refusal was not recorded before any receipt: $($saved | ConvertTo-Json -Compress)"
+        Assert ($result.status -eq 'publication-failed') "A refused release was reported as $($result.status)."
+        $ledger=Get-ReleaseLiveLedger $repo $stateRoot
+        Assert ($ledger['itch:example/real-game:windows'].sourceCommit -ceq $newerState.plan.head -and @($ledger['itch:example/real-game:windows'].recorded).Count -eq 1) 'The refused release changed the newer row.'
+        # Replaying the newer release sends nothing again; the older one still reaches a channel with nothing newer live.
+        $replay=Invoke-ReleasePublish -StatePath $newer.statePath -ButlerExecutable $butler
+        Assert ($replay.status -eq 'published' -and @(Get-Content $env:BA_FIXTURE_UPLOAD_LOG).Count -eq 1) "Replaying the newer release did not complete without uploading: $($replay.status)"
+        Expand-ReleaseDestinations $older.statePath @('itch-linux') $engine | Out-Null
+        $olderState=Get-Content (Join-Path $older.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $env:BA_FIXTURE_ALLOW_LINUX='1'
+        try {$extended=Invoke-ReleasePublish -StatePath $older.statePath -ButlerExecutable $butler -ApprovedPlanId $olderState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $older.statePath $olderState.plan)}
+        finally {Remove-Item Env:BA_FIXTURE_ALLOW_LINUX}
+        $uploads=@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG)
+        Assert (($uploads -join '|') -ceq 'butler example/real-game:windows 1.2.4|butler example/real-game:linux 1.2.3') "The extension did not reach only the unaffected channel: $($uploads -join '|')"
+        Assert ($extended.status -eq 'partial-failure' -and $extended.destinations['itch-linux'].status -eq 'succeeded' -and $extended.destinations['itch-windows'].status -eq 'failed') "The extension reported $($extended.status)."
+    } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG}
+}
+Test 'no store receives an older build while a newer release is live on its channel or another checkout holds the ledger' {
+    $repo=New-StoreFixture 'stale-stores'
+    $stateRoot=Join-Path $sandbox 'stale-stores-state'
+    $env:BA_FIXTURE_UPLOAD_LOG=Join-Path $sandbox 'stale-stores.log'
+    $env:BA_STEAM_USERNAME='fixture'
+    try {
+        $stores=@('itch-windows','steam','google-play')
+        $prepared=Invoke-ReleasePrepare $repo $stores $stateRoot $engine
+        $state=Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $api=New-PlayServer
+        # Another checkout publishing under the same state root holds the game's ledger, so this one stops before any store write.
+        $ledgerDirectory=Split-Path (Get-SharedLedgerPath $stateRoot) -Parent
+        New-Item -ItemType Directory -Path $ledgerDirectory -Force | Out-Null
+        $held=[IO.File]::Open((Join-Path $ledgerDirectory '.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        try {Expect-Error {Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam -PlayTransport $api.handler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)} 'Another checkout'}
+        finally {$held.Dispose()}
+        $saved=(Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable).destinations
+        Assert (-not @($stores | Where-Object {$saved[$_].status -ne 'pending'}).Count) "A held ledger let publication start: $(@($stores | ForEach-Object {$saved[$_].status}) -join ', ')"
+        # A newer source is live on every channel, so none receives this release.
+        $newer=Invoke-FixtureGit $repo @('commit-tree','HEAD^{tree}','-p','HEAD','-m','Newer release')
+        Write-SharedLedger $stateRoot ([ordered]@{
+            'itch:example/real-game:windows'=@{sourceCommit=$newer;version='1.2.4';destination='itch-windows'}
+            'steam:100:default'=@{sourceCommit=$newer;version='1.2.4';destination='steam'}
+            'play:com.example.realgame:production'=@{sourceCommit=$newer;version='1.2.4';destination='google-play'}
+        })
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam -PlayTransport $api.handler
+        Assert (-not (Test-Path -LiteralPath $env:BA_FIXTURE_UPLOAD_LOG) -and $api.server.calls.Count -eq 0) "An older build reached a store: $(if (Test-Path -LiteralPath $env:BA_FIXTURE_UPLOAD_LOG) {Get-Content $env:BA_FIXTURE_UPLOAD_LOG}) $($api.server.calls.Count) Play calls"
+        foreach ($id in $stores) {
+            $record=$result.destinations[$id]
+            Assert ($record.status -eq 'failed' -and $record.attempts -eq 0 -and $record.error -match 'reconciliation') "$id was not refused before its store write: $($record.status) $($record.error)"
+        }
+        Assert ($result.status -eq 'publication-failed') "Refusing every store was reported as $($result.status)."
+    } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG;Remove-Item Env:BA_STEAM_USERNAME}
 }

@@ -214,6 +214,7 @@ if ($Rest -contains '--dry-run') {
     exit 0
 }
 if ($Rest -contains 'example/real-game:linux' -and -not $env:BA_FIXTURE_ALLOW_LINUX) { exit 7 }
+if ($env:BA_FIXTURE_UPLOAD_LOG) {Add-Content $env:BA_FIXTURE_UPLOAD_LOG "butler $($Rest[2]) $($Rest[4])"}
 exit 0
 '@ | Set-Content $butler
 if ($IsWindows) {('@"'+(Join-Path $PSHOME 'pwsh.exe')+'" -NoProfile -File "'+$butler+'" %*') | Set-Content (Join-Path $sandbox 'butler.cmd')}
@@ -512,6 +513,7 @@ foreach ($id in @('101','102')) {
 }
 if ($env:BA_FIXTURE_STEAM_FALSE_SUCCESS) { 'ERROR! App build failed.'; exit 0 }
 if ($env:BA_FIXTURE_STEAM_LATE_ERROR) { 'Successfully finished AppID 100 build (BuildID 999).';exit 9 }
+if ($env:BA_FIXTURE_UPLOAD_LOG) {Add-Content $env:BA_FIXTURE_UPLOAD_LOG "steamcmd 100 $(if ($vdf -match '"Desc"\s+"Version ([^"]+)"') {$Matches[1]})"}
 'Successfully finished AppID 100 build (BuildID 999).'; exit 0
 '@ | Set-Content $steam
 function New-PlayServer {
