@@ -307,7 +307,9 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
             if ($item.Contains('baselineAdvancesOn')) {$record.baselineAdvancesOn=$item.baselineAdvancesOn}
             $android=@($settings.presets | Where-Object {$_.name -ceq $item.preset})[0]
             $record.packageName=$android.packageName; $record.versionCode=$android.versionCode
-            $record.requiredActions=@('Review all current Play track releases before approving retained version codes.','Verify review, managed publishing and rollout state in Play Console after submission.')
+            $record.requiredActions=@('Review all current Play track releases before approving retained version codes.')
+            # A game whose baselines advance on submission ends its release work there, so no console check after it is owed.
+            if ($item['baselineAdvancesOn'] -cne 'submitted') {$record.requiredActions+=@('Verify review, managed publishing and rollout state in Play Console after submission.')}
             if ($record.selected) {
                 foreach ($key in @('track','releaseStatus','language','retainVersionCodes')) {
                     if ($null -eq $item[$key]) { $record.status='blocked'; $blockers.Add("$($item.id): Google Play $key is unconfirmed.") }

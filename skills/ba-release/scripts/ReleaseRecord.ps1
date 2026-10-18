@@ -89,7 +89,8 @@ function Get-ReleaseObservedSources($Settings, $Destination, $Ledger, [string]$S
 }
 
 # Picks the newest of a channel's observed sources. Publication refuses a build whose source does not contain every build
-# sent or live on its channel and not abandoned, so they lie on one line of history and the newest contains the rest.
+# sent or live on its channel and not abandoned, so, apart from builds sent before that check existed, they lie on one line
+# of history and the newest contains the rest.
 function Get-ReleaseNewestSource([string]$Repository, $Sources) {
     $newest=$Sources[0]
     foreach ($source in $Sources) {

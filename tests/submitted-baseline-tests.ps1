@@ -67,9 +67,12 @@ Test 'baselineAdvancesOn takes only live or submitted, and only on Google Play' 
     $repo=New-StoreFixture 'submitted-baseline-config'
     Change-Config $repo {param($c) $c.distributions['google-play'].baselineAdvancesOn='reviewed'}
     Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('google-play')} 'baselineAdvancesOn must be live or submitted'
-    Change-Config $repo {param($c) $c.distributions['google-play'].baselineAdvancesOn='live'}
-    $play=@((Get-ReleasePlan -Repository $repo -Destination @('google-play')).destinations | Where-Object id -EQ 'google-play')[0]
-    Assert ($play.baselineAdvancesOn -ceq 'live') "The plan does not carry the configured setting: $($play.baselineAdvancesOn)"
+    foreach ($case in @(@{value='live';owed=$true},@{value='submitted';owed=$false})) {
+        Change-Config $repo {param($c) $c.distributions['google-play'].baselineAdvancesOn=$case.value}
+        $play=@((Get-ReleasePlan -Repository $repo -Destination @('google-play')).destinations | Where-Object id -EQ 'google-play')[0]
+        Assert ($play.baselineAdvancesOn -ceq $case.value) "The plan does not carry the configured setting: $($play.baselineAdvancesOn)"
+        Assert ((@($play.requiredActions | Where-Object {$_ -match 'Play Console after submission'}).Count -eq 1) -eq $case.owed) "With $($case.value), the console check after submission is listed wrongly: $($play.requiredActions -join ' | ')"
+    }
     Change-Config $repo {param($c) $c.distributions.steam.baselineAdvancesOn='submitted'}
     Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('steam')} 'distributions\.steam field: baselineAdvancesOn'
 }
