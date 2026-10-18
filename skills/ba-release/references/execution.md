@@ -158,9 +158,14 @@ A native Windows file-handle lookup resolves Store app filesystem redirection
 and links before returning the state path. Use that returned physical path for
 WSL checks, browser uploads and agents outside the Store app; the logical Local
 AppData path can point somewhere different in those processes. Every mode given
-`-StatePath` resolves it the same way first. A release reached through a link or
-junction to its state root, or to its own folder, is therefore the same state,
-with the same shared ledger and store-write record.
+`-StatePath` first finds the state's state root, two folders up, where the
+shared ledger and store-write record live. A path that already sits inside a
+state root is used as given, in a folder named for its version under one named
+for its checkout. That covers one through a link to the state root, and a
+checkout folder relocated elsewhere and linked back in. Otherwise the state's
+physical location is used, as for a link to the state's own folder. A state that
+is neither is refused. Recorded state paths are matched by physical location,
+however they are spelled or reached.
 A source identity/version
 directory contains `state.json`, `notes.md`, build snapshots and an exclusive
 lock. HEAD, config bytes, version, previous-release commit and sorted selection

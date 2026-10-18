@@ -530,7 +530,7 @@ Test 'an older build is refused where a newer Steam build or Play edit was sent 
         Invoke-ReleasePublish -StatePath $newer.statePath -SteamCmdExecutable $steam -PlayTransport $newerApi.handler -ApprovedPlanId $newerState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $newer.statePath $newerState.plan) | Out-Null
         $sentPath=Join-Path (Split-Path (Get-SharedLedgerPath $stateRoot) -Parent) 'sent.json'
         $sent=Get-Content $sentPath -Raw | ConvertFrom-Json -AsHashtable
-        Assert (-not $sent.Contains('steam:100:default') -and @($sent['play:com.example.realgame:production']).Count -eq 1) "The store-write record does not match what reached the stores: $($sent.Keys -join ', ')"
+        Assert (-not $sent.Contains('steam:100:default') -and $sent.Contains('play:com.example.realgame:production') -and @($sent['play:com.example.realgame:production']).Count -eq 1) "The store-write record does not match what reached the stores: $($sent.Keys -join ', ')"
         $env:BA_STEAM_USERNAME='fixture'
         $newerResult=Invoke-ReleasePublish -StatePath $newer.statePath -SteamCmdExecutable $steam -PlayTransport $newerApi.handler
         Assert ($newerResult.destinations.steam.status -eq 'awaiting-store-action' -and $newerResult.destinations['google-play'].status -eq 'submitted') "The newer release did not upload without going live: $($newerResult.destinations.steam.status) $($newerResult.destinations['google-play'].status)"
@@ -587,7 +587,7 @@ Test 'builds sent before the store-write record existed stop an older release, b
         [IO.File]::WriteAllText($sentPath,'{}')
         Invoke-ReleasePublish -StatePath $newer.statePath -SteamCmdExecutable $steam -PlayTransport $newerApi.handler | Out-Null
         $sent=Get-Content $sentPath -Raw | ConvertFrom-Json -AsHashtable
-        Assert (@($sent['steam:100:default']).Count -eq 1 -and @($sent['play:com.example.realgame:production']).Count -eq 1 -and $newerApi.server.uploads -eq 1 -and $newerApi.server.commits -eq 1) "Replaying the newer release did not record its builds without sending them again: $($sent.Keys -join ', ')"
+        Assert ($sent.Contains('steam:100:default') -and $sent.Contains('play:com.example.realgame:production') -and @($sent['steam:100:default']).Count -eq 1 -and @($sent['play:com.example.realgame:production']).Count -eq 1 -and $newerApi.server.uploads -eq 1 -and $newerApi.server.commits -eq 1) "Replaying the newer release did not record its builds without sending them again: $($sent.Keys -join ', ')"
         $after=Invoke-ReleasePublish -StatePath $older.statePath -SteamCmdExecutable $steam -PlayTransport $olderApi.handler
         $uploads=@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG)
         Assert (($uploads -join '|') -ceq 'steamcmd 100 1.2.4' -and $olderApi.server.calls.Count -eq 0) "The older release reached a store: $($uploads -join '|') $($olderApi.server.calls.Count) Play calls"
@@ -768,7 +768,7 @@ Test 'a release state reached through a link to its state root or its own folder
         $viaRoot=Join-Path $rootLink ([IO.Path]::GetRelativePath($stateRoot,$candidate.statePath))
         $stateLink=Join-Path $sandbox 'sent-alias-state-link'
         New-Item -ItemType $linkType -Path $stateLink -Target $candidate.statePath | Out-Null
-        $same={param($left,$right) [IO.Path]::GetFullPath($left).TrimEnd('\','/') -eq [IO.Path]::GetFullPath($right).TrimEnd('\','/')}
+        $same={param($left,$right) & (Get-Module Release) {param($a,$b) Test-ReleaseSameStatePath $a $b} $left $right}
         # Published through the link to its own folder, the release finds its real state root and records its real state.
         Invoke-ReleasePublish -StatePath $stateLink -SteamCmdExecutable $steam -ApprovedPlanId $candidate.state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $candidate.statePath $candidate.state.plan) | Out-Null
         $sentPath=Get-SentRecordPath $stateRoot
@@ -799,5 +799,31 @@ Test 'a release state reached through a link to its state root or its own folder
         $replay=Invoke-ReleasePublish -StatePath $stateLink -SteamCmdExecutable $steam
         $entries=@((Get-Content $sentPath -Raw | ConvertFrom-Json -AsHashtable)['steam:100:default'])
         Assert ($replay.status -eq 'abandoned' -and $entries.Count -eq 2 -and (@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG) -join '|') -ceq 'steamcmd 100 1.2.4|steamcmd 100 1.3.0') "Replays through other paths changed the record or the stores: $($entries.Count) entries, $(@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG) -join '|')"
+    } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG;Remove-Item Env:BA_STEAM_USERNAME}
+}
+Test 'a checkout folder relocated behind a link still uses its state root''s shared ledger and store-write record' {
+    $repo=New-StoreFixture 'sent-relocated'
+    $stateRoot=Join-Path $sandbox 'sent-relocated-state'
+    $env:BA_FIXTURE_UPLOAD_LOG=Join-Path $sandbox 'sent-relocated.log'
+    $env:BA_STEAM_USERNAME='fixture'
+    try {
+        $older=Invoke-ReleasePrepare $repo @('steam') $stateRoot $engine
+        $olderState=Get-Content (Join-Path $older.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $newer=New-NewerRelease $repo $stateRoot @('steam') 'sent-relocated-newer'
+        # The game already has a record of store writes, as it will once anything was published, so nothing is seeded.
+        $sentPath=Get-SentRecordPath $stateRoot
+        New-Item -ItemType Directory -Path (Split-Path $sentPath -Parent) -Force | Out-Null
+        [IO.File]::WriteAllText($sentPath,'{}')
+        # The newer checkout's folder, with its builds, moves to another place and is linked back into the state root.
+        $checkout=Split-Path $newer.statePath -Parent
+        $relocated=Join-Path $sandbox 'sent-relocated-elsewhere'
+        New-Item -ItemType Directory -Path $relocated | Out-Null
+        Move-Item -LiteralPath $checkout -Destination $relocated
+        New-Item -ItemType $(if ($IsWindows) {'Junction'} else {'SymbolicLink'}) -Path $checkout -Target (Join-Path $relocated (Split-Path $checkout -Leaf)) | Out-Null
+        Invoke-ReleasePublish -StatePath $newer.statePath -SteamCmdExecutable $steam -ApprovedPlanId $newer.state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $newer.statePath $newer.state.plan) | Out-Null
+        $sent=Get-Content $sentPath -Raw | ConvertFrom-Json -AsHashtable
+        Assert ($sent.Contains('steam:100:default') -and @($sent['steam:100:default']).Count -eq 1) 'The relocated checkout recorded its upload outside its state root.'
+        $result=Invoke-ReleasePublish -StatePath $older.statePath -SteamCmdExecutable $steam -ApprovedPlanId $olderState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $older.statePath $olderState.plan)
+        Assert ($result.destinations.steam.status -eq 'failed' -and (@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG) -join '|') -ceq 'steamcmd 100 1.2.4') "The older release uploaded over the relocated checkout's build: $(@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG) -join '|')"
     } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG;Remove-Item Env:BA_STEAM_USERNAME}
 }

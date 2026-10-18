@@ -64,7 +64,9 @@ function Get-ReleaseShipmentReceipts($State, [string]$StatePath) {
 
 # Reads the other journals, of any checkout, that live receipts for this release's version point to, at that version now.
 function Get-ReleaseVersionStates($State, [string]$StatePath) {
-    $paths=@(Get-ReleaseVersionReceipts $State $StatePath | Where-Object {$_.entry.statePath} | ForEach-Object {Get-ReleaseStateIdentity ([string]$_.entry.statePath)} | Sort-Object -Unique)
+    # Paths differing only in case are one state only where the filesystem ignores case.
+    $seen=[Collections.Generic.HashSet[string]]::new($(if ($IsWindows) {[StringComparer]::OrdinalIgnoreCase} else {[StringComparer]::Ordinal}))
+    $paths=@(Get-ReleaseVersionReceipts $State $StatePath | Where-Object {$_.entry.statePath} | ForEach-Object {Get-ReleaseStateIdentity ([string]$_.entry.statePath)} | Where-Object {$seen.Add($_)})
     foreach ($path in $paths) {
         if (Test-ReleaseSameStatePath $path $StatePath) {continue}
         $file=Join-Path $path 'state.json'

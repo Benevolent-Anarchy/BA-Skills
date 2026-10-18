@@ -393,10 +393,22 @@ function Get-ReleaseStateRoot([string]$StateRoot) {
     return Join-Path $base 'ba-release/releases'
 }
 
-# Resolves an existing release state's directory to its physical location, so a state reached through a link to it or to
-# its state root is still one state, and the state root and shared ledger found beside it are the real ones.
+# Gives an existing release state's directory as a path inside its state root, whose shared ledger and store-write record
+# sit two folders up: the given path where it is one, as through a link to the state root or a checkout folder linked into
+# it from elsewhere; otherwise its physical location, as through a link to the state's own folder. A state inside a state
+# root sits in a folder named for its version, under one named for its checkout. A journal that cannot be read is left
+# for the mode to report.
 function Resolve-ReleaseStatePath([string]$StatePath) {
-    return (Resolve-ReleasePhysicalPath (Get-Item -LiteralPath $StatePath).FullName).TrimEnd('\','/')
+    $given=(Get-Item -LiteralPath $StatePath).FullName.TrimEnd('\','/')
+    $journal=Read-ReleaseStateObject (Join-Path $given 'state.json')
+    $plan=if ($journal) {$journal['plan']} else {$null}
+    if ($plan -isnot [Collections.IDictionary] -or $plan['repository'] -isnot [string] -or $plan['version'] -isnot [string]) {return $given}
+    $checkout=(Get-ReleaseTextHash $plan['repository']).Substring(0,20)
+    $comparison=if ($IsWindows) {[StringComparison]::OrdinalIgnoreCase} else {[StringComparison]::Ordinal}
+    foreach ($path in @($given,(Resolve-ReleasePhysicalPath $given).TrimEnd('\','/'))) {
+        if ((Split-Path $path -Leaf).Equals($plan['version'],$comparison) -and (Split-Path (Split-Path $path -Parent) -Leaf).Equals($checkout,$comparison)) {return $path}
+    }
+    throw 'This release state is not inside a state root, so its shared ledger cannot be found; pass the state path prepare returned.'
 }
 
 # Resolves linked ancestors even when the final staging directory does not exist yet.
