@@ -80,17 +80,38 @@ function Get-ReleasePublishedBoundary($Settings, [string]$Head, [string]$Version
     return @{commit=$(if ($newest.Count) {$newest[0]} else {$null});ambiguous=$null}
 }
 
+# Lists the sources a store channel's baseline can advance to: the source live on it in the shared ledger and, where its
+# store's baselineAdvancesOn is submitted, every build submitted to it and not abandoned.
+function Get-ReleaseObservedSources($Settings, $Destination, $Ledger, [string]$StateRoot) {
+    $key=Get-ReleaseStoreKey $Destination
+    if ($Ledger.Contains($key)) {$Ledger[$key].sourceCommit}
+    if ($Destination['baselineAdvancesOn'] -ceq 'submitted') {Get-ReleaseSubmittedSources (Get-ReleasePlanSourceRepository $Settings) $StateRoot $key}
+}
+
+# Picks the newest of a channel's observed sources. Publication refuses a build whose source does not contain every build
+# sent or live on its channel and not abandoned, so they lie on one line of history and the newest contains the rest.
+function Get-ReleaseNewestSource([string]$Repository, $Sources) {
+    $newest=$Sources[0]
+    foreach ($source in $Sources) {
+        if (-not $source -or $source -ceq $newest) {continue}
+        if (-not $newest -or (Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$newest,$source) $Repository).exitCode -eq 0) {$newest=$source}
+    }
+    return $newest
+}
+
 # Resolves frozen or observed channel baselines; a configured null is never replaced by a guess. A snapshot freezes the
-# channels it names, such as a prepared release's own; any other selected channel is observed in the live ledger.
+# channels it names, such as a prepared release's own; any other selected channel is observed in the live ledger and, where
+# its store's baselines advance on submission, in the record of store writes.
 function Get-ReleaseDestinationBaselines($Settings, $Destinations, [string]$Head, $Snapshot, [string]$StateRoot) {
     $observed=@($Destinations | Where-Object {$_.selected -and $_.type -ne 'notes' -and ($null -eq $Snapshot -or -not $Snapshot.Contains($_.id))})
     $ledger=if ($observed.Count) {Get-ReleaseLiveLedger $Settings.repository $StateRoot} else {@{}}
     $result=[ordered]@{}
     foreach ($destination in $Destinations) {
         if (-not $destination.selected -or $destination.type -eq 'notes') {continue}
-        $key=Get-ReleaseStoreKey $destination
-        $ref=if ($null -ne $Snapshot -and $Snapshot.Contains($destination.id)) {$Snapshot[$destination.id]}
-        elseif ($ledger.Contains($key)) {$ledger[$key].sourceCommit}
+        $frozen=$null -ne $Snapshot -and $Snapshot.Contains($destination.id)
+        $sources=@(if (-not $frozen) {Get-ReleaseObservedSources $Settings $destination $ledger $StateRoot})
+        $ref=if ($frozen) {$Snapshot[$destination.id]}
+        elseif ($sources.Count) {Get-ReleaseNewestSource $Settings.repository $sources}
         elseif ($Settings.config.Contains('destinationBaselines') -and $Settings.config.destinationBaselines.Contains($destination.id)) {$Settings.config.destinationBaselines[$destination.id]}
         else {$Settings.config.previousReleaseRef}
         $commit=$null
