@@ -267,8 +267,16 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
     $dirty = Read-ReleaseGit $Repository @('status','--porcelain=v1','--untracked-files=all')
     $shallow = Read-ReleaseGit $Repository @('rev-parse','--is-shallow-repository')
     if ($shallow -eq 'true') { $blockers.Add('Shallow history cannot establish a complete previous-release comparison.') }
+    # Only a new plan reads previousRelease. A prepared release's saved boundary is checked instead, so its ref can move
+    # or be deleted later without changing the release.
     $configured = $null
-    if ($null -ne $settings.config.previousReleaseRef) {
+    if ($PSBoundParameters.ContainsKey('FrozenPrevious')) {
+        if ($FrozenPrevious) {
+            $saved = Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'rev-parse','--verify','--quiet',"$FrozenPrevious^{commit}") $Repository
+            $ancestor = if ($saved.exitCode -eq 0 -and $saved.text.Trim() -ceq $FrozenPrevious) {Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$FrozenPrevious,$head) $Repository} else {$null}
+            if (-not $ancestor -or $ancestor.exitCode -ne 0) { throw 'The prepared release''s previous-release commit must be an exact commit that is an ancestor of HEAD.' }
+        }
+    } elseif ($null -ne $settings.config.previousReleaseRef) {
         $configured = Read-ReleaseGit $Repository @('rev-parse','--verify',"$($settings.config.previousReleaseRef)^{commit}")
         $ancestor = Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$configured,$head) $Repository
         if ($ancestor.exitCode -ne 0) { throw 'Previous release ref must be an ancestor of HEAD.' }

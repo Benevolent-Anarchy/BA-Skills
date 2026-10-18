@@ -1,4 +1,5 @@
-# Verifies that every checkout of a game shares one live ledger, and that ledgers kept per checkout before it are not read.
+# Verifies that every checkout of a game shares one live ledger, that ledgers kept per checkout before it are not read, and
+# that a prepared release keeps its boundary wherever its previousRelease ref later points.
 
 # Writes a live ledger as a checkout at $Checkout kept it before ledgers were shared: under the hash of its path, beside a state naming its game's notes repository.
 function Write-LegacyLiveLedger([string]$StateRoot, [string]$Checkout, [string]$NotesRepository, [string]$Version, [string]$Commit) {
@@ -401,4 +402,39 @@ Test 'a recovered availability refresh clears its earlier error, whether or not 
             Assert ($null -eq $recovered.destinations.notes.error -and $null -eq $saved.error) "The $recovery recovery kept the earlier refresh error: $($recovered.destinations.notes.error) / $($saved.error)"
         }
     } finally {if ($journal -and (Test-Path -LiteralPath "$journal.away")) {Move-Item -LiteralPath "$journal.away" -Destination $journal};Remove-Item Env:BA_FIXTURE_NOTE_STORE}
+}
+Test 'a prepared release keeps its boundary after previousRelease moves past its source, away from it or is deleted' {
+    $repo=New-Fixture 'frozen-boundary'
+    $stateRoot=Join-Path $sandbox 'frozen-boundary-state'
+    $original=Invoke-FixtureGit $repo @('rev-parse','v1.2.2')
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows') $stateRoot $engine
+    $state=Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+    # Commits beside the checked-out branch: one descends from the prepared source, the other diverges from it.
+    $later=Invoke-FixtureGit $repo @('commit-tree','HEAD^{tree}','-p','HEAD','-m','Later work')
+    $divergent=Invoke-FixtureGit $repo @('commit-tree',"$original^{tree}",'-p',$original,'-m','Divergent work')
+    $moves=[ordered]@{
+        'moved past the source'={Invoke-FixtureGit $repo @('tag','--force','v1.2.2',$later) | Out-Null}
+        'moved away from the source'={Invoke-FixtureGit $repo @('tag','--force','v1.2.2',$divergent) | Out-Null}
+        'deleted'={Invoke-FixtureGit $repo @('tag','--delete','v1.2.2') | Out-Null}
+    }
+    foreach ($move in $moves.Keys) {
+        & $moves[$move]
+        Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot -VersionChange patch} 'ancestor|rev-parse'
+        $frozen=Get-ReleasePlan $repo @('itch-windows') $state.plan.baselines $stateRoot -FrozenPrevious $state.plan.previousCommit
+        Assert ($frozen.ready -and $frozen.planId -ceq $state.plan.planId -and $frozen.previousCommit -ceq $original) "With previousRelease $move, the prepared plan changed: $($frozen.previousCommit) $($frozen.blockers -join ' ')"
+        $retry=Invoke-ReleasePrepare $repo @('itch-windows') $stateRoot $engine
+        Assert ($retry.status -eq 'prepared' -and $retry.statePath -eq $prepared.statePath -and $retry.planId -ceq $state.plan.planId) "With previousRelease $move, preparation did not resume the release: $($retry.status)"
+    }
+    # Only the saved commit itself can stand as the boundary.
+    Expect-Error {Get-ReleasePlan $repo @('itch-windows') $state.plan.baselines $stateRoot -FrozenPrevious $later} 'previous-release commit'
+    Expect-Error {Get-ReleasePlan $repo @('itch-windows') $state.plan.baselines $stateRoot -FrozenPrevious 'main~1'} 'previous-release commit'
+    # With the ref gone, an added channel takes its baseline from the live ledger; the release keeps its own boundary.
+    Write-SharedLedger $stateRoot @{'itch:example/real-game:linux'=@{sourceCommit=$original;version='1.2.2';statePath=(Join-Path $stateRoot 'earlier/1.2.2');destination='itch-linux';observedAt=[DateTimeOffset]::UtcNow.ToString('o')}}
+    $extended=Expand-ReleaseDestinations $prepared.statePath @('itch-linux') $engine
+    $state=Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+    Assert ($extended.status -eq 'prepared' -and $state.plan.previousCommit -ceq $original -and $state.plan.baselines['itch-linux'] -ceq $original) "Extension without the ref did not keep the boundary: $($extended.status) $($state.plan.previousCommit)"
+    $env:BA_FIXTURE_ALLOW_LINUX='1'
+    try {$published=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)}
+    finally {Remove-Item Env:BA_FIXTURE_ALLOW_LINUX}
+    Assert ($published.status -eq 'published') "Publication without the ref failed: $($published.status)"
 }

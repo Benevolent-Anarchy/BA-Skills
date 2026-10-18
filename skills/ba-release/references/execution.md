@@ -163,6 +163,15 @@ lock. HEAD, config bytes, version, previous-release commit and sorted selection
 identify the plan. A different plan for the same version is refused; resolve it
 explicitly instead of bumping a version to retry. Do not edit state.json by hand.
 
+Only a new plan reads `previousRelease`, which must then resolve to an ancestor
+of its source. Once prepared, retries, extension and publication check the saved
+previous-release commit instead: it must still be that exact commit and an
+ancestor of the source. Moving the ref past the source or away from it, or
+deleting it, changes neither the boundary nor the plan's identity. A destination
+that `extend` adds still reads its own baseline afresh: from the live ledger,
+else its store's or channel's `previousRelease` override, else the root one; a
+ref it reads that way must still resolve.
+
 That directory, and the version reservation beside it, belong to one checkout.
 The live ledger does not: `repositories/<id>/live.json` under the state root
 holds it for the game's GitHub repository, as its origin names it, so every
