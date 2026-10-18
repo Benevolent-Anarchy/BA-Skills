@@ -2,7 +2,7 @@
 #requires -Version 7.3
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('setup','validate','doctor','plan','prepare','extend','hold','unhold','publish','status','confirm')][string]$Mode,
+    [Parameter(Mandatory)][ValidateSet('setup','validate','doctor','plan','prepare','extend','hold','unhold','publish','status','confirm','abandon')][string]$Mode,
     [string]$Repository,
     [string[]]$Destination = @(),
     [string]$StateRoot,
@@ -27,7 +27,8 @@ param(
     [switch]$PlayTrackReviewed,
     [switch]$RetryUncertain,
     [switch]$ReplacePlayEdit,
-    [switch]$MigrateConfiguration
+    [switch]$MigrateConfiguration,
+    [switch]$AbandonAuthorized
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Release.psm1') -Force
@@ -44,9 +45,10 @@ try {
     if ($Mode -eq 'unhold' -and $PSBoundParameters.ContainsKey('HoldReason')) {throw '-HoldReason cannot be supplied to unhold.'}
     if ($PlayTrackReviewed -and $Mode -ne 'unhold') {throw '-PlayTrackReviewed applies only to unhold.'}
     if ($MigrateConfiguration -and $Mode -ne 'extend') {throw '-MigrateConfiguration applies only to extend.'}
+    if ($AbandonAuthorized -and $Mode -ne 'abandon') {throw '-AbandonAuthorized applies only to abandon.'}
     if ($Mode -in @('setup','validate','doctor','plan','prepare') -and -not $Repository) { throw '-Repository must name the inspected game Git root.' }
-    if ($Mode -in @('extend','hold','unhold','publish','status','confirm') -and -not $StatePath) { throw '-StatePath must name an existing prepared release.' }
-    if ($Mode -eq 'confirm' -and -not $ReceiptPath) {throw '-ReceiptPath must name an actual observed store result.'}
+    if ($Mode -in @('extend','hold','unhold','publish','status','confirm','abandon') -and -not $StatePath) { throw '-StatePath must name an existing prepared release.' }
+    if ($Mode -in @('confirm','abandon') -and -not $ReceiptPath) {throw '-ReceiptPath must name an actual observed store result.'}
     switch ($Mode) {
         'setup' {
             $report=Get-ReleaseSetup $Repository $selected
@@ -108,6 +110,9 @@ try {
             $result=Confirm-ReleaseStoreCompletion -StatePath $StatePath -ReceiptPath $ReceiptPath
             $result | ConvertTo-Json -Depth 30
             if ($result.status -ne 'published') {exit 3}
+        }
+        'abandon' {
+            Confirm-ReleaseAbandonment -StatePath $StatePath -ReceiptPath $ReceiptPath -Authorized:$AbandonAuthorized | ConvertTo-Json -Depth 30
         }
     }
 } catch {

@@ -15,6 +15,7 @@ are passed after the script path. Comma-separated destination IDs work with
 -Mode unhold -StatePath <prepared-state-directory> -Destination google-play -PlayTrackReviewed
 -Mode publish -StatePath <prepared-state-directory> -ApprovedPlanId <displayed-id> -ApprovedNotesSha256 <displayed-notes-hash>
 -Mode confirm -StatePath <prepared-state-directory> -ReceiptPath <observed-store-receipt.json>
+-Mode abandon -StatePath <prepared-state-directory> -ReceiptPath <observed-abandonment.json> -AbandonAuthorized
 ```
 
 `validate` checks schema and actual project files. `plan` emits JSON to stdout and
@@ -291,7 +292,13 @@ Beside the live ledger, `repositories/<id>/sent.json` records every build any
 checkout has started sending to each store channel, live or not, such as a Steam
 build awaiting activation or a Play edit in review. Publication records a build
 there as it starts each store attempt, and takes the entry back only if the
-attempt failed before reaching the store.
+attempt failed before reaching the store. A replay records a store write its
+release already made, without making it again. A game that has no `sent.json`
+yet, such as one released before it existed, gets one built from every release
+journal under the state root. A journal that cannot be read stops that
+publication, naming the journal by its place under the state root. The only
+exception is when the other journals of its checkout name a different game.
+Repair or remove the journal, then retry.
 
 Before any store write, publication reads that channel's row in the live ledger
 and its entries in `sent.json`. If any of them comes from a source this build's
@@ -299,7 +306,21 @@ source does not contain, or that this checkout cannot show it contains, the
 destination fails with nothing sent and nothing recorded, and its error names
 that version. An interrupted attempt refused this way stays `uncertain`.
 Replacing a newer release with an older one needs explicit reconciliation, never
-a retry. Other channels proceed. Publication holds the game's ledger lock from
+a retry. Other channels proceed.
+
+A build that was sent but never went live, and that the user has decided to
+abandon, is reconciled from the release state that sent it:
+`-Mode abandon -StatePath <that state> -ReceiptPath <observed.json> -AbandonAuthorized`.
+First inspect the store console and confirm the build is not live and will not
+be made live; take the receipt shapes from [store operations](stores.md#abandoning-an-upload-that-never-went-live).
+Then obtain the user's explicit authorization, since abandoning lets a release
+that does not contain that build replace it. Without `-AbandonAuthorized` the
+mode checks the receipt and records nothing. The receipt must name the release's
+approved plan and the exact recorded attempt. That destination becomes
+`abandoned`, keeping its attempts and remote evidence. Its `sent.json` entries
+are marked, not removed, and the channel check passes over them. The mode never
+calls a store. A live release is never abandoned: only a newer one replaces it.
+Publication holds the game's ledger lock from
 its first channel check to its last receipt, and records each channel an upload
 makes live as soon as that result is saved.
 Meanwhile another checkout publishing under the same state root stops before any
@@ -339,6 +360,7 @@ separate staging folder for inspection; only successful manifests can publish.
 | `submitted` | Play edit committed; review/managed publishing/rollout still needs verification. |
 | `failed` | The attempt failed; other destinations retain their own results. |
 | `uncertain` | An external operation was interrupted; its remote outcome needs inspection. |
+| `abandoned` | A build sent but never live, recorded abandoned with authorization; no further operations occur. |
 
 An interrupted `in-progress` operation becomes `uncertain` on resume and is not
 automatically repeated. Inspect the remote channel/file before deciding whether
@@ -352,8 +374,9 @@ untested runtime behavior. Steam/Play uploads remain separate from observed live
 activation/review completion.
 
 Overall status is `prepared`, `preparation-failed`, `published`, `on-hold`, `submitted`,
-`needs-store-action`, `partial-failure`, `publication-failed`, or
-`needs-reconciliation`, or `awaiting-release`. Report the
+`needs-store-action`, `partial-failure`, `publication-failed`,
+`needs-reconciliation`, `awaiting-release`, or `abandoned` when every selected
+destination was abandoned; otherwise abandoned destinations do not affect it. Report the
 individual destinations and errors alongside that status. Never convert a
 partial failure into a whole-release success claim.
 

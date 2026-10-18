@@ -545,3 +545,124 @@ Test 'an older build is refused where a newer Steam build or Play edit was sent 
         }
     } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG;Remove-Item Env:BA_STEAM_USERNAME -ErrorAction SilentlyContinue}
 }
+
+# Gives the path of the fixture game's record of store writes under $StateRoot.
+function Get-SentRecordPath([string]$StateRoot) {
+    return Join-Path (Split-Path (Get-SharedLedgerPath $StateRoot) -Parent) 'sent.json'
+}
+
+# Prepares $Stores at a reserved newer version in a new worktree named $Name, branched from $Repo's current commit, and
+# returns its state.
+function New-NewerRelease([string]$Repo, [string]$StateRoot, [string[]]$Stores, [string]$Name, [string]$VersionChange='patch') {
+    $worktree=Join-Path $sandbox $Name
+    Invoke-FixtureGit $Repo @('worktree','add','--quiet','-b',$Name,$worktree) | Out-Null
+    Invoke-ReleasePrepare $worktree $Stores $StateRoot $engine -VersionChange $VersionChange | Out-Null
+    Invoke-FixtureGit $worktree @('add','project.godot') | Out-Null
+    Invoke-FixtureGit $worktree @('commit','--quiet','-m',"Reserve the $Name version") | Out-Null
+    $prepared=Invoke-ReleasePrepare $worktree $Stores $StateRoot $engine -VersionChange $VersionChange
+    return @{statePath=$prepared.statePath;state=(Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable)}
+}
+
+Test 'builds sent before the store-write record existed stop an older release, before and after the newer one is replayed' {
+    $repo=New-StoreFixture 'sent-upgrade'
+    $stateRoot=Join-Path $sandbox 'sent-upgrade-state'
+    $env:BA_FIXTURE_UPLOAD_LOG=Join-Path $sandbox 'sent-upgrade.log'
+    $env:BA_STEAM_USERNAME='fixture'
+    try {
+        $stores=@('steam','google-play')
+        $older=Invoke-ReleasePrepare $repo $stores $stateRoot $engine
+        $olderState=Get-Content (Join-Path $older.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $olderApproval=@{ApprovedPlanId=$olderState.plan.planId;ApprovedNotesSha256=(Get-ReleaseNotesHash $older.statePath $olderState.plan)}
+        $newer=New-NewerRelease $repo $stateRoot $stores 'sent-upgrade-newer'
+        $newerApi=New-PlayServer;$newerApi.server.version='1.2.4'
+        Invoke-ReleasePublish -StatePath $newer.statePath -SteamCmdExecutable $steam -PlayTransport $newerApi.handler -ApprovedPlanId $newer.state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $newer.statePath $newer.state.plan) | Out-Null
+        # A release published before the store-write record existed left nothing in it.
+        $sentPath=Get-SentRecordPath $stateRoot
+        Remove-Item -LiteralPath $sentPath
+        $olderApi=New-PlayServer
+        $before=Invoke-ReleasePublish -StatePath $older.statePath -SteamCmdExecutable $steam -PlayTransport $olderApi.handler @olderApproval
+        $sent=Get-Content $sentPath -Raw | ConvertFrom-Json -AsHashtable
+        Assert (@($sent['steam:100:default'] | Where-Object {$_.version -eq '1.2.4'}).Count -eq 1 -and @($sent['play:com.example.realgame:production'] | Where-Object {$_.version -eq '1.2.4'}).Count -eq 1) "The record was not seeded from the newer release's journal: $($sent.Keys -join ', ')"
+        # A record that exists without the newer release's builds gets them when it is replayed, with nothing sent again.
+        [IO.File]::WriteAllText($sentPath,'{}')
+        Invoke-ReleasePublish -StatePath $newer.statePath -SteamCmdExecutable $steam -PlayTransport $newerApi.handler | Out-Null
+        $sent=Get-Content $sentPath -Raw | ConvertFrom-Json -AsHashtable
+        Assert (@($sent['steam:100:default']).Count -eq 1 -and @($sent['play:com.example.realgame:production']).Count -eq 1 -and $newerApi.server.uploads -eq 1 -and $newerApi.server.commits -eq 1) "Replaying the newer release did not record its builds without sending them again: $($sent.Keys -join ', ')"
+        $after=Invoke-ReleasePublish -StatePath $older.statePath -SteamCmdExecutable $steam -PlayTransport $olderApi.handler
+        $uploads=@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG)
+        Assert (($uploads -join '|') -ceq 'steamcmd 100 1.2.4' -and $olderApi.server.calls.Count -eq 0) "The older release reached a store: $($uploads -join '|') $($olderApi.server.calls.Count) Play calls"
+        foreach ($result in @($before,$after)) {
+            foreach ($id in $stores) {
+                Assert ($result.destinations[$id].status -eq 'failed' -and $result.destinations[$id].attempts -eq 0 -and $result.destinations[$id].error -match 'Version 1\.2\.4 has been sent to') "$id was not refused: $($result.destinations[$id].status) $($result.destinations[$id].error)"
+            }
+        }
+    } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG;Remove-Item Env:BA_STEAM_USERNAME}
+}
+Test 'a journal that cannot be read stops the store-write record being seeded, unless its checkout is another game''s' {
+    $repo=New-Fixture 'sent-damaged-journal'
+    $stateRoot=Join-Path $sandbox 'sent-damaged-journal-state'
+    $env:BA_FIXTURE_UPLOAD_LOG=Join-Path $sandbox 'sent-damaged-journal.log'
+    try {
+        $prepared=Invoke-ReleasePrepare $repo @('itch-windows') $stateRoot $engine
+        $state=Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $damaged=Join-Path $stateRoot 'another-checkout/1.0.0'
+        New-Item -ItemType Directory -Path $damaged -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $damaged 'state.json'),'{ not json')
+        $place=[IO.Path]::GetRelativePath($stateRoot,(Join-Path $damaged 'state.json')).Replace('\','/')
+        Expect-Error {Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)} ([regex]::Escape($place))
+        Assert (-not (Test-Path -LiteralPath $env:BA_FIXTURE_UPLOAD_LOG) -and -not (Test-Path -LiteralPath (Get-SentRecordPath $stateRoot))) 'A store was written while a journal that may record a sent build could not be read.'
+        # Its checkout's other journal names another game, so the damaged one cannot hold this game's builds.
+        $other=Join-Path $stateRoot 'another-checkout/0.9.0'
+        New-Item -ItemType Directory -Path $other -Force | Out-Null
+        Write-Json (Join-Path $other 'state.json') @{plan=@{notesRepository='Example/Other-Game-release-notes';version='0.9.0';destinations=@()};destinations=@{}}
+        $published=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler
+        Assert ($published.status -eq 'published' -and (@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG) -join '|') -ceq 'butler example/real-game:windows 1.2.3') "Another game's damaged journal stopped this one: $($published.status)"
+    } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG}
+}
+Test 'an abandoned upload that never went live is recorded only with authorization, and then a divergent release can be sent' {
+    $repo=New-StoreFixture 'sent-abandoned'
+    $stateRoot=Join-Path $sandbox 'sent-abandoned-state'
+    $env:BA_FIXTURE_UPLOAD_LOG=Join-Path $sandbox 'sent-abandoned.log'
+    $env:BA_STEAM_USERNAME='fixture'
+    try {
+        $stores=@('steam','google-play')
+        $candidate=New-NewerRelease $repo $stateRoot $stores 'sent-abandoned-candidate'
+        $candidateApi=New-PlayServer;$candidateApi.server.version='1.2.4'
+        Invoke-ReleasePublish -StatePath $candidate.statePath -SteamCmdExecutable $steam -PlayTransport $candidateApi.handler -ApprovedPlanId $candidate.state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $candidate.statePath $candidate.state.plan) | Out-Null
+        # Mainline reserves a later version from a source without the candidate's reservation.
+        Invoke-ReleasePrepare $repo $stores $stateRoot $engine -VersionChange minor | Out-Null
+        Invoke-FixtureGit $repo @('add','project.godot') | Out-Null
+        Invoke-FixtureGit $repo @('commit','--quiet','-m','Reserve the mainline version') | Out-Null
+        $mainline=Invoke-ReleasePrepare $repo $stores $stateRoot $engine -VersionChange minor
+        $mainlineState=Get-Content (Join-Path $mainline.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $mainlineApi=New-PlayServer;$mainlineApi.server.version='1.3.0'
+        $refused=Invoke-ReleasePublish -StatePath $mainline.statePath -SteamCmdExecutable $steam -PlayTransport $mainlineApi.handler -RetryUncertain -ApprovedPlanId $mainlineState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $mainline.statePath $mainlineState.plan)
+        foreach ($id in $stores) {Assert ($refused.destinations[$id].status -eq 'failed' -and $refused.destinations[$id].error -match 'abandon') "$id was not refused with how to reconcile it: $($refused.destinations[$id].error)"}
+        $now=[DateTimeOffset]::UtcNow.ToString('o')
+        $receipts=@{
+            steam=@{destination='steam';planId=$candidate.state.plan.planId;observedAt=$now;live=$false;appId=100;buildId='999';branch='default';evidenceUrl='https://partner.steamgames.com/apps/builds/100'}
+            'google-play'=@{destination='google-play';planId=$candidate.state.plan.planId;observedAt=$now;live=$false;packageName='com.example.realgame';versionCode=12;track='production';evidenceUrl='https://play.google.com/console'}
+        }
+        # Another build than the recorded one, or no authorization, records nothing.
+        $wrong=$receipts.steam.Clone();$wrong.buildId='998'
+        Write-Json (Join-Path $candidate.statePath 'steam-wrong.json') $wrong
+        Expect-Error {Confirm-ReleaseAbandonment $candidate.statePath (Join-Path $candidate.statePath 'steam-wrong.json') -Authorized} 'buildId'
+        foreach ($id in $stores) {
+            Write-Json (Join-Path $candidate.statePath "$id-abandoned.json") $receipts[$id]
+            Expect-Error {Confirm-ReleaseAbandonment $candidate.statePath (Join-Path $candidate.statePath "$id-abandoned.json")} 'AbandonAuthorized'
+        }
+        $still=Invoke-ReleasePublish -StatePath $mainline.statePath -SteamCmdExecutable $steam -PlayTransport $mainlineApi.handler
+        Assert (@($stores | Where-Object {$still.destinations[$_].status -ne 'failed'}).Count -eq 0 -and $mainlineApi.server.calls.Count -eq 0) 'An unauthorized abandonment let the divergent release through.'
+        foreach ($id in $stores) {Confirm-ReleaseAbandonment $candidate.statePath (Join-Path $candidate.statePath "$id-abandoned.json") -Authorized | Out-Null}
+        $abandoned=Get-Content (Join-Path $candidate.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        Assert ($abandoned.status -eq 'abandoned' -and $abandoned.destinations.steam.status -eq 'abandoned' -and $abandoned.destinations.steam.remote.buildId -eq '999' -and $abandoned.destinations.steam.attempts -eq 1 -and $abandoned.destinations['google-play'].remote.Contains('editId')) "The abandonment did not keep the attempt's evidence: $($abandoned.status)"
+        $sent=Get-Content (Get-SentRecordPath $stateRoot) -Raw | ConvertFrom-Json -AsHashtable
+        Assert (@(@($sent['steam:100:default'])+@($sent['play:com.example.realgame:production']) | Where-Object {$_.version -eq '1.2.4' -and $_.abandoned}).Count -eq 2) 'The abandoned builds were not kept, marked, in the record of store writes.'
+        $published=Invoke-ReleasePublish -StatePath $mainline.statePath -SteamCmdExecutable $steam -PlayTransport $mainlineApi.handler
+        Assert ($published.destinations.steam.status -eq 'awaiting-store-action' -and $published.destinations['google-play'].status -eq 'submitted') "The divergent release did not publish once the candidate was abandoned: $($published.destinations.steam.error) $($published.destinations['google-play'].error)"
+        # The abandoned release sends nothing again.
+        $replay=Invoke-ReleasePublish -StatePath $candidate.statePath -SteamCmdExecutable $steam -PlayTransport $candidateApi.handler
+        $uploads=@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG)
+        Assert (($uploads -join '|') -ceq 'steamcmd 100 1.2.4|steamcmd 100 1.3.0' -and $candidateApi.server.uploads -eq 1 -and $replay.status -eq 'abandoned') "The uploads were not exactly the candidate's and then the mainline's: $($uploads -join '|') $($replay.status)"
+    } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG;Remove-Item Env:BA_STEAM_USERNAME}
+}
