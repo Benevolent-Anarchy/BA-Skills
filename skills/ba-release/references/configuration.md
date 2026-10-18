@@ -86,14 +86,7 @@ Inspect actual Steamworks build files to map depots to exports. There is one
 `steam` operation per app, retaining its build ID and separate activation and
 public-announcement steps. A build description is internal metadata.
 
-**Google Play:** configure `export` using a signed Gradle AAB alias, `track`,
-`releaseStatus`, `language` and `retainVersionCodes`. Unknown facts may be `null`;
-they block only selected Play releases. Status is `draft`, `completed` or
-`inProgress`. Only `inProgress` uses optional `userFraction`, strictly between
-zero and one. `language` is the project's verified BCP-47 notes locale.
-`retainVersionCodes` is an explicit array of existing code strings; `[]` retains
-none. Inspect the track first because its update replaces releases. Use one
-edit/track per app per plan. Package name and code come from the preset.
+**Google Play:** configure `export` using a signed Gradle AAB alias, `track`, `releaseStatus`, `language` and `retainVersionCodes`. Unknown facts may be `null`; they block only selected Play releases. Status is `draft`, `completed` or `inProgress`. Only `inProgress` uses optional `userFraction`, strictly between zero and one. `language` is the project's verified BCP-47 notes locale. `retainVersionCodes` is an explicit array of existing code strings; `[]` retains none. Inspect the track first because its update replaces releases. Use one edit/track per app per plan. Package name and code come from the preset. Optional `baselineAdvancesOn` says what moves the Play channel's baseline: `live`, the default when it is left out, moves it only when a release is confirmed live there; `submitted` also moves it when an edit is committed for review rather than as a draft, for a game that treats a submission as the end of its release work. It moves nothing else; see [Baselines and source metadata](#baselines-and-source-metadata). Other stores do not take it.
 
 **Public notes:** `"notes": true` makes `notes` available for explicit selection.
 Its repository is derived from the configured GitHub origin as
@@ -115,22 +108,9 @@ with an inspected script, or the plan blocks; it runs on the export as built.
 
 ## Baselines and source metadata
 
-Each store may override `previousRelease`; an itch channel may override it again.
-Omission inherits the enclosing baseline. Explicit `null` remains unknown and
-never falls back. The live ledger tracks destination/channel history separately,
-for every checkout of the game that shares a state root, and supplies subsequent baselines,
-including stores that skipped versions. Null
-does not mean publish all development history. First-ever releases need a
-reviewed baseline policy.
+Each store may override `previousRelease`; an itch channel may override it again. Omission inherits the enclosing baseline. Explicit `null` remains unknown and never falls back. The live ledger tracks destination/channel history separately, for every checkout of the game that shares a state root, and supplies subsequent baselines, including stores that skipped versions. A Google Play channel whose `baselineAdvancesOn` is `submitted` also counts every build submitted to it and not abandoned, from the record of store writes beside the ledger (see [execution and recovery](execution.md)), and takes the newest of those and its live source. Null does not mean publish all development history. First-ever releases need a reviewed baseline policy.
 
-The canonical notes, and the plan's top-level `previousCommit`, `changes` and
-`changedFiles`, count from the newest of the root `previousRelease` and every
-source the ledger records live for another version, on any channel, among the
-selected source's ancestors. Each store's own catch-up range still runs from
-its channel baseline. Two recorded sources that neither contains block the plan
-as ambiguous until `previousRelease` names a commit containing both. A prepared
-release keeps the boundary it was prepared with, even after its ref moves or is
-deleted.
+The canonical notes, and the plan's top-level `previousCommit`, `changes` and `changedFiles`, count from the newest of the root `previousRelease` and every source the ledger records live for another version, on any channel, among the selected source's ancestors. A submission never moves that boundary, whatever `baselineAdvancesOn` says. Each store's own catch-up range still runs from its channel baseline. Two recorded sources that neither contains block the plan as ambiguous until `previousRelease` names a commit containing both. A prepared release keeps the boundary it was prepared with, even after its ref moves or is deleted.
 
 Paths resolve inside the repository, including link ancestors. Nested Godot
 export paths may use `..` only when they stay inside the Git root. Do not commit

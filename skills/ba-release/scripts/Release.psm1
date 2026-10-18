@@ -184,7 +184,7 @@ function Get-ReleaseConfiguration([string]$Repository, $Configuration = $null) {
     $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $uploadTargets = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($destination in $config.destinations) {
-        Assert-ReleaseFields $destination @('id','type','preset','target','ignore','appId','branch','depots','track','releaseStatus','userFraction','language','retainVersionCodes','displayNameTemplate') @('id','type') 'destination'
+        Assert-ReleaseFields $destination @('id','type','preset','target','ignore','appId','branch','depots','track','releaseStatus','userFraction','language','retainVersionCodes','baselineAdvancesOn','displayNameTemplate') @('id','type') 'destination'
         if ($destination.id -isnot [string] -or $destination.id -notmatch '^[a-z][a-z0-9-]*$' -or -not $ids.Add($destination.id)) { throw 'Destination IDs must be distinct lowercase identifiers.' }
         if ($destination.type -eq 'itch') {
             Assert-ReleaseFields $destination @('id','type','preset','target','ignore','displayNameTemplate') @('id','type','preset','target','ignore') 'itch destination'
@@ -209,8 +209,9 @@ function Get-ReleaseConfiguration([string]$Repository, $Configuration = $null) {
             }
             if (-not $uploadTargets.Add("steam:$($destination.appId)")) { throw 'Duplicate Steam app destination.' }
         } elseif ($destination.type -eq 'google-play') {
-            Assert-ReleaseFields $destination @('id','type','preset','track','releaseStatus','userFraction','language','retainVersionCodes') @('id','type','preset','track','releaseStatus','userFraction','language','retainVersionCodes') 'Google Play destination'
+            Assert-ReleaseFields $destination @('id','type','preset','track','releaseStatus','userFraction','language','retainVersionCodes','baselineAdvancesOn') @('id','type','preset','track','releaseStatus','userFraction','language','retainVersionCodes') 'Google Play destination'
             if ($destination.preset -cnotin $config.exports -or @($presets | Where-Object {$_.name -ceq $destination.preset})[0]['format'] -ne 'aab') { throw 'Google Play requires a configured Android AAB preset.' }
+            if ($destination.Contains('baselineAdvancesOn') -and $destination.baselineAdvancesOn -cnotin @('live','submitted')) { throw 'Google Play baselineAdvancesOn must be live or submitted.' }
             if ($null -ne $destination.track -and ($destination.track -isnot [string] -or $destination.track -notmatch '^[A-Za-z0-9_.-]+$')) { throw 'Google Play track must be null or an explicit track name.' }
             if ($null -ne $destination.releaseStatus -and $destination.releaseStatus -cnotin @('draft','completed','inProgress')) { throw 'Google Play releaseStatus must be null, draft, completed or inProgress.' }
             if ($destination.releaseStatus -ceq 'inProgress') {
@@ -303,9 +304,12 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
             if ($record.selected -and $null -eq $item.branch) { $record.status='blocked'; $blockers.Add("$($item.id): Steam branch is unconfirmed.") }
         } elseif ($item.type -eq 'google-play') {
             foreach ($key in @('preset','track','releaseStatus','userFraction','language','retainVersionCodes')) { $record[$key]=$item[$key] }
+            if ($item.Contains('baselineAdvancesOn')) {$record.baselineAdvancesOn=$item.baselineAdvancesOn}
             $android=@($settings.presets | Where-Object {$_.name -ceq $item.preset})[0]
             $record.packageName=$android.packageName; $record.versionCode=$android.versionCode
-            $record.requiredActions=@('Review all current Play track releases before approving retained version codes.','Verify review, managed publishing and rollout state in Play Console after submission.')
+            $record.requiredActions=@('Review all current Play track releases before approving retained version codes.')
+            # A game whose baselines advance on submission ends its release work there, so no console check after it is owed.
+            if ($item['baselineAdvancesOn'] -cne 'submitted') {$record.requiredActions+=@('Verify review, managed publishing and rollout state in Play Console after submission.')}
             if ($record.selected) {
                 foreach ($key in @('track','releaseStatus','language','retainVersionCodes')) {
                     if ($null -eq $item[$key]) { $record.status='blocked'; $blockers.Add("$($item.id): Google Play $key is unconfirmed.") }
@@ -726,6 +730,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             if ($record.status -in @('held','abandoned')) {continue}
             # A replay records a store write this release already made, without making it again.
             if ($destination.type -ne 'notes' -and (Test-ReleaseStoreWriteStarted $record)) {Add-ReleaseSentReceipt $StatePath $state $destination (Get-ReleaseRecordSource $state.plan $record) | Out-Null}
+            if ($destination.type -eq 'google-play' -and $record.status -eq 'submitted') {Set-ReleaseSentSubmitted $StatePath $state $destination}
             if ($destination.type -eq 'notes') {
                 if (-not (Test-ReleaseShipped $state $StatePath)) {$record.status='awaiting-release';$record.error=$null;Write-ReleaseJson $stateFile $state;continue}
                 if ($record.status -eq 'succeeded') {
@@ -810,6 +815,8 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             Write-ReleaseJson $stateFile $state
             # An attempt that failed before its first store operation sent nothing, so it takes back its store-write entry.
             if ($sentNow -and $record.status -eq 'failed' -and -not (Test-ReleaseStoreWriteStarted $record)) {Remove-ReleaseSentReceipt $StatePath $state $destination}
+            # A Play edit committed for review is recorded as submitted at once, for a store whose baselines advance on it.
+            if ($destination.type -eq 'google-play' -and $record.status -eq 'submitted') {Set-ReleaseSentSubmitted $StatePath $state $destination}
             # A channel this upload made live is recorded at once, so a later check elsewhere sees it even if this run stops.
             if ($record.remote.Contains('live') -and $record.remote.live -eq $true) {Save-ReleaseLiveReceipts $StatePath $state @($destination.id)}
         }

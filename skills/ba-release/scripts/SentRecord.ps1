@@ -85,10 +85,17 @@ function Test-ReleaseSentEntryOf($Entry, [string]$StatePath, [string]$Id) {
 # in review. A journal that cannot be read, or that lacks a record seeding needs, stops this, naming it, rather than being
 # read as proof that nothing was sent, unless the other journals of its checkout show the checkout belongs to another game.
 function Get-ReleaseSentSeed([string]$StatePath, $State) {
-    $root=Split-Path (Split-Path $StatePath -Parent) -Parent
-    $game=(Get-ReleasePlanSourceRepository $State.plan).ToLowerInvariant()
+    return Get-ReleaseGameSentSeed (Split-Path (Split-Path $StatePath -Parent) -Parent) (Get-ReleasePlanSourceRepository $State.plan)
+}
+
+# Builds the first record of store writes for the game with GitHub repository $SourceRepository from every journal under
+# state root $Root, as Get-ReleaseSentSeed describes; a root holding no journals yet gives an empty record. A Play edit a
+# journal records as submitted is marked so, as Set-ReleaseSentSubmitted marks one at publication.
+function Get-ReleaseGameSentSeed([string]$Root, [string]$SourceRepository) {
+    $game=$SourceRepository.ToLowerInvariant()
     $seededAt=[DateTimeOffset]::UtcNow.ToString('o')
     $sent=[ordered]@{}
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {return $sent}
     foreach ($checkout in @(Get-ChildItem -LiteralPath $root -Directory -Force | Where-Object {$_.Name -cne 'repositories'} | Sort-Object Name -CaseSensitive)) {
         $journals=@(foreach ($folder in @(Get-ChildItem -LiteralPath $checkout.FullName -Directory -Force | Sort-Object Name -CaseSensitive)) {
             $path=Join-Path $folder.FullName 'state.json'
@@ -112,6 +119,7 @@ function Get-ReleaseSentSeed([string]$StatePath, $State) {
                 $key=Get-ReleaseStoreKey $destination
                 $entry=[ordered]@{sourceCommit=(Get-ReleaseRecordSource $plan $record);version=$plan['version'];planId=[string]$plan['planId'];statePath=(Split-Path $journal.path -Parent);destination=$destination['id'];seededAt=$seededAt}
                 if ($record['remote'] -is [Collections.IDictionary] -and $record['remote']['abandonment']) {$entry.abandoned=$record['remote']['abandonment']}
+                if ($destination['type'] -eq 'google-play' -and $record['status'] -ceq 'submitted') {$entry.submittedAt=$seededAt}
                 $sent[$key]=@(if ($sent.Contains($key)) {$sent[$key]})+@($entry)
             }
         }
@@ -147,6 +155,31 @@ function Add-ReleaseSentReceipt([string]$StatePath, $State, $Destination, [strin
     $sent[$key]=@($entries)+@([ordered]@{sourceCommit=$SourceCommit;version=$State.plan.version;planId=$State.plan.planId;statePath=$StatePath;destination=$Destination.id;sentAt=[DateTimeOffset]::UtcNow.ToString('o')})
     Write-ReleaseJson (Get-ReleaseSentPath $StatePath $State) $sent
     return $true
+}
+
+# Marks, under the ledger lock the caller holds, this release state's entry for $Destination as submitted: a Play edit
+# committed for review rather than kept as a draft. Planning counts it as the channel's baseline where the store's
+# baselineAdvancesOn is submitted; nothing reads it as live.
+function Set-ReleaseSentSubmitted([string]$StatePath, $State, $Destination) {
+    $sent=Read-ReleaseSentRecord $StatePath $State
+    $key=Get-ReleaseStoreKey $Destination
+    $unmarked=@(@(if ($sent.Contains($key)) {$sent[$key]}) | Where-Object {(Test-ReleaseSentEntryOf $_ $StatePath $Destination.id) -and -not $_['submittedAt']})
+    if (-not $unmarked.Count) {return}
+    foreach ($entry in $unmarked) {$entry['submittedAt']=[DateTimeOffset]::UtcNow.ToString('o')}
+    Write-ReleaseJson (Get-ReleaseSentPath $StatePath $State) $sent
+}
+
+# Lists, writing nothing, the source of every build of the game with GitHub repository $SourceRepository submitted to store
+# channel $Key and not since abandoned. It reads the record of store writes under $StateRoot, or the journals there where
+# that record has not been written yet; a damaged record stops, naming the file.
+function Get-ReleaseSubmittedSources([string]$SourceRepository, [string]$StateRoot, [string]$Key) {
+    $root=Get-ReleaseStateRoot $StateRoot
+    $path=Join-Path (Get-ReleaseLedgerDirectory $SourceRepository $root) 'sent.json'
+    $sent=if (Test-Path -LiteralPath $path -PathType Leaf) {Read-ReleaseStateObject $path} else {Get-ReleaseGameSentSeed $root $SourceRepository}
+    if ($null -eq $sent) {throw (New-ReleaseDamagedStateError $root $path)}
+    foreach ($entry in @(if ($sent.Contains($Key)) {$sent[$Key]})) {
+        if ($entry -is [Collections.IDictionary] -and $entry['submittedAt'] -and -not $entry['abandoned'] -and [string]$entry['sourceCommit'] -cmatch '^[0-9a-f]{40}(?:[0-9a-f]{24})?$') {[string]$entry['sourceCommit']}
+    }
 }
 
 # Takes back the entry Add-ReleaseSentReceipt added for an attempt that failed before reaching the store.

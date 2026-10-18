@@ -55,12 +55,8 @@ Explicit extension adds destinations later without bumping the game version or
 repeating completed uploads/exports. Canonical notes and submitted variants stay
 frozen; new variants and artifacts require expanded approval. A later first Android
 counter change retains the actual source commit for each existing/new artifact.
-The live ledger advances only confirmed channels, preserving skipped-store ranges.
-It is kept per GitHub repository rather than per checkout, so worktrees and clones
-sharing a state root plan from what any of them published. Ledgers kept per
-checkout before that are not read; a game moving from them sets previousRelease once.
-Exact canonical public notes require shipped-release evidence; a separate owned
-availability record describes staggered rollout through ordinary later commits.
+
+The live ledger advances only confirmed channels, preserving skipped-store ranges. It is kept per GitHub repository rather than per checkout, so worktrees and clones sharing a state root plan from what any of them published. Ledgers kept per checkout before that are not read; a game moving from them sets previousRelease once. A Play channel whose `baselineAdvancesOn` is `submitted` also takes its baseline from its newest submission, which the store-write record marks; nothing else reads that mark. Exact canonical public notes require shipped-release evidence; a separate owned availability record describes staggered rollout through ordinary later commits.
 
 `tests/run-tests.ps1` checks installer idempotence/conflicts (including native
 Windows and WSL links), real-format Godot/Git fixtures, read-only file/index

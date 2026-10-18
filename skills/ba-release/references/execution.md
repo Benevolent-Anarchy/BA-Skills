@@ -296,24 +296,9 @@ content is a failure. No source repository commit, tag or push operation exists
 in this workflow. Publication of notes does create a commit in the public notes
 repository, only after release approval.
 
-Beside the live ledger, `repositories/<id>/sent.json` records every build any
-checkout has started sending to each store channel, live or not, such as a Steam
-build awaiting activation or a Play edit in review. Publication records a build
-there as it starts each store attempt, and takes the entry back only if the
-attempt failed before reaching the store. Each release state keeps its own entry
-per destination, so two checkouts sending the same source and version are
-recorded, and reconciled, separately. Entries are matched by the state's
-physical location, so one recorded under another spelling or through a link is
-still that state's. A replay records a store write its release
-already made, without making it again. A game that has no `sent.json` yet, such
-as one released before it existed, gets one built from every release journal
-under the state root. Some journals stop that publication, naming the journal by
-its place under the state root: one that cannot be read, and one of this game
-that lacks a record seeding reads or holds one of the wrong type. That record
-can be a selected store's record, its status or its remote progress. A journal
-whose checkout's other journals name a different game does not stop it. Repair
-or remove the journal, then retry. Notes-only journals, and store records from
-before remote progress was kept, are read as they are.
+Beside the live ledger, `repositories/<id>/sent.json` records every build any checkout has started sending to each store channel, live or not, such as a Steam build awaiting activation or a Play edit in review. Publication records a build there as it starts each store attempt, and takes the entry back only if the attempt failed before reaching the store. Each release state keeps its own entry per destination, so two checkouts sending the same source and version are recorded, and reconciled, separately. Entries are matched by the state's physical location, so one recorded under another spelling or through a link is still that state's. A replay records a store write its release already made, without making it again. A game that has no `sent.json` yet, such as one released before it existed, gets one built from every release journal under the state root. Some journals stop that publication, naming the journal by its place under the state root: one that cannot be read, and one of this game that lacks a record seeding reads or holds one of the wrong type. That record can be a selected store's record, its status or its remote progress. A journal whose checkout's other journals name a different game does not stop it. Repair or remove the journal, then retry. Notes-only journals, and store records from before remote progress was kept, are read as they are.
+
+A Play entry also carries `submittedAt` once its edit is committed for review rather than as a draft: publication marks it when the attempt ends `submitted`, a replay marks one its release already submitted, and seeding marks one a journal records as submitted. Planning reads those marks only for a Play channel whose `baselineAdvancesOn` is `submitted`, writing nothing; where `sent.json` does not exist yet it reads the journals as seeding would. An entry marked abandoned no longer counts. Nothing else reads the mark, so a submission never counts as live, never moves the canonical boundary and never lets public notes go out.
 
 Before any store write, publication reads that channel's row in the live ledger
 and its entries in `sent.json`. If any of them comes from a source this build's

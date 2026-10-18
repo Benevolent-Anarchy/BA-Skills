@@ -115,10 +115,13 @@ function ConvertTo-ReleaseRuntimeConfiguration($Document, [switch]$AllowIncomple
             $destinations.Add([ordered]@{id='steam';type='steam';appId=$settings.appId;branch=$settings.branch;depots=$depots.ToArray()})
             $baselines.steam=Get-ReleaseInheritedSetting $settings 'previousRelease' $Document.previousRelease
         } elseif ($store -eq 'google-play') {
-            $allowed=@('export','track','releaseStatus','userFraction','language','retainVersionCodes','previousRelease')
+            $allowed=@('export','track','releaseStatus','userFraction','language','retainVersionCodes','previousRelease','baselineAdvancesOn')
             Assert-ReleaseFields $settings $allowed @('export','track','releaseStatus','language','retainVersionCodes') 'distributions.google-play'
             if ($settings.Contains('previousRelease')) {Assert-ReleaseBaselineSetting $settings.previousRelease 'Google Play'}
-            $destinations.Add([ordered]@{id='google-play';type='google-play';preset=(Resolve-ReleaseExportAlias $Document.exports $settings.export);track=$settings.track;releaseStatus=$settings.releaseStatus;userFraction=(Get-ReleaseInheritedSetting $settings 'userFraction' $null);language=$settings.language;retainVersionCodes=$settings.retainVersionCodes})
+            $play=[ordered]@{id='google-play';type='google-play';preset=(Resolve-ReleaseExportAlias $Document.exports $settings.export);track=$settings.track;releaseStatus=$settings.releaseStatus;userFraction=(Get-ReleaseInheritedSetting $settings 'userFraction' $null);language=$settings.language;retainVersionCodes=$settings.retainVersionCodes}
+            # Carried only when set, so a game that leaves it out plans exactly as it did before the setting existed.
+            if ($settings.Contains('baselineAdvancesOn')) {$play.baselineAdvancesOn=$settings.baselineAdvancesOn}
+            $destinations.Add($play)
             $baselines['google-play']=Get-ReleaseInheritedSetting $settings 'previousRelease' $Document.previousRelease
         }
     }

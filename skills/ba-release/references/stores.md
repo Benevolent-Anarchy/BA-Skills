@@ -129,12 +129,7 @@ network errors or a still-valid edit. Normal retries never authorize it.
 Failed inspection-edit cleanup is recorded separately; it never changes the
 proven deployed match into a publication failure or triggers resubmission.
 
-A successful non-draft commit returns `submitted`. Verify review completion,
-managed publishing and the actual approved track/rollout in Play Console, taking
-any remaining approved publication steps there. A draft stays
-`awaiting-store-action`; committing a draft is not approval to promote it to a
-different status/track. Approval of a new publication intent must precede that
-promotion. Record live completion only after the console actually shows it:
+A successful non-draft commit returns `submitted`. A game that treats a submission as the end of its release work sets `baselineAdvancesOn` to `submitted` in its Play settings: the next Play release then counts its catch-up range from this submission, so the destination can be left `submitted` without a console check or receipt. Otherwise, verify review completion, managed publishing and the actual approved track/rollout in Play Console, taking any remaining approved publication steps there. A draft stays `awaiting-store-action`; committing a draft is not approval to promote it to a different status/track. Approval of a new publication intent must precede that promotion. Record live completion only after the console actually shows it:
 
 ```json
 {
