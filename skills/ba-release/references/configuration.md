@@ -16,7 +16,7 @@ blockers, including deliberately unknown publication facts.
 | --- | --- |
 | `schemaVersion` | Integer `1`. |
 | `project` | Relative Godot directory inside the source Git root. |
-| `previousRelease` | Confirmed previous published source commit/ref, or `null` until confirmed; must be an ancestor of the selected source. Canonical notes count from the newer of this and the game's newest recorded live release, so it is needed only until a release is recorded. |
+| `previousRelease` | Confirmed previous published source commit/ref, or `null` until confirmed; must be an ancestor of the selected source. Canonical notes count from the newer of this and the game's newest release in the shared live ledger, so it is needed only until a release is recorded there; a game whose earlier releases were recorded per checkout sets it once to its last release's source. |
 | `exports` | Object mapping lowercase aliases such as `windows`, `linux`, `apk`, `aab` to distinct, exact inspected preset names. |
 | `verification.gate` | `{script, arguments?}`: inspected repository-relative PowerShell script and string arguments, defaulting to `[]`. |
 | `verification.standalone` | Shared `{exports, script, arguments?}` hook, or array of those objects for different scripts. `exports` contains aliases. An unknown script may remain `null`. |

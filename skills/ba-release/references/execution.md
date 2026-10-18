@@ -167,23 +167,16 @@ That directory, and the version reservation beside it, belong to one checkout.
 The live ledger does not: `repositories/<id>/live.json` under the state root
 holds it for the game's GitHub repository, as its origin names it, so every
 checkout, worktree and clone of the game that uses that state root reads and
-advances the same one. Windows and WSL keep separate default roots. Ledgers
-that checkouts kept in their own directories before it was shared are read
-alongside it. A checkout's own one always counts. In another's, each row counts
-where the release state it names says it released the same game, on whatever
-channel, including one since removed from release.json; ownership is settled row
-by row, since a reused checkout path can leave different games' releases in one
-folder. A row whose state cannot be read is this game's damaged evidence when it
-is on one of this game's configured stores (its itch page, Steam app or Play
-package), and stops the plan, naming the file by its place under the state root,
-rather than being read as proof that nothing shipped; on any other store it is
-ignored. A folder whose ledger cannot be read is judged by its states alone: it
-stops the plan when one names this game or cannot be read, and is otherwise
-ignored, as it is when it holds no state at all. Recording a newly live channel
-reads those older ledgers only when a replay needs them, so it is saved even then.
-For each channel the latest source wins.
-Records on sources that diverged, or that this repository lacks, stop planning
-that channel, and no other, until they are fetched or reconciled.
+advances the same one. Windows and WSL keep separate default roots. A damaged
+shared ledger stops the plan, naming the file by its place under the state root,
+rather than being read as proof that nothing shipped.
+
+Ledgers that each checkout kept in its own directory, before the ledger was
+shared, are not read. A game released that way sets `previousRelease` in
+release.json once, through setup, to the source its last release's public notes
+name (the `sourceCommit` comment in `releases/<version>.md`), and commits it; from
+its next release on, the shared ledger supplies baselines and the canonical
+boundary.
 
 ## Extending a prepared release
 

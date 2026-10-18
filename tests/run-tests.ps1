@@ -1084,11 +1084,10 @@ Test 'prepare reads the explicitly selected live ledger before readiness checks 
     Invoke-FixtureGit $repo @('add','release.json') | Out-Null
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Record unknown baseline') | Out-Null
     $stateRoot=Join-Path $sandbox 'custom-ledger-state'
-    $id=(& (Get-Module Release) {param($path) (Get-ReleaseTextHash $path).Substring(0,20)} ((Get-Item $repo).FullName))
-    $repositoryState=Join-Path $stateRoot $id
-    New-Item -ItemType Directory -Path $repositoryState -Force | Out-Null
+    $ledgerDirectory=& (Get-Module Release) {param($root) Get-ReleaseLedgerDirectory 'Example/Real-Game' $root} $stateRoot
+    New-Item -ItemType Directory -Path $ledgerDirectory -Force | Out-Null
     $baseline=Invoke-FixtureGit $repo @('rev-parse','v1.2.2')
-    Write-Json (Join-Path $repositoryState 'live.json') @{'steam:100:default'=@{sourceCommit=$baseline;version='1.2.2'}}
+    Write-Json (Join-Path $ledgerDirectory 'live.json') @{'steam:100:default'=@{sourceCommit=$baseline;version='1.2.2'}}
     $plan=Get-ReleasePlan -Repository $repo -Destination @('steam') -StateRoot $stateRoot
     Assert ($plan.ready -and $plan.baselines.steam -ceq $baseline) 'Custom-ledger plan is not ready.'
     $first=Invoke-ReleasePrepare $repo @('steam') $stateRoot $engine -VersionChange patch

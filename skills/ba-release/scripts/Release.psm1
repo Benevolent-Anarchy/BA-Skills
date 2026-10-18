@@ -317,7 +317,7 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
     $ambiguous = $null
     if ($PSBoundParameters.ContainsKey('FrozenPrevious')) { $previous = $FrozenPrevious }
     else {
-        $boundary = Get-ReleasePublishedBoundary $settings $destinations $head $(if ($ReleaseVersion) {$ReleaseVersion} else {$version}) $configured $StateRoot
+        $boundary = Get-ReleasePublishedBoundary $settings $head $(if ($ReleaseVersion) {$ReleaseVersion} else {$version}) $configured $StateRoot
         $previous = $boundary.commit; $ambiguous = $boundary.ambiguous
     }
     if ($ambiguous) { $blockers.Add($ambiguous) }

@@ -57,8 +57,8 @@ frozen; new variants and artifacts require expanded approval. A later first Andr
 counter change retains the actual source commit for each existing/new artifact.
 The live ledger advances only confirmed channels, preserving skipped-store ranges.
 It is kept per GitHub repository rather than per checkout, so worktrees and clones
-sharing a state root plan from what any of them published; ledgers kept per checkout before that are
-read alongside, and records on diverged sources are refused rather than guessed.
+sharing a state root plan from what any of them published. Ledgers kept per
+checkout before that are not read; a game moving from them sets previousRelease once.
 Exact canonical public notes require shipped-release evidence; a separate owned
 availability record describes staggered rollout through ordinary later commits.
 

@@ -51,11 +51,10 @@ function Test-ReleaseShipped($State, [string]$StatePath) {
     return $false
 }
 
-# Lists every live receipt any checkout of the game recorded for this release's version, current and kept in history.
+# Lists every live receipt the game's shared ledger holds for this release's version, current and kept in history.
 function Get-ReleaseVersionReceipts($State, [string]$StatePath) {
-    $repositoryState=Split-Path $StatePath -Parent
-    $records=Get-ReleaseLiveRecords (Get-ReleasePlanSourceRepository $State.plan) (Split-Path $repositoryState -Parent) (Split-Path $repositoryState -Leaf) (Get-ReleaseStoreKeys $State.plan.destinations)
-    return @(Get-ReleaseLiveReceipts $records | Where-Object {$_.entry.version -ceq $State.plan.version})
+    $ledger=Read-ReleaseSharedLedger (Get-ReleasePlanSourceRepository $State.plan) (Split-Path (Split-Path $StatePath -Parent) -Parent)
+    return @(Get-ReleaseLiveReceipts $ledger | Where-Object {$_.entry.version -ceq $State.plan.version})
 }
 
 # Lists the live receipts any checkout of the game recorded for this exact release: its version, from its source.

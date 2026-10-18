@@ -1,4 +1,4 @@
-# Verifies that every checkout of a game shares one live ledger, and that ledgers kept per checkout before it are still read.
+# Verifies that every checkout of a game shares one live ledger, and that ledgers kept per checkout before it are not read.
 
 # Writes a live ledger as a checkout at $Checkout kept it before ledgers were shared: under the hash of its path, beside a state naming its game's notes repository.
 function Write-LegacyLiveLedger([string]$StateRoot, [string]$Checkout, [string]$NotesRepository, [string]$Version, [string]$Commit) {
@@ -9,20 +9,16 @@ function Write-LegacyLiveLedger([string]$StateRoot, [string]$Checkout, [string]$
     Write-Json (Join-Path $folder 'live.json') @{'itch:example/real-game:windows'=@{sourceCommit=$Commit;version=$Version;destination='itch-windows';statePath=(Join-Path $folder $Version)}}
 }
 
-# Writes a checkout folder of $Checkout as raw text, so either file can be damaged: a version's state, its live ledger,
-# or both. An empty text leaves that file out, since a [string] parameter turns $null into ''. Returns the folder's name.
-function Write-RawCheckout([string]$StateRoot, [string]$Checkout, [string]$Version, [string]$StateText, [string]$LedgerText) {
-    $id=& (Get-Module Release) {param($path) (Get-ReleaseTextHash $path).Substring(0,20)} $Checkout
-    $folder=Join-Path $StateRoot $id
-    New-Item -ItemType Directory -Path (Join-Path $folder $Version) -Force | Out-Null
-    if ($StateText) {[IO.File]::WriteAllText((Join-Path $folder "$Version/state.json"),$StateText)}
-    if ($LedgerText) {[IO.File]::WriteAllText((Join-Path $folder 'live.json'),$LedgerText)}
-    return $id
+# Gives the path of the fixture game's shared live ledger under $StateRoot.
+function Get-SharedLedgerPath([string]$StateRoot) {
+    return Join-Path (& (Get-Module Release) {param($root) Get-ReleaseLedgerDirectory 'Example/Real-Game' $root} $StateRoot) 'live.json'
 }
 
-# Gives a legacy live ledger's text with one itch row on $Target at $Commit for $Version.
-function Get-LegacyLedgerText([string]$Target, [string]$Commit, [string]$Version) {
-    return (@{"itch:$Target"=@{sourceCommit=$Commit;version=$Version;destination='itch-windows'}} | ConvertTo-Json -Depth 5)
+# Writes the fixture game's shared live ledger under $StateRoot with $Rows, one per store channel, as publication records them.
+function Write-SharedLedger([string]$StateRoot, $Rows) {
+    $path=Get-SharedLedgerPath $StateRoot
+    New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
+    Write-Json $path $Rows
 }
 
 # Prepares only the notes of the release prepared at $StorePath, in a new worktree named $Name at that release's current
@@ -67,37 +63,22 @@ Test 'a worktree or clone of a game plans from the baselines another checkout pu
         Assert ($plan.baselines['itch-windows'] -ceq $released) "A second checkout fell back to release.json instead of the published baseline: $checkout"
     }
 }
-Test 'ledgers kept per checkout before sharing are read alongside, for this game only, latest first' {
+Test 'ledgers kept per checkout before sharing are not read, so previousRelease stands until it is moved' {
     $repo=New-Fixture 'legacy-ledgers'
     $stateRoot=Join-Path $sandbox 'legacy-ledgers-state'
-    $older=Invoke-FixtureGit $repo @('rev-parse','v1.2.2')
-    $newer=Invoke-FixtureGit $repo @('rev-parse','HEAD')
-    'later work' | Set-Content (Join-Path $repo 'later.txt')
-    Invoke-FixtureGit $repo @('add','later.txt') | Out-Null
-    Invoke-FixtureGit $repo @('commit','--quiet','-m','Later work') | Out-Null
-    $later=Invoke-FixtureGit $repo @('rev-parse','HEAD')
-    Write-LegacyLiveLedger $stateRoot 'C:\old\checkout-one' 'Example/Real-Game-release-notes' '1.2.2' $older
-    Write-LegacyLiveLedger $stateRoot 'C:\old\checkout-two' 'example/real-game-release-notes' '1.2.3' $newer
-    Write-LegacyLiveLedger $stateRoot 'C:\old\another-game' 'Example/Other-Game-release-notes' '9.0.0' $later
-    $plan=Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot
-    Assert ($plan.baselines['itch-windows'] -ceq $newer) "Older per-checkout ledgers were not read, or another game's was: $($plan.baselines['itch-windows'])"
+    $configured=Invoke-FixtureGit $repo @('rev-parse','v1.2.2')
+    Write-LegacyLiveLedger $stateRoot 'C:\old\checkout' 'Example/Real-Game-release-notes' '1.2.3' (Invoke-FixtureGit $repo @('rev-parse','HEAD'))
+    $plan=Get-ReleasePlan -Repository $repo -Destination @('itch-windows','notes') -StateRoot $stateRoot -VersionChange patch
+    Assert ($plan.baselines['itch-windows'] -ceq $configured -and $plan.previousCommit -ceq $configured) "A ledger kept per checkout was read: $($plan.baselines['itch-windows']) $($plan.previousCommit)"
 }
-Test 'live records from two checkouts that disagree are refused rather than guessed between' {
-    $repo=New-Fixture 'diverged-ledgers'
-    $stateRoot=Join-Path $sandbox 'diverged-ledgers-state'
-    $shipped=Invoke-FixtureGit $repo @('rev-parse','HEAD')
-    Invoke-FixtureGit $repo @('switch','--quiet','-c','side','v1.2.2') | Out-Null
-    'side work' | Set-Content (Join-Path $repo 'side.txt')
-    Invoke-FixtureGit $repo @('add','side.txt') | Out-Null
-    Invoke-FixtureGit $repo @('commit','--quiet','-m','Side work') | Out-Null
-    $side=Invoke-FixtureGit $repo @('rev-parse','HEAD')
-    Invoke-FixtureGit $repo @('switch','--quiet','main') | Out-Null
-    Write-LegacyLiveLedger $stateRoot 'C:\old\main-checkout' 'Example/Real-Game-release-notes' '1.2.3' $shipped
-    Write-LegacyLiveLedger $stateRoot 'C:\old\side-checkout' 'Example/Real-Game-release-notes' '1.2.3' $side
-    Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot} 'disagree'
-    # Only the channel whose records disagree is stopped; another channel still plans.
-    $plan=Get-ReleasePlan -Repository $repo -Destination @('itch-linux') -StateRoot $stateRoot
-    Assert ($plan.baselines['itch-linux'] -ceq (Invoke-FixtureGit $repo @('rev-parse','v1.2.2'))) 'Disagreeing records on one channel stopped planning another.'
+Test 'a damaged shared ledger stops planning and names the file' {
+    $repo=New-Fixture 'damaged-shared-ledger'
+    $stateRoot=Join-Path $sandbox 'damaged-shared-ledger-state'
+    $path=Get-SharedLedgerPath $stateRoot
+    New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
+    [IO.File]::WriteAllText($path,'{ not json')
+    $place=[IO.Path]::GetRelativePath($stateRoot,$path).Replace('\','/')
+    Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot} ([regex]::Escape($place))
 }
 Test 'an older release extends to a new channel after another checkout shipped newer on its existing one' {
     $repo=New-StoreFixture 'staggered-extension'
@@ -280,63 +261,6 @@ Test 'a notes-only checkout from before the release was extended refuses to rewr
         Assert ($late.result.status -ne 'published' -and $late.result.destinations.notes.error -match 'extended') "The obsolete publication was not refused with its reason: $($late.result.status) $($late.result.destinations.notes.error)"
     } finally {Remove-Item Env:BA_FIXTURE_NOTE_STORE}
 }
-Test 'another game damaging its release state stops neither planning nor publishing this one' {
-    $repo=New-Fixture 'foreign-damage'
-    $stateRoot=Join-Path $sandbox 'foreign-damage-state'
-    $env:BA_FIXTURE_NOTE_STORE=Join-Path $sandbox 'foreign-damage-note.md'
-    $locked=$null
-    try {
-        $store=Invoke-ReleasePrepare $repo @('itch-windows','notes') $stateRoot $engine
-        $state=Get-Content (Join-Path $store.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
-        Invoke-ReleasePublish -StatePath $store.statePath -ButlerExecutable $butler -GhExecutable $gh -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $store.statePath $state.plan) | Out-Null
-        $other=Get-LegacyLedgerText 'example/other-game:windows' $state.plan.head '9.0.0'
-        $foreignState=(@{plan=@{notesRepository='Example/Other-Game-release-notes';version='9.0.0'}} | ConvertTo-Json -Depth 5)
-        Write-RawCheckout $stateRoot 'C:\old\no-state' '9.0.0' $null '{ not json' | Out-Null
-        Write-RawCheckout $stateRoot 'C:\old\other-game-ledger' '9.0.0' $foreignState '{ not json' | Out-Null
-        Write-RawCheckout $stateRoot 'C:\old\other-game-state' '9.0.0' '{ not json' $other | Out-Null
-        if ($IsWindows) {
-            $id=Write-RawCheckout $stateRoot 'C:\old\other-game-locked' '9.0.0' $foreignState $other
-            $locked=[IO.File]::Open((Join-Path $stateRoot "$id/9.0.0/state.json"),'Open','ReadWrite','None')
-        }
-        $plan=Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot
-        Assert ($plan.baselines['itch-windows'] -ceq $state.plan.head) "Another game's damaged state stopped or changed planning: $($plan.baselines['itch-windows'])"
-        $notes=Publish-NotesFromAnotherCheckout $repo $stateRoot $store.statePath 'foreign-damage-notes'
-        Assert ($notes.result.destinations.notes.status -eq 'succeeded') "Another game's damaged state stopped notes publication: $($notes.result.destinations.notes.error)"
-        $worktree=Join-Path $sandbox 'foreign-damage-newer'
-        Invoke-FixtureGit $repo @('worktree','add','--quiet','-b','newer',$worktree) | Out-Null
-        Invoke-ReleasePrepare $worktree @('itch-windows') $stateRoot $engine -VersionChange patch | Out-Null
-        Invoke-FixtureGit $worktree @('add','project.godot') | Out-Null
-        Invoke-FixtureGit $worktree @('commit','--quiet','-m','Reserve the newer version') | Out-Null
-        $newer=Invoke-ReleasePrepare $worktree @('itch-windows') $stateRoot $engine -VersionChange patch
-        $newerState=Get-Content (Join-Path $newer.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
-        Invoke-ReleasePublish -StatePath $newer.statePath -ButlerExecutable $butler -ApprovedPlanId $newerState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $newer.statePath $newerState.plan) | Out-Null
-        $plan=Get-ReleasePlan -Repository $worktree -Destination @('itch-windows') -StateRoot $stateRoot
-        Assert ($plan.baselines['itch-windows'] -ceq $newerState.plan.head) "Another game's damaged state stopped the newer release being recorded: $($plan.baselines['itch-windows'])"
-    } finally {if ($locked) {$locked.Dispose()};Remove-Item Env:BA_FIXTURE_NOTE_STORE}
-}
-Test 'damaged release state that may be this game''s stops planning and names the file' {
-    $repo=New-Fixture 'own-damage'
-    $stateRoot=Join-Path $sandbox 'own-damage-state'
-    $head=Invoke-FixtureGit $repo @('rev-parse','HEAD')
-    $ours=(@{plan=@{notesRepository='Example/Real-Game-release-notes';version='1.1.0'}} | ConvertTo-Json -Depth 5)
-    $id=Write-RawCheckout $stateRoot 'C:\old\damaged-ledger' '1.1.0' $ours '{ not json'
-    Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot} ([regex]::Escape("$id/live.json"))
-    Remove-Item -LiteralPath (Join-Path $stateRoot $id) -Recurse
-    $id=Write-RawCheckout $stateRoot 'C:\old\damaged-state' '1.1.0' '{ not json' (Get-LegacyLedgerText 'example/real-game:windows' $head '1.1.0')
-    Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot} ([regex]::Escape("$id/1.1.0/state.json"))
-}
-Test 'a damaged release state that may be this game''s does not stop a newly live channel being recorded' {
-    $repo=New-Fixture 'damage-while-publishing'
-    $stateRoot=Join-Path $sandbox 'damage-while-publishing-state'
-    $prepared=Invoke-ReleasePrepare $repo @('itch-windows') $stateRoot $engine
-    $state=Get-Content (Join-Path $prepared.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
-    $ours=(@{plan=@{notesRepository='Example/Real-Game-release-notes';version='1.1.0'}} | ConvertTo-Json -Depth 5)
-    Write-RawCheckout $stateRoot 'C:\old\damaged-ledger' '1.1.0' $ours '{ not json' | Out-Null
-    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -ApprovedPlanId $state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $prepared.statePath $state.plan)
-    $shared=Join-Path (& (Get-Module Release) {param($root) Get-ReleaseLedgerDirectory 'Example/Real-Game' $root} $stateRoot) 'live.json'
-    $rows=Get-Content $shared -Raw | ConvertFrom-Json -AsHashtable
-    Assert ($result.destinations['itch-windows'].status -eq 'succeeded' -and $rows['itch:example/real-game:windows'].sourceCommit -ceq $state.plan.head) 'Damaged older state stranded a newly live channel outside the ledger.'
-}
 Test 'canonical notes count from the newest release any checkout published, previousRelease or not' {
     $repo=New-Fixture 'canonical-boundary'
     $stateRoot=Join-Path $sandbox 'canonical-boundary-state'
@@ -369,8 +293,10 @@ Test 'canonical notes wait for previousRelease when two published sources neithe
     Invoke-FixtureGit $repo @('switch','--quiet','main') | Out-Null
     Invoke-FixtureGit $repo @('merge','--quiet','--no-edit','hotfix') | Out-Null
     $merge=Invoke-FixtureGit $repo @('rev-parse','HEAD')
-    Write-LegacyLiveLedger $stateRoot 'C:\old\main-release' 'Example/Real-Game-release-notes' '1.1.0' $main
-    Write-LegacyLiveLedger $stateRoot 'C:\old\hotfix-release' 'Example/Real-Game-release-notes' '1.1.1' $hotfix
+    Write-SharedLedger $stateRoot ([ordered]@{
+        'itch:example/real-game:windows'=@{sourceCommit=$main;version='1.1.0';destination='itch-windows'}
+        'itch:example/real-game:linux'=@{sourceCommit=$hotfix;version='1.1.1';destination='itch-linux'}
+    })
     $plan=Get-ReleasePlan -Repository $repo -Destination @('notes') -StateRoot $stateRoot
     Assert (@($plan.blockers | Where-Object {$_ -match 'ambiguous'}).Count -and -not $plan.ready) "Two unordered published sources did not block the canonical notes: $($plan.previousCommit)"
     Change-Config $repo {param($c) $c.previousRelease=$merge}
@@ -383,8 +309,7 @@ Test 'canonical notes keep a publication on a channel since removed from release
     $repo=New-Fixture 'retired-channel'
     $stateRoot=Join-Path $sandbox 'retired-channel-state'
     $shipped=Invoke-FixtureGit $repo @('rev-parse','HEAD')
-    $ours=(@{plan=@{notesRepository='Example/Real-Game-release-notes';version='1.2.3'}} | ConvertTo-Json -Depth 5)
-    Write-RawCheckout $stateRoot 'C:\old\linux-release' '1.2.3' $ours (Get-LegacyLedgerText 'example/real-game:linux' $shipped '1.2.3') | Out-Null
+    Write-SharedLedger $stateRoot @{'itch:example/real-game:linux'=@{sourceCommit=$shipped;version='1.2.3';destination='itch-linux'}}
     $plan=Get-ReleasePlan -Repository $repo -Destination @('notes') -StateRoot $stateRoot -VersionChange patch
     Assert ($plan.previousCommit -ceq $shipped) "The Linux publication did not set the boundary while Linux was configured: $($plan.previousCommit)"
     Change-Config $repo {param($c) $c.distributions.itch.channels.Remove('linux')}
@@ -393,15 +318,6 @@ Test 'canonical notes keep a publication on a channel since removed from release
     Invoke-FixtureGit $repo @('commit','--quiet','-m','Retire Linux and add a feature') | Out-Null
     $plan=Get-ReleasePlan -Repository $repo -Destination @('notes') -StateRoot $stateRoot -VersionChange patch
     Assert ($plan.previousCommit -ceq $shipped -and $plan.notesDraft -notmatch 'Fix controller focus') "Retiring Linux dropped its publication from the canonical notes: $($plan.previousCommit)"
-}
-Test 'a readable journal for another game does not hide a damaged one this game''s row points at' {
-    $repo=New-Fixture 'mixed-ownership'
-    $stateRoot=Join-Path $sandbox 'mixed-ownership-state'
-    $head=Invoke-FixtureGit $repo @('rev-parse','HEAD')
-    $id=Write-RawCheckout $stateRoot 'C:\old\reused-path' '1.1.0' '{ not json' (Get-LegacyLedgerText 'example/real-game:windows' $head '1.1.0')
-    New-Item -ItemType Directory -Path (Join-Path $stateRoot "$id/9.0.0") | Out-Null
-    Write-Json (Join-Path $stateRoot "$id/9.0.0/state.json") @{plan=@{notesRepository='Example/Other-Game-release-notes';version='9.0.0'}}
-    Expect-Error {Get-ReleasePlan -Repository $repo -Destination @('itch-windows') -StateRoot $stateRoot} ([regex]::Escape("$id/1.1.0/state.json"))
 }
 Test 'availability is left alone when a state that recorded this release live cannot be read' {
     $repo=New-StoreFixture 'missing-journal';Add-FixtureApk $repo
