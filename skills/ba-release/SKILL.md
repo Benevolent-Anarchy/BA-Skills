@@ -80,7 +80,14 @@ to publish. Pass the exact displayed plan ID and notes SHA-256 on first publish.
 These bind a persisted approval to the prepared artifacts as well.
 
 Resume the existing state directory after a failure; never bump the version as
-part of a retry. Report each destination separately. Keep successful operations
+part of a retry. Report each destination separately. A destination refused
+because a newer release is live on its channel, or already sent there, sent
+nothing; report it, and
+never try to force the older release there without the user's explicit
+reconciliation. If the newer build was sent but never went live, and the user
+decides to abandon it, inspect its console and record that with `abandon`, from
+the release state that sent it. Pass `-AbandonAuthorized` only after the user
+explicitly authorizes it. Keep successful operations
 complete while retrying failed operations. Hold prepared destinations that must
 not publish yet with `hold` and a single-line public reason without credentials
 or private discussion. Before unholding Play, re-read its live track and review

@@ -64,10 +64,11 @@ function Get-ReleaseShipmentReceipts($State, [string]$StatePath) {
 
 # Reads the other journals, of any checkout, that live receipts for this release's version point to, at that version now.
 function Get-ReleaseVersionStates($State, [string]$StatePath) {
-    $own=[IO.Path]::GetFullPath($StatePath).TrimEnd('\','/')
-    $paths=@(Get-ReleaseVersionReceipts $State $StatePath | Where-Object {$_.entry.statePath} | ForEach-Object {[IO.Path]::GetFullPath([string]$_.entry.statePath).TrimEnd('\','/')} | Sort-Object -Unique)
+    # Paths differing only in case are one state only where the filesystem ignores case.
+    $seen=[Collections.Generic.HashSet[string]]::new($(if ($IsWindows) {[StringComparer]::OrdinalIgnoreCase} else {[StringComparer]::Ordinal}))
+    $paths=@(Get-ReleaseVersionReceipts $State $StatePath | Where-Object {$_.entry.statePath} | ForEach-Object {Get-ReleaseStateIdentity ([string]$_.entry.statePath)} | Where-Object {$seen.Add($_)})
     foreach ($path in $paths) {
-        if ($path -eq $own) {continue}
+        if (Test-ReleaseSameStatePath $path $StatePath) {continue}
         $file=Join-Path $path 'state.json'
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {continue}
         $other=[IO.File]::ReadAllText($file) | ConvertFrom-Json -AsHashtable
@@ -86,10 +87,9 @@ function Get-ReleaseRelatedStates($State, [string]$StatePath) {
 # kept in a row's history, cannot be read. Only that state holds the store's status, its pending work and its extension
 # history, so missing it would report a live store as not live. The reason names the channel and version, never a path.
 function Assert-ReleaseJournalsReadable($State, [string]$StatePath) {
-    $own=[IO.Path]::GetFullPath($StatePath).TrimEnd('\','/')
     foreach ($receipt in @(Get-ReleaseVersionReceipts $State $StatePath)) {
         $path=[string]$receipt.entry.statePath
-        if ($path -and [IO.Path]::GetFullPath($path).TrimEnd('\','/') -eq $own) {continue}
+        if (Test-ReleaseSameStatePath $path $StatePath) {continue}
         if ($path -and $null -ne (Read-ReleaseStateObject (Join-Path $path 'state.json'))) {continue}
         throw (New-ReleaseDiagnosticError "The release state that recorded $($receipt.key) live for $($State.plan.version) cannot be read; restore it, or refresh availability from the checkout that holds it. Nothing was written.")
     }

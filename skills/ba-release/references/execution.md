@@ -15,6 +15,7 @@ are passed after the script path. Comma-separated destination IDs work with
 -Mode unhold -StatePath <prepared-state-directory> -Destination google-play -PlayTrackReviewed
 -Mode publish -StatePath <prepared-state-directory> -ApprovedPlanId <displayed-id> -ApprovedNotesSha256 <displayed-notes-hash>
 -Mode confirm -StatePath <prepared-state-directory> -ReceiptPath <observed-store-receipt.json>
+-Mode abandon -StatePath <prepared-state-directory> -ReceiptPath <observed-abandonment.json> -AbandonAuthorized
 ```
 
 `validate` checks schema and actual project files. `plan` emits JSON to stdout and
@@ -156,12 +157,29 @@ overrides it but must remain outside the source tree, including linked ancestors
 A native Windows file-handle lookup resolves Store app filesystem redirection
 and links before returning the state path. Use that returned physical path for
 WSL checks, browser uploads and agents outside the Store app; the logical Local
-AppData path can point somewhere different in those processes.
+AppData path can point somewhere different in those processes. Every mode given
+`-StatePath` first finds the state's state root, two folders up, where the
+shared ledger and store-write record live. A path that already sits inside a
+state root is used as given, in a folder named for its version under one named
+for its checkout. That covers one through a link to the state root, and a
+checkout folder relocated elsewhere and linked back in. Otherwise the state's
+physical location is used, as for a link to the state's own folder. A state that
+is neither is refused. Recorded state paths are matched by physical location,
+however they are spelled or reached.
 A source identity/version
 directory contains `state.json`, `notes.md`, build snapshots and an exclusive
 lock. HEAD, config bytes, version, previous-release commit and sorted selection
 identify the plan. A different plan for the same version is refused; resolve it
 explicitly instead of bumping a version to retry. Do not edit state.json by hand.
+
+Only a new plan reads `previousRelease`, which must then resolve to an ancestor
+of its source. Once prepared, retries, extension and publication check the saved
+previous-release commit instead: it must still be that exact commit and an
+ancestor of the source. Moving the ref past the source or away from it, or
+deleting it, changes neither the boundary nor the plan's identity. A destination
+that `extend` adds still reads its own baseline afresh: from the live ledger,
+else its store's or channel's `previousRelease` override, else the root one; a
+ref it reads that way must still resolve.
 
 That directory, and the version reservation beside it, belong to one checkout.
 The live ledger does not: `repositories/<id>/live.json` under the state root
@@ -278,6 +296,55 @@ content is a failure. No source repository commit, tag or push operation exists
 in this workflow. Publication of notes does create a commit in the public notes
 repository, only after release approval.
 
+Beside the live ledger, `repositories/<id>/sent.json` records every build any
+checkout has started sending to each store channel, live or not, such as a Steam
+build awaiting activation or a Play edit in review. Publication records a build
+there as it starts each store attempt, and takes the entry back only if the
+attempt failed before reaching the store. Each release state keeps its own entry
+per destination, so two checkouts sending the same source and version are
+recorded, and reconciled, separately. Entries are matched by the state's
+physical location, so one recorded under another spelling or through a link is
+still that state's. A replay records a store write its release
+already made, without making it again. A game that has no `sent.json` yet, such
+as one released before it existed, gets one built from every release journal
+under the state root. Some journals stop that publication, naming the journal by
+its place under the state root: one that cannot be read, and one of this game
+that lacks a record seeding reads or holds one of the wrong type. That record
+can be a selected store's record, its status or its remote progress. A journal
+whose checkout's other journals name a different game does not stop it. Repair
+or remove the journal, then retry. Notes-only journals, and store records from
+before remote progress was kept, are read as they are.
+
+Before any store write, publication reads that channel's row in the live ledger
+and its entries in `sent.json`. If any of them comes from a source this build's
+source does not contain, or that this checkout cannot show it contains, the
+destination fails with nothing sent and nothing recorded, and its error names
+that version. An interrupted attempt refused this way stays `uncertain`.
+Replacing a newer release with an older one needs explicit reconciliation, never
+a retry. Other channels proceed.
+
+A build that was sent but never went live, and that the user has decided to
+abandon, is reconciled from the release state that sent it:
+`-Mode abandon -StatePath <that state> -ReceiptPath <observed.json> -AbandonAuthorized`.
+First inspect the store console and confirm the build is not live and will not
+be made live; take the receipt shapes from [store operations](stores.md#abandoning-an-upload-that-never-went-live).
+Then obtain the user's explicit authorization, since abandoning lets a release
+that does not contain that build replace it. Without `-AbandonAuthorized` the
+mode checks the receipt and records nothing. The receipt must name the release's
+approved plan and the exact recorded attempt. That destination becomes
+`abandoned`, keeping its attempts and remote evidence. Only that state's
+`sent.json` entry for it is marked, not removed, and the channel check passes
+over it. Another checkout's upload to the same channel, even of the same source
+and version, keeps stopping it until abandoned from its own state. The mode never
+calls a store. A live release is never abandoned: only a newer one replaces it.
+Publication holds the game's ledger lock from
+its first channel check to its last receipt, and records each channel an upload
+makes live as soon as that result is saved.
+Meanwhile another checkout publishing under the same state root stops before any
+store write; one confirming a receipt saves it, but repeats `confirm` to record
+it in the ledger. Both are asked to retry once this one finishes. Checkouts with
+different state roots cannot see each other's ledger.
+
 Read [store operations](stores.md) for SteamCMD invocation, Play edit/track
 publication, runtime authentication and required console steps. Override
 `-SteamCmdExecutable` at runtime to point at the inspected SDK executable. The
@@ -310,6 +377,7 @@ separate staging folder for inspection; only successful manifests can publish.
 | `submitted` | Play edit committed; review/managed publishing/rollout still needs verification. |
 | `failed` | The attempt failed; other destinations retain their own results. |
 | `uncertain` | An external operation was interrupted; its remote outcome needs inspection. |
+| `abandoned` | A build sent but never live, recorded abandoned with authorization; no further operations occur. |
 
 An interrupted `in-progress` operation becomes `uncertain` on resume and is not
 automatically repeated. Inspect the remote channel/file before deciding whether
@@ -323,8 +391,9 @@ untested runtime behavior. Steam/Play uploads remain separate from observed live
 activation/review completion.
 
 Overall status is `prepared`, `preparation-failed`, `published`, `on-hold`, `submitted`,
-`needs-store-action`, `partial-failure`, `publication-failed`, or
-`needs-reconciliation`, or `awaiting-release`. Report the
+`needs-store-action`, `partial-failure`, `publication-failed`,
+`needs-reconciliation`, `awaiting-release`, or `abandoned` when every selected
+destination was abandoned; otherwise abandoned destinations do not affect it. Report the
 individual destinations and errors alongside that status. Never convert a
 partial failure into a whole-release success claim.
 
@@ -352,8 +421,9 @@ for missed-change evidence; frozen plans keep their original baselines on retry.
 Do not roll a channel backwards without explicit reconciliation. Each channel's
 row keeps every receipt recorded for it, so a release whose receipts are recorded
 again, after a newer release went live on one of its channels, leaves that newer
-row alone. A release going live on an older or diverged source for the first time
-is refused instead, once the other channels have been saved. Canonical note
+row alone. A first receipt for an older or diverged source is refused instead,
+once the other channels have been saved. That happens when a Steam build or Play
+edit uploaded before the newer release was sent is confirmed after it. Canonical note
 corrections belong in explicit subsequent public-repo commits, preserving history
 instead of duplicate entries. The automatic writer refuses conflicting canonical
 content and foreign availability files.

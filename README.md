@@ -45,7 +45,9 @@ completion), Google Play (Android Publisher edits and verified rollout), and the
 derived public release-notes repository. See
 [store operations](skills/ba-release/references/stores.md) for pending review,
 activation and announcement steps. Upload and submission statuses remain distinct
-from verified publication.
+from verified publication. A release never replaces a newer one already sent to
+or live on a store channel. A sent build that never went live is set aside only
+through `abandon`, with the user's authorization.
 When browser tools and account access are available, the skill also guides
 approved console completion for Steam activation/announcements, itch labels and
 Play publishing checks. See [browser completion](skills/ba-release/references/browser-completion.md).

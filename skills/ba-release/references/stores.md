@@ -166,6 +166,39 @@ The implemented Publisher adapter submits the same text without invoking fastlan
 or changing other listing metadata. Approve canonical notes first, then review
 shortening/translation and catch-up evidence from this track's last-live baseline.
 
+## Abandoning an upload that never went live
+
+A build that was sent but never went live still stops any release whose source
+does not contain it. When the user decides to abandon it, first check its
+store console. Confirm the Steam build is not set live on the approved branch
+and will not be. For Play, confirm the release was removed from the approved
+track or the edit discarded. Then write an observed receipt under that
+release's state and, only with the user's explicit authorization, run
+`release.ps1 -Mode abandon -StatePath <state> -ReceiptPath <receipt> -AbandonAuthorized`.
+Every receipt names the destination, the approved `planId`, `observedAt`,
+`live: false` and the inspected `evidenceUrl`:
+
+```json
+{
+  "destination": "<configured Steam ID>",
+  "planId": "<approved plan ID>",
+  "observedAt": "<actual observation timestamp with timezone>",
+  "live": false,
+  "appId": 123,
+  "buildId": "<recorded build ID, or null when none was recorded>",
+  "branch": "<approved branch>",
+  "evidenceUrl": "https://partner.steamgames.com/apps/builds/123"
+}
+```
+
+Play receipts carry `packageName`, `versionCode` and `track` instead of the app,
+build and branch, with a `https://play.google.com/console` evidence URL. Itch
+receipts carry `target`, with the `https://<owner>.itch.io/<game>` page. Each
+value must match the approved destination and the recorded attempt, and
+`observedAt` must come after the upload. The mode records the observation for
+that release state only: another checkout's upload to the same channel needs its
+own receipt from its own state. It never queries or changes the store.
+
 ## Public release record
 
 The current repository suffix is `-release-notes`. Canonical approved text is

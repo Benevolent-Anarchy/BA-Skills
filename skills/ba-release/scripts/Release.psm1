@@ -267,8 +267,16 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
     $dirty = Read-ReleaseGit $Repository @('status','--porcelain=v1','--untracked-files=all')
     $shallow = Read-ReleaseGit $Repository @('rev-parse','--is-shallow-repository')
     if ($shallow -eq 'true') { $blockers.Add('Shallow history cannot establish a complete previous-release comparison.') }
+    # Only a new plan reads previousRelease. A prepared release's saved boundary is checked instead, so its ref can move
+    # or be deleted later without changing the release.
     $configured = $null
-    if ($null -ne $settings.config.previousReleaseRef) {
+    if ($PSBoundParameters.ContainsKey('FrozenPrevious')) {
+        if ($FrozenPrevious) {
+            $saved = Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'rev-parse','--verify','--quiet',"$FrozenPrevious^{commit}") $Repository
+            $ancestor = if ($saved.exitCode -eq 0 -and $saved.text.Trim() -ceq $FrozenPrevious) {Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$FrozenPrevious,$head) $Repository} else {$null}
+            if (-not $ancestor -or $ancestor.exitCode -ne 0) { throw 'The prepared release''s previous-release commit must be an exact commit that is an ancestor of HEAD.' }
+        }
+    } elseif ($null -ne $settings.config.previousReleaseRef) {
         $configured = Read-ReleaseGit $Repository @('rev-parse','--verify',"$($settings.config.previousReleaseRef)^{commit}")
         $ancestor = Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$configured,$head) $Repository
         if ($ancestor.exitCode -ne 0) { throw 'Previous release ref must be an ancestor of HEAD.' }
@@ -385,6 +393,24 @@ function Get-ReleaseStateRoot([string]$StateRoot) {
     return Join-Path $base 'ba-release/releases'
 }
 
+# Gives an existing release state's directory as a path inside its state root, whose shared ledger and store-write record
+# sit two folders up: the given path where it is one, as through a link to the state root or a checkout folder linked into
+# it from elsewhere; otherwise its physical location, as through a link to the state's own folder. A state inside a state
+# root sits in a folder named for its version, under one named for its checkout. A journal that cannot be read is left
+# for the mode to report.
+function Resolve-ReleaseStatePath([string]$StatePath) {
+    $given=(Get-Item -LiteralPath $StatePath).FullName.TrimEnd('\','/')
+    $journal=Read-ReleaseStateObject (Join-Path $given 'state.json')
+    $plan=if ($journal) {$journal['plan']} else {$null}
+    if ($plan -isnot [Collections.IDictionary] -or $plan['repository'] -isnot [string] -or $plan['version'] -isnot [string]) {return $given}
+    $checkout=(Get-ReleaseTextHash $plan['repository']).Substring(0,20)
+    $comparison=if ($IsWindows) {[StringComparison]::OrdinalIgnoreCase} else {[StringComparison]::Ordinal}
+    foreach ($path in @($given,(Resolve-ReleasePhysicalPath $given).TrimEnd('\','/'))) {
+        if ((Split-Path $path -Leaf).Equals($plan['version'],$comparison) -and (Split-Path (Split-Path $path -Parent) -Leaf).Equals($checkout,$comparison)) {return $path}
+    }
+    throw 'This release state is not inside a state root, so its shared ledger cannot be found; pass the state path prepare returned.'
+}
+
 # Resolves linked ancestors even when the final staging directory does not exist yet.
 function Resolve-ReleasePhysicalPath([string]$Path) {
     if ($IsWindows) {return Resolve-ReleaseWindowsPath $Path}
@@ -482,7 +508,7 @@ function Invoke-ReleasePrepare([string]$Repository, [string[]]$Destination, [str
         if (Test-Path -LiteralPath $stateFile) {
             $state = [IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable
             if ($state.plan.planId -cne $plan.planId) { throw 'This version already has a different release plan. Resume that snapshot; do not bump the version just to retry.' }
-            if ($state.status -in @('prepared','published','submitted','needs-store-action','partial-failure','publication-failed','needs-reconciliation','on-hold','awaiting-release')) {
+            if ($state.status -in @('prepared','published','submitted','needs-store-action','partial-failure','publication-failed','needs-reconciliation','on-hold','awaiting-release','abandoned')) {
                 Assert-ReleaseArtifacts $statePath $state
                 if ($state.status -eq 'prepared') {
                     try {Invoke-ReleaseDistributionChecks $settings $state $statePath $ButlerExecutable {Write-ReleaseJson $stateFile $state}}
@@ -593,9 +619,11 @@ function Get-ReleaseNotesHash([string]$StatePath, $Plan) {
     return Get-ReleaseTextHash ($manifest | ConvertTo-Json -Depth 10 -Compress)
 }
 
-# Summarizes progress without conflating uploaded/submitted artifacts with verified store publication.
+# Summarizes progress without conflating uploaded/submitted artifacts with verified store publication. An abandoned
+# destination has no more work, so only the others decide the status.
 function Get-ReleaseOverallStatus($State) {
-    $statuses=@($State.plan.selectedDestinations | ForEach-Object {$State.destinations[$_].status})
+    $statuses=@($State.plan.selectedDestinations | ForEach-Object {$State.destinations[$_].status} | Where-Object {$_ -ne 'abandoned'})
+    if (-not $statuses.Count) {return 'abandoned'}
     if ($statuses -contains 'uncertain' -or $statuses -contains 'in-progress') {return 'needs-reconciliation'}
     $complete=@($statuses | Where-Object {$_ -in @('succeeded','submitted','awaiting-store-action')})
     $failed=@($State.plan.selectedDestinations | Where-Object {$State.destinations[$_].status -eq 'failed' -or ($State.destinations[$_].Contains('preflightStatus') -and $State.destinations[$_].preflightStatus -eq 'failed')})
@@ -634,8 +662,9 @@ function Update-ReleaseDerivedPlanMetadata($State, $Fresh) {
 
 # Publishes only approved snapshot destinations and retains successes through partial failures and retries.
 function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [string]$ApprovedNotesSha256, [string]$ButlerExecutable='butler', [string]$GhExecutable='gh', [switch]$RetryUncertain, [string]$SteamCmdExecutable='steamcmd', [scriptblock]$PlayTransport, [switch]$ReplacePlayEdit) {
-    $StatePath = (Get-Item -LiteralPath $StatePath).FullName
+    $StatePath = Resolve-ReleaseStatePath $StatePath
     $lock = Lock-ReleaseState $StatePath
+    $ledgerLock = $null
     try {
         $stateFile = Join-Path $StatePath 'state.json'
         $state = [IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable
@@ -686,10 +715,17 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}
             }
         }
+        # Hold the game's shared ledger from the first channel check to the last receipt: no other checkout under this state
+        # root can change a channel between this one's check and its write, or check a channel before this one records it.
+        $ledgerLock=Lock-ReleaseLiveLedger $StatePath $state
+        # A game's first record of store writes is seeded from every journal, so builds sent before it existed still count.
+        Initialize-ReleaseSentRecord $StatePath $state
         foreach ($destination in @($state.plan.destinations | Sort-Object { $_.type -eq 'notes' })) {
             if (-not $destination.selected) { continue }
             $record = $state.destinations[$destination.id]
-            if ($record.status -eq 'held') {continue}
+            if ($record.status -in @('held','abandoned')) {continue}
+            # A replay records a store write this release already made, without making it again.
+            if ($destination.type -ne 'notes' -and (Test-ReleaseStoreWriteStarted $record)) {Add-ReleaseSentReceipt $StatePath $state $destination (Get-ReleaseRecordSource $state.plan $record) | Out-Null}
             if ($destination.type -eq 'notes') {
                 if (-not (Test-ReleaseShipped $state $StatePath)) {$record.status='awaiting-release';$record.error=$null;Write-ReleaseJson $stateFile $state;continue}
                 if ($record.status -eq 'succeeded') {
@@ -705,18 +741,30 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             if (-not $record.Contains('remote')) {$record.remote=[ordered]@{}}
             if ($record.status -eq 'in-progress') { $record.status='uncertain'; $record.error='Interrupted external operation; reconcile its remote result before retrying.'; Write-ReleaseJson $stateFile $state }
             if ($record.status -eq 'uncertain' -and -not $RetryUncertain) { continue }
+            if ($destination.type -ne 'notes') {
+                if (-not $record.remote.Contains('sourceCommit')) {
+                    $preset=if ($destination.type -eq 'steam') {$destination.depots[0].preset} else {$destination.preset}
+                    $artifact=@($state.artifacts | Where-Object {$_.preset -ceq $preset})[0]
+                    $record.remote.sourceCommit=if ($artifact.Contains('sourceCommit')) {$artifact.sourceCommit} else {$state.plan.head}
+                }
+                # A newer release live on this channel, or sent there and not yet live, refuses the older build before any
+                # store write, so nothing is sent or recorded; an interrupted earlier attempt stays uncertain.
+                $source=if ($record.remote.sourceCommit) {$record.remote.sourceCommit} else {$state.plan.head}
+                $conflict=Get-ReleaseChannelConflict $StatePath $state $destination $source
+                if ($conflict) {
+                    if ($record.status -ne 'uncertain') {$record.status='failed'}
+                    $record.error=$conflict;Write-ReleaseJson $stateFile $state;continue
+                }
+            }
             $record.status='in-progress'; $record.attempts++; $record.error=$null
             $state.canonicalNotesSha256=$canonicalHash
-            if ($destination.type -ne 'notes' -and -not $record.remote.Contains('sourceCommit')) {
-                $preset=if ($destination.type -eq 'steam') {$destination.depots[0].preset} else {$destination.preset}
-                $artifact=@($state.artifacts | Where-Object {$_.preset -ceq $preset})[0]
-                $record.remote.sourceCommit=if ($artifact.Contains('sourceCommit')) {$artifact.sourceCommit} else {$state.plan.head}
-            }
             if ($destination.type -eq 'google-play') {
                 $path="notes.$($destination.id).txt"
                 $record.remote.notesHashes=@{$path=(Get-FileHash (Join-Path $StatePath $path)).Hash.ToLowerInvariant()}
             }
             Write-ReleaseJson $stateFile $state
+            # Recorded before the store write, so the channel's check elsewhere sees this build even if this run stops.
+            $sentNow=($destination.type -ne 'notes') -and (Add-ReleaseSentReceipt $StatePath $state $destination $source)
             try {
                 $outcome='succeeded'
                 if ($destination.type -eq 'itch') {
@@ -760,30 +808,41 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 }
             }
             Write-ReleaseJson $stateFile $state
+            # An attempt that failed before its first store operation sent nothing, so it takes back its store-write entry.
+            if ($sentNow -and $record.status -eq 'failed' -and -not (Test-ReleaseStoreWriteStarted $record)) {Remove-ReleaseSentReceipt $StatePath $state $destination}
+            # A channel this upload made live is recorded at once, so a later check elsewhere sees it even if this run stops.
+            if ($record.remote.Contains('live') -and $record.remote.live -eq $true) {Save-ReleaseLiveReceipts $StatePath $state @($destination.id)}
         }
         $state.status = Get-ReleaseOverallStatus $state
         Write-ReleaseJson $stateFile $state
-        Update-ReleaseLiveLedger $StatePath $state
+        Save-ReleaseLiveReceipts $StatePath $state
         return @{status=$state.status; statePath=$StatePath; version=$state.plan.version; destinations=$state.destinations}
-    } finally { $lock.Dispose() }
+    } finally { if ($ledgerLock) {$ledgerLock.Dispose()}; $lock.Dispose() }
 }
+# Reads an observed store receipt, refusing credential-like values and duplicate keys, with its observation time kept as
+# the original text.
+function Read-ReleaseObservedReceipt([string]$ReceiptPath) {
+    $raw=[IO.File]::ReadAllText($ReceiptPath)
+    $json=[System.Text.Json.JsonDocument]::Parse($raw)
+    try {
+        Assert-ReleaseJson $json.RootElement
+        $timestamp=$json.RootElement.GetProperty('observedAt')
+        $timestampText=if ($timestamp.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {$timestamp.GetString()} else {$null}
+    } finally {$json.Dispose()}
+    $receipt=$raw | ConvertFrom-Json -AsHashtable
+    # Recent PowerShell versions convert ISO JSON strings to DateTime; retain the original offset text.
+    if ($receipt -is [Collections.IDictionary] -and $receipt.Contains('observedAt')) {$receipt.observedAt=$timestampText}
+    return $receipt
+}
+
 # Records only an explicitly observed, approval-bound store result; never invokes a store API.
 function Confirm-ReleaseStoreCompletion([string]$StatePath, [string]$ReceiptPath) {
-    $StatePath=(Get-Item -LiteralPath $StatePath).FullName
+    $StatePath=Resolve-ReleaseStatePath $StatePath
     $lock=Lock-ReleaseState $StatePath
     try {
         $stateFile=Join-Path $StatePath 'state.json'
         $state=[IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable
-        $raw=[IO.File]::ReadAllText($ReceiptPath)
-        $json=[System.Text.Json.JsonDocument]::Parse($raw)
-        try {
-            Assert-ReleaseJson $json.RootElement
-            $timestamp=$json.RootElement.GetProperty('observedAt')
-            $timestampText=if ($timestamp.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {$timestamp.GetString()} else {$null}
-        } finally {$json.Dispose()}
-        $receipt=$raw | ConvertFrom-Json -AsHashtable
-        # Recent PowerShell versions convert ISO JSON strings to DateTime; retain the original offset text.
-        if ($receipt -is [Collections.IDictionary] -and $receipt.Contains('observedAt')) {$receipt.observedAt=$timestampText}
+        $receipt=Read-ReleaseObservedReceipt $ReceiptPath
         $common=@('destination','planId','notesSha256','observedAt','live')
         Assert-ReleaseFields $receipt ($common+@('appId','buildId','branch','announcementUrl','packageName','versionCode','track','releaseStatus','userFraction','evidenceUrl','target','displayName')) $common 'store receipt'
         $destinations=@($state.plan.destinations | Where-Object {$_.id -ceq $receipt.destination -and $_.selected -and $_.type -in @('steam','google-play','itch')})
@@ -839,8 +898,9 @@ function Confirm-ReleaseStoreCompletion([string]$StatePath, [string]$ReceiptPath
 . (Join-Path $PSScriptRoot 'SourceVersion.ps1')
 . (Join-Path $PSScriptRoot 'DistributionChecks.ps1')
 . (Join-Path $PSScriptRoot 'ReleaseRecord.ps1')
+. (Join-Path $PSScriptRoot 'SentRecord.ps1')
 . (Join-Path $PSScriptRoot 'PublicNotes.ps1')
 . (Join-Path $PSScriptRoot 'Doctor.ps1')
 . (Join-Path $PSScriptRoot 'PublicationHold.ps1')
 . (Join-Path $PSScriptRoot 'PlanComparison.ps1')
-Export-ModuleMember -Function Set-ReleaseDestinationHold,Get-ReleaseDoctor,Get-ReleaseConfiguration,Get-ReleasePlan,Get-ReleaseSetup,Set-ReleaseSetup,Invoke-ReleaseInteractiveSetup,Get-ReleaseVersion,Get-ReleaseLiveLedger,Expand-ReleaseDestinations,Export-ReleasePlayChangelogs,Invoke-ReleasePrepare,Invoke-ReleasePublish,Get-ReleaseNotesHash,Confirm-ReleaseStoreCompletion
+Export-ModuleMember -Function Set-ReleaseDestinationHold,Get-ReleaseDoctor,Get-ReleaseConfiguration,Get-ReleasePlan,Get-ReleaseSetup,Set-ReleaseSetup,Invoke-ReleaseInteractiveSetup,Get-ReleaseVersion,Get-ReleaseLiveLedger,Expand-ReleaseDestinations,Export-ReleasePlayChangelogs,Invoke-ReleasePrepare,Invoke-ReleasePublish,Get-ReleaseNotesHash,Confirm-ReleaseStoreCompletion,Confirm-ReleaseAbandonment
