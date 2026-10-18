@@ -242,7 +242,7 @@ function Assert-ReleaseAddedBaselines($State, $Baselines, [string[]]$Added) {
 # Adds explicit destinations, reuses existing artifacts/statuses and requires approval of the expanded plan.
 # A committed release.json change that only adds stores is adopted first, explicitly, through -MigrateConfiguration.
 function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, [string]$GodotExecutable, [string]$ButlerExecutable='butler', [switch]$MigrateConfiguration) {
-    $StatePath=(Get-Item -LiteralPath $StatePath).FullName
+    $StatePath=Resolve-ReleaseStatePath $StatePath
     if (-not $Destination.Count) {throw 'Select additional destinations explicitly.'}
     $stateRoot=Split-Path (Split-Path $StatePath -Parent) -Parent
     $lock=Lock-ReleaseState $StatePath

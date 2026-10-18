@@ -157,7 +157,10 @@ overrides it but must remain outside the source tree, including linked ancestors
 A native Windows file-handle lookup resolves Store app filesystem redirection
 and links before returning the state path. Use that returned physical path for
 WSL checks, browser uploads and agents outside the Store app; the logical Local
-AppData path can point somewhere different in those processes.
+AppData path can point somewhere different in those processes. Every mode given
+`-StatePath` resolves it the same way first. A release reached through a link or
+junction to its state root, or to its own folder, is therefore the same state,
+with the same shared ledger and store-write record.
 A source identity/version
 directory contains `state.json`, `notes.md`, build snapshots and an exclusive
 lock. HEAD, config bytes, version, previous-release commit and sorted selection
@@ -294,7 +297,9 @@ build awaiting activation or a Play edit in review. Publication records a build
 there as it starts each store attempt, and takes the entry back only if the
 attempt failed before reaching the store. Each release state keeps its own entry
 per destination, so two checkouts sending the same source and version are
-recorded, and reconciled, separately. A replay records a store write its release
+recorded, and reconciled, separately. Entries are matched by the state's
+physical location, so one recorded under another spelling or through a link is
+still that state's. A replay records a store write its release
 already made, without making it again. A game that has no `sent.json` yet, such
 as one released before it existed, gets one built from every release journal
 under the state root. Some journals stop that publication, naming the journal by

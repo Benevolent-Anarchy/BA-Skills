@@ -12,7 +12,7 @@ function Set-ReleaseDestinationHold([string]$StatePath, [string[]]$Destination, 
     if ($Release -and $PSBoundParameters.ContainsKey('Reason')) {throw 'A hold reason cannot be supplied to unhold.'}
     if ($PlayTrackReviewed -and -not $Release) {throw 'Play track review applies only to unhold.'}
     if (-not $Release) {Assert-ReleaseHoldReason $Reason}
-    $StatePath=(Get-Item -LiteralPath $StatePath).FullName
+    $StatePath=Resolve-ReleaseStatePath $StatePath
     $lock=Lock-ReleaseState $StatePath
     try {
         $stateFile=Join-Path $StatePath 'state.json'

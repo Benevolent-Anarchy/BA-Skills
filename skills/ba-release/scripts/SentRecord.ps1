@@ -58,11 +58,19 @@ function Test-ReleaseJournalComplete($Journal) {
     return $true
 }
 
-# Tells whether two journal paths name the same release state, however each was spelled.
+# Names a release state by its physical location, with links and junctions resolved and trailing separators set aside, so
+# one state recorded under another spelling or reached through an alias is still one state. A path whose location cannot
+# be resolved, such as one on a drive no longer present, keeps its full spelling.
+function Get-ReleaseStateIdentity([string]$Path) {
+    try {$physical=Resolve-ReleasePhysicalPath $Path} catch {$physical=[IO.Path]::GetFullPath($Path)}
+    return $physical.TrimEnd('\','/')
+}
+
+# Tells whether two journal paths name the same release state, however each was spelled or reached.
 function Test-ReleaseSameStatePath([string]$Left, [string]$Right) {
     if (-not $Left -or -not $Right) {return $false}
     $comparison=if ($IsWindows) {[StringComparison]::OrdinalIgnoreCase} else {[StringComparison]::Ordinal}
-    return [IO.Path]::GetFullPath($Left).TrimEnd('\','/').Equals([IO.Path]::GetFullPath($Right).TrimEnd('\','/'),$comparison)
+    return (Get-ReleaseStateIdentity $Left).Equals((Get-ReleaseStateIdentity $Right),$comparison)
 }
 
 # Tells whether an entry in the record of store writes is the one release state $StatePath keeps for destination $Id.
@@ -182,7 +190,7 @@ function Get-ReleaseChannelConflict([string]$StatePath, $State, $Destination, [s
 # and its entries in the record of store writes are marked rather than removed, so a release whose source does not contain
 # that build can be sent there. Repeating it repairs a record interrupted after the journal was saved. Never calls a store.
 function Confirm-ReleaseAbandonment([string]$StatePath, [string]$ReceiptPath, [switch]$Authorized) {
-    $StatePath=(Get-Item -LiteralPath $StatePath).FullName
+    $StatePath=Resolve-ReleaseStatePath $StatePath
     $lock=Lock-ReleaseState $StatePath
     $ledgerLock=$null
     try {

@@ -755,3 +755,49 @@ Test 'a journal of this game missing a record seeding reads stops it, while note
         Assert ($result.destinations.steam.status -eq 'failed' -and $result.destinations.steam.error -match 'Version 1\.2\.4 has been sent to' -and (@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG) -join '|') -ceq 'steamcmd 100 1.2.4') "The older journal was not seeded by its status: $($result.destinations.steam.error)"
     } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG;Remove-Item Env:BA_STEAM_USERNAME}
 }
+Test 'a release state reached through a link to its state root or its own folder is still one state' {
+    $repo=New-StoreFixture 'sent-alias'
+    $stateRoot=Join-Path $sandbox 'sent-alias-state'
+    $env:BA_FIXTURE_UPLOAD_LOG=Join-Path $sandbox 'sent-alias.log'
+    $env:BA_STEAM_USERNAME='fixture'
+    $linkType=if ($IsWindows) {'Junction'} else {'SymbolicLink'}
+    try {
+        $candidate=New-NewerRelease $repo $stateRoot @('steam') 'sent-alias-candidate'
+        $rootLink=Join-Path $sandbox 'sent-alias-root-link'
+        New-Item -ItemType $linkType -Path $rootLink -Target $stateRoot | Out-Null
+        $viaRoot=Join-Path $rootLink ([IO.Path]::GetRelativePath($stateRoot,$candidate.statePath))
+        $stateLink=Join-Path $sandbox 'sent-alias-state-link'
+        New-Item -ItemType $linkType -Path $stateLink -Target $candidate.statePath | Out-Null
+        $same={param($left,$right) [IO.Path]::GetFullPath($left).TrimEnd('\','/') -eq [IO.Path]::GetFullPath($right).TrimEnd('\','/')}
+        # Published through the link to its own folder, the release finds its real state root and records its real state.
+        Invoke-ReleasePublish -StatePath $stateLink -SteamCmdExecutable $steam -ApprovedPlanId $candidate.state.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $candidate.statePath $candidate.state.plan) | Out-Null
+        $sentPath=Get-SentRecordPath $stateRoot
+        Assert (Test-Path -LiteralPath $sentPath) 'Publishing through a link to the state folder used another state root.'
+        $sent=Get-Content $sentPath -Raw | ConvertFrom-Json -AsHashtable
+        Assert (@($sent['steam:100:default']).Count -eq 1 -and (& $same $sent['steam:100:default'][0].statePath $candidate.statePath)) "The upload was not recorded under the real state: $($sent['steam:100:default'] | ConvertTo-Json -Compress)"
+        # An entry recorded under another spelling, through the link and in other case where paths ignore it, is the same state.
+        $sent['steam:100:default'][0].statePath=if ($IsWindows) {$viaRoot.ToUpperInvariant()} else {$viaRoot}
+        Write-Json $sentPath $sent
+        Invoke-ReleasePrepare $repo @('steam') $stateRoot $engine -VersionChange minor | Out-Null
+        Invoke-FixtureGit $repo @('add','project.godot') | Out-Null
+        Invoke-FixtureGit $repo @('commit','--quiet','-m','Reserve the mainline version') | Out-Null
+        $mainline=Invoke-ReleasePrepare $repo @('steam') $stateRoot $engine -VersionChange minor
+        $mainlineState=Get-Content (Join-Path $mainline.statePath 'state.json') -Raw | ConvertFrom-Json -AsHashtable
+        $receipt=Join-Path $candidate.statePath 'steam-abandoned.json'
+        Write-Json $receipt @{destination='steam';planId=$candidate.state.plan.planId;observedAt=[DateTimeOffset]::UtcNow.ToString('o');live=$false;appId=100;buildId='999';branch='default';evidenceUrl='https://partner.steamgames.com/apps/builds/100'}
+        # Abandoning through either link, then again through the real path, marks the one entry the state has.
+        foreach ($path in @($viaRoot,$stateLink,$candidate.statePath)) {
+            Confirm-ReleaseAbandonment $path $receipt -Authorized | Out-Null
+            $entries=@((Get-Content $sentPath -Raw | ConvertFrom-Json -AsHashtable)['steam:100:default'])
+            Assert ($entries.Count -eq 1 -and $entries[0].abandoned) "Abandoning through $path left $($entries.Count) entries, $(@($entries | Where-Object {-not $_.abandoned}).Count) active."
+        }
+        # The mainline release publishes through the link to the state root; replays through other paths add nothing.
+        $mainlineViaRoot=Join-Path $rootLink ([IO.Path]::GetRelativePath($stateRoot,$mainline.statePath))
+        $published=Invoke-ReleasePublish -StatePath $mainlineViaRoot -SteamCmdExecutable $steam -ApprovedPlanId $mainlineState.plan.planId -ApprovedNotesSha256 (Get-ReleaseNotesHash $mainline.statePath $mainlineState.plan)
+        Assert ($published.destinations.steam.status -eq 'awaiting-store-action' -and (& $same $published.statePath $mainline.statePath)) "The mainline release did not publish as its real state: $($published.destinations.steam.error)"
+        Invoke-ReleasePublish -StatePath $mainline.statePath -SteamCmdExecutable $steam | Out-Null
+        $replay=Invoke-ReleasePublish -StatePath $stateLink -SteamCmdExecutable $steam
+        $entries=@((Get-Content $sentPath -Raw | ConvertFrom-Json -AsHashtable)['steam:100:default'])
+        Assert ($replay.status -eq 'abandoned' -and $entries.Count -eq 2 -and (@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG) -join '|') -ceq 'steamcmd 100 1.2.4|steamcmd 100 1.3.0') "Replays through other paths changed the record or the stores: $($entries.Count) entries, $(@(Get-Content $env:BA_FIXTURE_UPLOAD_LOG) -join '|')"
+    } finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG;Remove-Item Env:BA_STEAM_USERNAME}
+}

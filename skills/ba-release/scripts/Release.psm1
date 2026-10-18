@@ -393,6 +393,12 @@ function Get-ReleaseStateRoot([string]$StateRoot) {
     return Join-Path $base 'ba-release/releases'
 }
 
+# Resolves an existing release state's directory to its physical location, so a state reached through a link to it or to
+# its state root is still one state, and the state root and shared ledger found beside it are the real ones.
+function Resolve-ReleaseStatePath([string]$StatePath) {
+    return (Resolve-ReleasePhysicalPath (Get-Item -LiteralPath $StatePath).FullName).TrimEnd('\','/')
+}
+
 # Resolves linked ancestors even when the final staging directory does not exist yet.
 function Resolve-ReleasePhysicalPath([string]$Path) {
     if ($IsWindows) {return Resolve-ReleaseWindowsPath $Path}
@@ -644,7 +650,7 @@ function Update-ReleaseDerivedPlanMetadata($State, $Fresh) {
 
 # Publishes only approved snapshot destinations and retains successes through partial failures and retries.
 function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [string]$ApprovedNotesSha256, [string]$ButlerExecutable='butler', [string]$GhExecutable='gh', [switch]$RetryUncertain, [string]$SteamCmdExecutable='steamcmd', [scriptblock]$PlayTransport, [switch]$ReplacePlayEdit) {
-    $StatePath = (Get-Item -LiteralPath $StatePath).FullName
+    $StatePath = Resolve-ReleaseStatePath $StatePath
     $lock = Lock-ReleaseState $StatePath
     $ledgerLock = $null
     try {
@@ -819,7 +825,7 @@ function Read-ReleaseObservedReceipt([string]$ReceiptPath) {
 
 # Records only an explicitly observed, approval-bound store result; never invokes a store API.
 function Confirm-ReleaseStoreCompletion([string]$StatePath, [string]$ReceiptPath) {
-    $StatePath=(Get-Item -LiteralPath $StatePath).FullName
+    $StatePath=Resolve-ReleaseStatePath $StatePath
     $lock=Lock-ReleaseState $StatePath
     try {
         $stateFile=Join-Path $StatePath 'state.json'
