@@ -4,7 +4,7 @@ Test 'CLI subprocesses retain literal inputs and isolate plan status resume and 
     $output=& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File "$PSScriptRoot/fixtures/cli-driver.ps1" -SkillRoot $skillRoot -Sandbox $fixture 2>&1
     Assert ($LASTEXITCODE -eq 0) ($output -join "`n")
     $receipt=($output -join "`n") | ConvertFrom-Json -AsHashtable
-    Assert ($receipt.creates -eq 2 -and $receipt.boundaryCalls -gt 0 -and $receipt.local.report.plugins.Count -eq 4) 'Incomplete CLI fixture receipt.'
+    Assert ($receipt.creates -eq 2 -and $receipt.boundaryCalls -gt 0 -and $receipt.local.report.plugins.Count -eq 4 -and $receipt.public.report.projectVisibility -ceq 'public') 'Incomplete CLI fixture receipt.'
 }
 Test 'aggregate gate preserves failed stages and rejects syntax errors' {
     $fixture=New-BootstrapFixture 'aggregate gate'

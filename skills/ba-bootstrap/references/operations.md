@@ -5,7 +5,7 @@
 | Result | Meaning and next action |
 | --- | --- |
 | `ready` | Read-only preflight succeeded; creation still needs an actual user request. |
-| `complete` | Required phases have verified receipts. A create/resume result can include a non-blocking `cleanup.status='deferred'` note. Status rechecks remote identity/settings; browser/app receipts retain their observation time. |
+| `complete` | Required phases have verified receipts. A create/resume result can include a non-blocking `cleanup.status='deferred'` note. Status rechecks remote identity/settings and reports `projectVisibility`; browser/app receipts retain their observation time. |
 | `partial` | Some work succeeded. Explain the reported pending items; repair that concrete condition and resume by name/owner. |
 | `blocked` | Conflicting paths, inputs, identity, access or state. Preserve existing material and explain the specific conflict. |
 | `identity-unconfirmed` | A create result was lost or unresolved. An observed name/ID alone cannot bind that repository to this invocation. Ask Cicely to resolve the named repository and ID; do not clear the journal or retry automatically. |
@@ -46,6 +46,19 @@ Preflight renders the foundation, including the supplied description, in a dispo
 
 After bootstrap is complete, use `local-setup -Repository <actual checkout> -RefreshPlugins` for a deliberate plugin update. Creation/resume rejects a refresh request on a completed journal with that concrete instruction; it does not report an ignored update as successful.
 
+## Project repository visibility
+
+Creation always makes the project repository private, and refuses a create response that says otherwise. Bootstrap publishes the foundation only into a private repository: immediately before the initial push it reads the repository back again, and if its ID, full name or private visibility changed since preflight, it returns `blocked` without pushing. After that, its owner may make the project public. That is the owner's decision, not a conflict.
+
+Plan, status and resume read back the recorded project repository and report `projectVisibility` (`private` or `public`). A repository ID or full name that differs from the journal is still a conflict. Visibility depends on how far the invocation got:
+
+- **Foundation published** (`privateContent` verified, as in every completed invocation): a public project repository is accepted. A completed invocation stays `complete`. An unfinished one resumes its remaining phases (labels, companion settings, browser and Obsidian checks), none of which pushes project files.
+- **Foundation not yet published:** a public project repository blocks plan, status and resume, because resuming would push the foundation into a public repository. Make it private again, resume to completion, then change its visibility.
+
+The release-notes companion must stay public; a private companion is still a conflict.
+
+Local setup accepts a private origin as before. A public origin must also have its own public `<repository>-release-notes` companion, read back from GitHub. A companion has no companion of its own, so this refuses a clone of the companion and unrelated public repositories. It also refuses a public project whose companion was deleted or made private. The check needs no creation journal, so a fresh clone on another machine passes it too. If GitHub returns an error other than 404 for the companion, local setup reports the HTTP status for a retry instead of refusing the repository. Its result reports the `projectVisibility` it read. The vault journal does not record it, since it can change.
+
 ## Public release-notes repository
 
 The public companion contains only its initial README, has `main`, remains writable by its owner and is never archived. Issues, wiki, projects, discussions, auto-merge and Actions are disabled through supported APIs and read back. Pages must be absent. The current update API and repository readback omit the legacy `has_downloads` field; its omission is not an enabled contribution feature. Private description/canon never belongs here.
@@ -67,7 +80,7 @@ Set-BootstrapBrowserEvidence -Identity $identity -Setting pullRequests -Evidence
 
 The helper checks identity against both the journal and GitHub. A URL, timestamp or presumed API success does not prove the UI setting. Status labels this as stored browser evidence, not a fresh API check. Resume after readback to finish any remaining phases.
 
-The existing `ba-release` tooling derives this companion from the private repository's GitHub origin plus `-release-notes`. Bootstrap supplies that repository; engine exports, `release.json`, store IDs and release publication belong to their later setup/release workflow.
+The existing `ba-release` tooling derives this companion from the project repository's GitHub origin plus `-release-notes`. Bootstrap supplies that repository; engine exports, `release.json`, store IDs and release publication belong to their later setup/release workflow.
 
 ## Obsidian installation and app checks
 

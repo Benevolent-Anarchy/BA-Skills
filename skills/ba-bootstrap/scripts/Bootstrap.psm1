@@ -39,6 +39,12 @@ function Get-CreationFailureMessage($Kind,$Failure) {
     $details=if (@($Failure.errors).Count) {' Errors: '+($Failure.errors | ConvertTo-Json -Depth 12 -Compress)} else {''}
     "GitHub $Kind repository creation failed (HTTP $($Failure.statusCode)): $($Failure.message)$details Repair the reported condition, then explicitly resume using the stored inputs."
 }
+function Get-BootstrapVisibilityConflict($Kind,$Repository,$Journal,[string]$Name) {
+    if ($Kind -eq 'public') {if ($Repository.private) {return "Recorded release-notes repository is no longer public: $Name"};return $null}
+    # Bootstrap seeds only a private project. Once its foundation is published, opening it is the owner's choice.
+    if ($Repository.private -or ($Journal.phases.ContainsKey('privateContent') -and $Journal.phases.privateContent -eq 'verified')) {return $null}
+    return "Project repository $Name became public before bootstrap published its foundation; make it private again, then resume."
+}
 function Get-BootstrapStoredIdentity([string]$Name,[string]$Owner='Benevolent-Anarchy',[string]$StateRoot=(Get-BootstrapStateRoot)) {
     $repository=Resolve-BootstrapRepositoryName $Name
     $journal=Read-BootstrapJournal (Get-BootstrapJournalPath @{owner=$Owner;repository=$repository} $StateRoot)
@@ -187,6 +193,7 @@ function Get-BootstrapPlan([hashtable]$Identity,[scriptblock]$Request=$script:De
             if ($membership.state -ne 'active' -or $membership.role -ne 'admin') {throw 'Organization ownership/access is not confirmed. Creation requires an active organization owner.'}
         } elseif ($ownerType -ne 'User' -or $user.login -ne $Identity.owner) {throw 'Personal repository owner must be the authenticated GitHub user.'}
     } catch {$conflicts.Add($_.Exception.Message)}
+    $projectVisibility=$null
     foreach ($kind in @('private','public')) {
         $name=if ($kind -eq 'private') {$Identity.fullName} else {$Identity.notesFullName}
         try {
@@ -195,7 +202,12 @@ function Get-BootstrapPlan([hashtable]$Identity,[scriptblock]$Request=$script:De
                 if ($null -eq $journal -or -not $journal.repositories.ContainsKey($kind)) {
                     if ($null -ne $journal -and $journal.phases.ContainsKey($kind+'Repository') -and $journal.phases[$kind+'Repository'] -eq 'creating') {$conflicts.Add("identity-unconfirmed: $name exists with ID $($response.Data.id), without a durably recorded returned ID.")}
                     else {$conflicts.Add("Repository name already exists: $name")}
-                } elseif ($journal.repositories[$kind] -ne $response.Data.id -or $response.Data.full_name -ine $name -or $response.Data.private -ne ($kind -eq 'private')) {$conflicts.Add("Recorded repository identity/visibility differs: $name")}
+                } elseif ($journal.repositories[$kind] -ne $response.Data.id -or $response.Data.full_name -ine $name) {$conflicts.Add("Recorded repository identity differs: $name")}
+                else {
+                    $visibility=Get-BootstrapVisibilityConflict $kind $response.Data $journal $name
+                    if ($visibility) {$conflicts.Add($visibility)}
+                    if ($kind -eq 'private') {$projectVisibility=if ($response.Data.private) {'private'} else {'public'}}
+                }
             } elseif ($null -ne $journal -and $journal.repositories.ContainsKey($kind)) {$conflicts.Add("Recorded repository is missing or inaccessible: $name")}
             elseif ($null -ne $journal -and $journal.phases.ContainsKey($kind+'Repository') -and $journal.phases[$kind+'Repository'] -eq 'creating') {$conflicts.Add("identity-unconfirmed: prior creation of $name has an unresolved outcome; do not retry automatically.")}
         } catch {$conflicts.Add($_.Exception.Message)}
@@ -203,18 +215,22 @@ function Get-BootstrapPlan([hashtable]$Identity,[scriptblock]$Request=$script:De
     $report=Get-BootstrapReport $Identity $journal $(if ($conflicts.Count) {'blocked'} else {'ready'}) @() $conflicts.ToArray()
     if (@($conflicts | Where-Object {$_ -like 'identity-unconfirmed:*'}).Count) {$report.status='identity-unconfirmed'}
     $report.ownerType=$ownerType;$report.journalPath=Get-BootstrapJournalPath $Identity $StateRoot
-    $report.preset=$selection;$report.prerequisites=$prerequisites
+    $report.preset=$selection;$report.prerequisites=$prerequisites;$report.projectVisibility=$projectVisibility
     return $report
 }
 function Get-BootstrapStatus([hashtable]$Identity,[string]$StateRoot=(Get-BootstrapStateRoot),[scriptblock]$Request=$script:DefaultRequest) {
     try {
         $journal=Read-BootstrapJournal (Get-BootstrapJournalPath $Identity $StateRoot)
         if ($null -eq $journal) {return Get-BootstrapReport $Identity $null 'not-started' -StateRoot $StateRoot}
+        $projectVisibility=$null
         foreach ($kind in @('private','public')) {
             if ($journal.repositories.ContainsKey($kind)) {
                 $name=if ($kind -eq 'private') {$Identity.fullName} else {$Identity.notesFullName}
                 $repo=(Invoke-CheckedApi $Request GET "/repos/$name").Data
-                if ($repo.id -ne $journal.repositories[$kind] -or $repo.full_name -ine $name -or $repo.private -ne ($kind -eq 'private')) {throw "Recorded repository identity differs: $name"}
+                if ($repo.id -ne $journal.repositories[$kind] -or $repo.full_name -ine $name) {throw "Recorded repository identity differs: $name"}
+                $visibility=Get-BootstrapVisibilityConflict $kind $repo $journal $name
+                if ($visibility) {throw $visibility}
+                if ($kind -eq 'private') {$projectVisibility=if ($repo.private) {'private'} else {'public'}}
             }
         }
         if ($journal.phases.ContainsKey('publicSettings') -and $journal.phases.publicSettings -eq 'verified') {Assert-BootstrapPublicSettings $Identity $Request}
@@ -243,7 +259,7 @@ function Get-BootstrapStatus([hashtable]$Identity,[string]$StateRoot=(Get-Bootst
         }
         if ($conflicts.Count) {$status='identity-unconfirmed'}
         $report=Get-BootstrapReport $Identity $journal $status $pending $conflicts
-        $report.journalPath=Get-BootstrapJournalPath $Identity $StateRoot
+        $report.journalPath=Get-BootstrapJournalPath $Identity $StateRoot;$report.projectVisibility=$projectVisibility
         return $report
     } catch {return Get-BootstrapReport $Identity $null 'blocked' @() @($_.Exception.Message) -StateRoot $StateRoot}
 }
@@ -375,6 +391,10 @@ function Invoke-Bootstrap(
             # GitHub uses this specific conflict for a newly created repository with no commits.
             if ($remote.StatusCode -eq 409 -and ($null -eq $remote.Data -or $remote.Data.message -cne 'Git Repository is empty.')) {throw 'Initial main ref has an unresolved GitHub conflict; preserve the checkout.'}
             if ($remote.StatusCode -in @(404,409)) {
+                # Its owner can open the repository after preflight; publish only into the recorded, still-private one.
+                $repo=(Invoke-CheckedApi $Request GET "/repos/$($Identity.fullName)").Data
+                $conflict=if ($repo.id -ne $journal.repositories.private -or $repo.full_name -ine $Identity.fullName) {"Recorded repository identity differs: $($Identity.fullName)"} else {Get-BootstrapVisibilityConflict 'private' $repo $journal $Identity.fullName}
+                if ($conflict) {return Get-BootstrapReport $Identity $journal 'blocked' @() @($conflict) -StateRoot $StateRoot}
                 $push=& $Git $Identity.projectPath @('push','--set-upstream','origin','main')
                 $remote=Invoke-CheckedApi $Request GET "/repos/$($Identity.fullName)/git/ref/heads/main" $null @(200,404)
                 if ($remote.StatusCode -ne 200) {throw "Initial main push is unresolved (exit $($push.ExitCode)); resume to compare the remote ref."}

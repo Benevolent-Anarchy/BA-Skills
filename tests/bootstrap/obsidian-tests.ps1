@@ -166,7 +166,31 @@ Test 'obsidian derives fresh clone identity with isolated vault journals and no 
     $second=$first.Clone();$second.projectPath=Join-Path $cloneParent 'Renamed Local Folder';$second.parent=$cloneParent;$second.vaultPath=Join-Path $second.projectPath 'docs'
     Assert ((Get-ObsidianJournalPath $first $f.stateRoot) -ne (Get-ObsidianJournalPath $second $f.stateRoot)) 'Two clones share state.'
     Assert ($first.title -ceq $f.identity.title -and $first.projectPath -eq $f.identity.projectPath) 'Identity guessed from directory instead of Git/README.'
-    Expect-Error {Get-LocalProjectIdentity -Repository $f.identity.projectPath -Request {param($m,$e,$b) @{StatusCode=200;Data=@{full_name='Benevolent-Anarchy/Obsidian-Fixture';private=$false}}}} 'private'
+    Assert ($first.projectVisibility -ceq 'private') 'Private project visibility was not returned.'
+}
+Test 'obsidian local setup accepts a project made public and refuses its companion and unrelated repositories' {
+    $f=New-ObsidianFixture 'public project'
+    $project='Benevolent-Anarchy/Obsidian-Fixture';$notes="$project-release-notes"
+    $repos=@{$project=@{full_name=$project;private=$false};$notes=@{full_name=$notes;private=$false}}
+    $request={param($Method,$Endpoint,$Body)
+        $name=$Endpoint -replace '^/repos/',''
+        if ($repos.ContainsKey($name)) {return @{StatusCode=200;Data=$repos[$name]}}
+        return @{StatusCode=404;Data=$null}
+    }.GetNewClosure()
+    $id=Get-LocalProjectIdentity $f.identity.projectPath $request
+    Assert ($id.fullName -ceq $project -and $id.notesFullName -ceq $notes -and $id.vaultPath -eq $f.identity.vaultPath -and $id.projectVisibility -ceq 'public') 'Public project was refused or misidentified.'
+    # The checkout holds a full foundation, so only the companion check can refuse these.
+    Invoke-FixtureGit $f.identity.projectPath @('remote','set-url','origin',"https://github.com/$notes.git") | Out-Null
+    Expect-Error {Get-LocalProjectIdentity $f.identity.projectPath $request} 'no public .+-release-notes-release-notes companion'
+    Invoke-FixtureGit $f.identity.projectPath @('remote','set-url','origin',"https://github.com/$project.git") | Out-Null
+    $repos[$notes].private=$true
+    Expect-Error {Get-LocalProjectIdentity $f.identity.projectPath $request} 'no public .+ companion'
+    $repos.Remove($notes)
+    Expect-Error {Get-LocalProjectIdentity $f.identity.projectPath $request} 'no public .+ companion'
+    $transient={param($Method,$Endpoint,$Body) if ($Endpoint -like '*-release-notes') {@{StatusCode=0;Data=$null}} else {@{StatusCode=200;Data=@{full_name=$project;private=$false}}}}.GetNewClosure()
+    Expect-Error {Get-LocalProjectIdentity $f.identity.projectPath $transient} 'HTTP 0.+retry'
+    $repos[$notes]=@{full_name=$notes;private=$false};$repos[$project].full_name='Benevolent-Anarchy/Other-Project'
+    Expect-Error {Get-LocalProjectIdentity $f.identity.projectPath $request} 'verified project repository\.$'
 }
 Test 'obsidian refuses setup when the actual ignore rule is missing' {
     $f=New-ObsidianFixture 'not ignored'

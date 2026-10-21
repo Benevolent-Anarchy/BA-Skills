@@ -1,6 +1,6 @@
 # Preset selection and setup
 
-All presets receive the same Issues/canon/agent process, local Obsidian recipe and public release-notes companion. Every depth of `dist/` is ignored for exports. The project-owned `tools/verify.ps1` is the complete PR gate and runs without BA-Skills installed.
+All presets receive the same Issues/canon/agent process, local Obsidian recipe and public release-notes companion. Every preset creates the project repository private; its owner may make it public once bootstrap has published the foundation. Every depth of `dist/` is ignored for exports. The project-owned `tools/verify.ps1` is the complete PR gate and runs without BA-Skills installed.
 
 | Selection | New-project option | Starter and gate |
 | --- | --- | --- |
@@ -34,4 +34,4 @@ Tauri's committed npm manifest records tested version ranges, including Vitest a
 
 Native trials currently establish Windows build/test behavior. They do not establish an observed desktop app launch, installer packaging, signing, or other-platform compatibility. The official initial Rust scaffold has zero Rust unit tests; preserve that fact and add meaningful tests with new behavior.
 
-Existing-clone `local-setup` remains Obsidian-only. It does not add presets or convert engines and rejects `Preset`, `Renderer` and `AppIdentifier`. Engine conversion is separate project work.
+Existing-clone `local-setup` remains Obsidian-only. It does not add presets or convert engines and rejects `Preset`, `Renderer` and `AppIdentifier`. Engine conversion is separate project work. It accepts a clone of a private project, or of one its owner made public, and refuses the release-notes companion; see [project repository visibility](operations.md#project-repository-visibility).
