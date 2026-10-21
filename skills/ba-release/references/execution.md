@@ -55,7 +55,11 @@ SDK/JDK and signing presence cannot prove compatibility or a valid signature.
 The complete project gate, real exports and store preflights still supply those
 checks. Doctor makes no remote calls, login attempts, exports or source/state writes.
 An engine whose version probe cannot start produces a blocked `godot-version`
-check without discarding the rest of the report.
+check without discarding the rest of the report. A plan with a `sourceTag` adds a
+`source-tag` check: `unverified` where Git has a tagger identity or this
+checkout's tag of that name already names the release's source, to be pushed as it
+is, since push access and origin's existing tags are not checked; otherwise
+`blocked`.
 
 Steam and Butler publication errors retain library-generated reasons, including
 missing executables/authentication inputs, upload exit codes and missing Steam
@@ -292,9 +296,39 @@ pending work and extension history, so restore it, or refresh availability from
 the checkout that holds it. Re-run publish after console
 confirmation to refresh availability without repeating uploads. Identical notes
 count as complete; different
-content is a failure. No source repository commit, tag or push operation exists
-in this workflow. Publication of notes does create a commit in the public notes
+content is a failure. This workflow makes no source repository commit and pushes
+no branch. Publication of notes does create a commit in the public notes
 repository, only after release approval.
+
+A plan with a `sourceTag` also puts the release's annotated tag on origin. Its
+preflight runs with the notes preflight, before any store write, on every
+publication run, even once the tag is made, so a conflicting tag that appears
+later still stops a later run's store writes, such as an extension's: origin's fetch
+and push URLs must name the planned repository, and origin must push to exactly
+one URL, counting every push URL it has; no tag of that name may name another
+commit, on origin or in this checkout, even where origin's is right; and Git must
+have a tagger identity where the tag is still to be made. A failure stops publication
+with nothing sent. A recorded success stands only while origin's tag names the
+release's source. A tag gone from origin is owed again: that run pushes back this
+checkout's tag, or makes it anew, which needs a tagger. A tag still on origin stays
+`succeeded`, with its preflight failed, while a conflict here is reconciled. The tag then waits, `awaiting-release`, until a store is live
+by the same evidence the public notes need; an uploaded Steam build or submitted
+Play edit is not enough. Publication then makes the annotated tag in this
+checkout, unless one here already names the release's source, pushes that one tag
+to origin without force or `push.followTags`, and reads origin back. Pushes use
+the existing Git login with Git's terminal prompt off. A tag of that name already
+on the release's source, annotated or not, is kept as it is: on origin it counts
+as done, and here it is the one pushed. A tag is never moved, deleted or
+force-pushed; one naming another commit is reconciled by hand. A failed push leaves the tag `failed` and the release
+`partial-failure`; the next publish retries from the tag already made, without
+repeating store work. The journal's `sourceTag` record keeps its `status`
+(`pending`, `awaiting-release`, `succeeded` or `failed`), `preflightStatus` and a
+classified `error`, never Git's own output or origin's URL. A release with a
+planned tag is `published` only once the tag is on origin, including after a
+publication that stopped before reaching it, so after a console confirmation
+re-run publish to make it, as for public notes. While no store of the release is
+live, by the evidence the tag waits for, from any checkout, a waiting tag defers
+to any hold, so a release whose stores are all held is `on-hold`.
 
 Beside the live ledger, `repositories/<id>/sent.json` records every build any checkout has started sending to each store channel, live or not, such as a Steam build awaiting activation or a Play edit in review. Publication records a build there as it starts each store attempt, and takes the entry back only if the attempt failed before reaching the store. Each release state keeps its own entry per destination, so two checkouts sending the same source and version are recorded, and reconciled, separately. Entries are matched by the state's physical location, so one recorded under another spelling or through a link is still that state's. A replay records a store write its release already made, without making it again. A game that has no `sent.json` yet, such as one released before it existed, gets one built from every release journal under the state root. Some journals stop that publication, naming the journal by its place under the state root: one that cannot be read, and one of this game that lacks a record seeding reads or holds one of the wrong type. That record can be a selected store's record, its status or its remote progress. A journal whose checkout's other journals name a different game does not stop it. Repair or remove the journal, then retry. Notes-only journals, and store records from before remote progress was kept, are read as they are.
 

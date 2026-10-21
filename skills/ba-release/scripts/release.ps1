@@ -104,7 +104,7 @@ try {
             $notesHash=$null;$notesError=$null
             try {$notesHash=Get-ReleaseNotesHash $StatePath $state.plan} catch {$notesError=$_.Exception.Message}
             $notesFiles=@($notesPath)+@($state.plan.destinations | Where-Object {$_.selected -and $_.type -eq 'google-play'} | ForEach-Object {Join-Path $StatePath "notes.$($_.id).txt"})
-            [ordered]@{status=$state.status; version=$state.plan.version; planId=$state.plan.planId; selectedDestinations=$state.plan.selectedDestinations; plan=$state.plan; artifacts=$state.artifacts; notesFiles=$notesFiles; notesSha256=$notesHash; notesError=$notesError; approval=$state.approval; verification=$state.verification; checks=$state['checks']; exports=$state.exports; destinations=$state.destinations} | ConvertTo-Json -Depth 30
+            [ordered]@{status=$state.status; version=$state.plan.version; planId=$state.plan.planId; selectedDestinations=$state.plan.selectedDestinations; plan=$state.plan; artifacts=$state.artifacts; notesFiles=$notesFiles; notesSha256=$notesHash; notesError=$notesError; approval=$state.approval; verification=$state.verification; checks=$state['checks']; exports=$state.exports; destinations=$state.destinations; sourceTag=$state['sourceTag']} | ConvertTo-Json -Depth 30
         }
         'confirm' {
             $result=Confirm-ReleaseStoreCompletion -StatePath $StatePath -ReceiptPath $ReceiptPath

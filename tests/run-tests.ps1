@@ -1207,6 +1207,7 @@ Test 'version operations are explicit and holding Play leaves Android counters u
 . (Join-Path $PSScriptRoot 'configuration-migration-tests.ps1')
 . (Join-Path $PSScriptRoot 'live-ledger-tests.ps1')
 . (Join-Path $PSScriptRoot 'submitted-baseline-tests.ps1')
+. (Join-Path $PSScriptRoot 'source-tag-tests.ps1')
 Write-Output "Results: $script:Passed passed; $script:Failed failed. Fixture directory: $sandbox"
 if ($script:Passed + $script:Failed -eq 0) {throw 'No tests matched Filter.'}
 if ($script:Failed -gt 0) { exit 1 }

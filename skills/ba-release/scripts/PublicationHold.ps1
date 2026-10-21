@@ -46,7 +46,7 @@ function Set-ReleaseDestinationHold([string]$StatePath, [string[]]$Destination, 
             }
         }
         if ($changed) {
-            $state.status=Get-ReleaseOverallStatus $state
+            $state.status=Get-ReleaseOverallStatus $state $StatePath
             Write-ReleaseJson $stateFile $state
         }
         return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}

@@ -22,6 +22,8 @@ in any agent; do not substitute model-generated shell operations for the scripts
    facts stay null; do not invent presets, paths, commands, channels or baselines.
    Use the grouped JSON schema: declare export aliases once, keep shared settings
    under `distributions.<store>`, and put standalone hooks under `verification`.
+   A new setup turns `sourceTag` on. Where release.json has no `sourceTag`, ask
+   whether to tag the game's releases; a game that tags another way keeps it off.
    Setup inspection and plan mode remain read-only even with local source edits.
 2. For **each new release**, ask which destinations to include unless the user
    has already selected them. Ask for `patch`, `minor`, `major` or `current`
@@ -39,7 +41,8 @@ in any agent; do not substitute model-generated shell operations for the scripts
    Plan is read-only. Distinguish missing configuration from source edits that
    must be reviewed/committed before preparation. Present source/version, each
    channel's baseline, destinations, shared exports, Android counter action,
-   exclusions, display labels, public note path and pending console steps.
+   exclusions, display labels, public note path, the planned `sourceTag` and
+   pending console steps.
    Before local preparation, run `scripts/release.ps1 -Mode doctor -Repository
    <game-root> -Destination <same-ids>` and resolve its blocked checks. Doctor
    inspects only selected prerequisites and never builds, signs in or contacts
@@ -67,7 +70,8 @@ configured `increment-selected` policy, selecting itch APK or Play AAB increment
 that preset's existing integer counter once, independently of the semantic version
 and other Android presets. Review and commit these
 source settings locally before resuming; no binary may claim an older source
-commit. Scripts make no source commits, tags or pushes. Preparation runs the
+commit. Scripts make no source commits and push no branches; a planned
+`sourceTag` is their only push. Preparation runs the
 full project gate, exports each required preset once, tests standalone desktops
 with excluded files actually unavailable, and checks Butler's dry-run selection.
 Windows startup alone cannot stand in for Linux or relevant functionality.
@@ -142,7 +146,12 @@ checks with a confirmed baseline, and refuses any other change; read
 
 Publish the exact approved canonical notes only after at least one store is live.
 The separate predictable availability record identifies live, held, submitted
-and pending destinations; refresh it as stores catch up. Steam's build label is
+and pending destinations; refresh it as stores catch up. A planned `sourceTag`
+waits for the same evidence: publication then makes the annotated `v<version>`
+tag on the release's source and pushes only that tag to origin. It never moves,
+deletes or force-pushes a tag. A tag of that name on another commit stops
+publication before any store write; report it, and leave reconciling it to the
+user. Steam's build label is
 internal metadata: its public announcement is a separate verified console step.
 For unfinished console publication, leave ready-to-use notes and name the step.
 
