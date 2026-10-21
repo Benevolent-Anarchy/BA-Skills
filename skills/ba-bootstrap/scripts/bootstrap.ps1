@@ -30,7 +30,10 @@ try {
         foreach ($option in @('Preset','Renderer','AppIdentifier')) {if ($PSBoundParameters.ContainsKey($option)) {throw "local-setup configures Obsidian only; engine option $option cannot be used."}}
         Import-Module (Join-Path $PSScriptRoot 'Obsidian.psm1') -Force
         $identity=Get-LocalProjectIdentity -Repository $Repository
+        # Report the visibility read for this run; the vault journal records only identity, where it would go stale.
+        $visibility=$identity.projectVisibility;$identity.Remove('projectVisibility')
         $setup=Install-ProjectObsidian -Identity $identity -RefreshPlugins:$RefreshPlugins
+        $setup.projectVisibility=$visibility
         $setup.status=if ($setup.installedVerified -and $setup.enabledVerified -and $setup.pending.Count -eq 0) {'complete'} else {'partial'}
         $setup | ConvertTo-Json -Depth 40
         if ($setup.status -eq 'complete') {exit 0}

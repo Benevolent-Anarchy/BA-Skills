@@ -107,6 +107,12 @@ Assert ($local.code -eq 1 -and $local.report.status -eq 'partial' -and $local.re
 Assert (@($global:CliApi.calls | Select-Object -Skip $offset | Where-Object method -ne 'GET').Count -eq 0) 'Clone setup mutated GitHub.'
 Assert (@($global:CliApi.calls | Where-Object isRepositoryCreate).Count -eq 2) 'Duplicate repositories created.'
 Assert ((Get-Content -Raw "$clone/docs/.obsidian/plugins/vault-nickname/data-shared.json" | ConvertFrom-Json).nickname -ceq $id.title) 'Clone nickname wrong.'
+Assert ($local.report.projectVisibility -ceq 'private') 'Private clone setup did not report its visibility.'
+# Its owner opens the project once the foundation is published; setup and later completion still accept it.
+$global:CliApi.repos[$id.fullName].private=$false
+$public=Invoke-Cli @{Mode='local-setup';Repository=$clone}
+Assert ($public.code -eq 1 -and $public.report.status -eq 'partial' -and $public.report.installedVerified -and -not $public.report.enabledVerified -and $public.report.projectVisibility -ceq 'public') ($public | ConvertTo-Json -Depth 20)
+Assert (-not (Read-BootstrapJournal $public.report.journalPath).identity.ContainsKey('projectVisibility')) 'Vault journal recorded a visibility that can go stale.'
 # Record the offline app observation and supported public setting before completion.
 $global:CliApi.repos[$id.notesFullName].has_pull_requests=$false
 $journal=Read-BootstrapJournal $resume.report.journalPath
@@ -121,9 +127,10 @@ try {
     Assert ($completed.report.cleanup.status -eq 'deferred' -and $completed.report.cleanup.reason -match 'held.bin|access|process') 'CLI lost deferred cleanup diagnostic.'
     $completedStatus=Invoke-Cli @{Mode='status';Name=$parameters.Name}
     Assert ($completedStatus.code -eq 0 -and $completedStatus.report.status -eq 'complete' -and (Test-Path $heldPath)) 'Read-only CLI status lost completion or tried deletion.'
+    Assert ($completedStatus.report.projectVisibility -ceq 'public') 'CLI status did not report the public project.'
     $repeated=Invoke-Cli @{Mode='resume';Name=$parameters.Name}
     Assert ($repeated.code -eq 0 -and $repeated.report.status -eq 'complete' -and $repeated.report.cleanup.status -eq 'deferred') 'Completed CLI retry fails on held staging.'
 } finally {$held.Dispose()}
 $cleaned=Invoke-Cli @{Mode='resume';Name=$parameters.Name}
 Assert ($cleaned.code -eq 0 -and $cleaned.report.status -eq 'complete' -and $cleaned.report.cleanup.status -eq 'removed' -and -not (Test-Path $staging)) 'CLI did not retry released cleanup successfully.'
-@{missing=$missing;plan=$plan;create=$create;resume=$resume;status=$status;local=$local;completed=$completed;cleaned=$cleaned;boundaryCalls=$global:BoundaryCalls.Count;creates=2;clone=$clone} | ConvertTo-Json -Depth 40
+@{missing=$missing;plan=$plan;create=$create;resume=$resume;status=$status;local=$local;public=$public;completed=$completed;cleaned=$cleaned;boundaryCalls=$global:BoundaryCalls.Count;creates=2;clone=$clone} | ConvertTo-Json -Depth 40

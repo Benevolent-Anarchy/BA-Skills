@@ -313,11 +313,19 @@ function Get-LocalProjectIdentity([string]$Repository,[scriptblock]$Request={par
     if ($origin.ExitCode -ne 0 -or $origin.Output.Trim() -notmatch '^(?:https://github\.com/|git@github\.com:)([^/]+)/([^/]+?)(?:\.git)?$') {throw 'Local setup requires a canonical GitHub origin.'}
     $owner=$Matches[1];$repositoryName=$Matches[2]
     $repo=& $Request GET "/repos/$owner/$repositoryName" $null
-    if ($repo.StatusCode -ne 200 -or -not $repo.Data.private -or $repo.Data.full_name -ine "$owner/$repositoryName") {throw 'Local setup requires the verified private project repository.'}
-    foreach ($required in @('README.md','AGENTS.md','docs/DESIGN.md','docs/DECISIONS.md','docs/JUDGEMENTS.md','docs/NEXT.md','tools/verify.ps1','tools/Documentation.psm1')) {if (-not (Test-Path -LiteralPath (Join-Path $path $required) -PathType Leaf)) {throw "Private project foundation is missing $required."}}
+    if ($repo.StatusCode -ne 200 -or $repo.Data.full_name -ine "$owner/$repositoryName") {throw 'Local setup requires the verified project repository.'}
+    if (-not $repo.Data.private) {
+        # Bootstrap creates the project private and its owner may open it later. Only a project has its own public
+        # release-notes companion, which refuses a companion's clone or an unrelated public repository.
+        $notesName="$owner/$repositoryName-release-notes"
+        $notes=& $Request GET "/repos/$notesName" $null
+        if ($notes.StatusCode -notin @(200,404)) {throw "Local setup could not read $notesName (HTTP $($notes.StatusCode)); retry."}
+        if ($notes.StatusCode -ne 200 -or $notes.Data.private -or $notes.Data.full_name -ine $notesName) {throw "Local setup requires the verified project repository: public $owner/$repositoryName has no public $notesName companion."}
+    }
+    foreach ($required in @('README.md','AGENTS.md','docs/DESIGN.md','docs/DECISIONS.md','docs/JUDGEMENTS.md','docs/NEXT.md','tools/verify.ps1','tools/Documentation.psm1')) {if (-not (Test-Path -LiteralPath (Join-Path $path $required) -PathType Leaf)) {throw "Project foundation is missing $required."}}
     $line=([IO.File]::ReadAllText((Join-Path $path 'README.md')) -split "`n")[0].TrimEnd("`r")
     if ($line -notmatch '^# (.+)$') {throw 'Project README needs its original top-level project title.'}
     $title=$Matches[1].Replace('\_','_')
-    @{title=$title;description='';owner=$owner;repository=$repositoryName;fullName="$owner/$repositoryName";notesRepository=$repositoryName+'-release-notes';notesFullName="$owner/$repositoryName-release-notes";parent=(Split-Path $path -Parent);projectPath=$path;vaultPath=(Join-Path $path 'docs');defaultBranch='main'}
+    @{title=$title;description='';owner=$owner;repository=$repositoryName;fullName="$owner/$repositoryName";notesRepository=$repositoryName+'-release-notes';notesFullName="$owner/$repositoryName-release-notes";parent=(Split-Path $path -Parent);projectPath=$path;vaultPath=(Join-Path $path 'docs');defaultBranch='main';projectVisibility=$(if ($repo.Data.private) {'private'} else {'public'})}
 }
 Export-ModuleMember -Function Invoke-ObsidianRequest,Get-ObsidianPluginRelease,Get-ObsidianJournalPath,Install-ProjectObsidian,Get-LocalProjectIdentity
