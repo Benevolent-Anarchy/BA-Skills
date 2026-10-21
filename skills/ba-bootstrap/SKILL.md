@@ -9,7 +9,7 @@ Create the documentation and working-process foundation plus a selected starter:
 
 Collect missing identity and preset inputs together: name, description, parent (default `C:\Users\cicel\Dev`), owner (default `Benevolent-Anarchy`, with `cicely-f` available) and preset. Godot offers Compatibility by default, Forward Plus or Mobile. For Tauri, show the proposed application identifier and allow an override. Read [presets.md](references/presets.md) for supported toolchains, exact options and fresh-clone setup.
 
-Preserve name case and replace whitespace with hyphens: “Foo Bar Baz” becomes private `Foo-Bar-Baz` and public `Foo-Bar-Baz-release-notes`. Only the private repository has a local checkout.
+Preserve name case and replace whitespace with hyphens: “Foo Bar Baz” becomes the project repository `Foo-Bar-Baz`, always created private, and its public companion `Foo-Bar-Baz-release-notes`. Only the project repository has a local checkout. Once bootstrap has published the foundation, its owner may make the project public; status, resume and local setup accept that and report it. See [project repository visibility](references/operations.md#project-repository-visibility).
 
 Discussion about a future project authorizes inspection. An actual request to create the named pair authorizes its routine creation steps without repeated approvals. Existing-clone setup authorizes local tooling only.
 
@@ -29,9 +29,9 @@ Add `-Preset tauri` or `-Preset foundation` when selected, and relevant options 
 
 For status/resume or discard of a non-default owner, pass the original `-Owner`. If it is unknown, read the recorded invocation metadata first; an application identifier does not establish the GitHub owner.
 
-Local setup configures Obsidian in the clone's actual Git root and private remote identity. It performs no engine conversion and rejects engine options. Add `-RefreshPlugins` for a deliberate plugin update; ordinary repeated setup preserves preferences. Missing SDKs are reported, with installation handled separately.
+Local setup configures Obsidian in the clone's actual Git root and verified project remote, private or public; it refuses a release-notes companion or unrelated repository. It performs no engine conversion and rejects engine options. Add `-RefreshPlugins` for a deliberate plugin update; ordinary repeated setup preserves preferences. Missing SDKs are reported, with installation handled separately.
 
-Read JSON even after a nonzero exit. Report URLs, path, selection/versions, native staging and checkout verification, and actionable pending items. A build is distinct from an observed app launch. Report installed plugin versions, skipped inconsistent releases, digest status and assets without digests; installed files do not prove loaded plugins.
+Read JSON even after a nonzero exit. Report URLs, path, selection/versions, native staging and checkout verification, `projectVisibility` when the project is public, and actionable pending items. A build is distinct from an observed app launch. Report installed plugin versions, skipped inconsistent releases, digest status and assets without digests; installed files do not prove loaded plugins.
 
 For failures, legacy v1 state, missing/corrupt frozen snapshots, public settings or app enablement, read [operations.md](references/operations.md). Preserve conflicts/journals and unconfirmed identities. An explicit request to abandon preparation before any repository attempt can use the guarded `discard` mode described there, then start the same name again. Completed invocations remove disposable staging and preserve recovery snapshots and later development.
 

@@ -267,6 +267,60 @@ Test 'creation refuses changed repository IDs origins and staged content during 
         Assert (@($f.calls | Where-Object method -ne 'GET').Count -eq $before) "Mutation preceded recovery validation: $change"
     }
 }
+Test 'creation status and resume report a completed project its owner made public' {
+    $f=New-GitHubFixture;$f.supportsPullRequests=$true;$f.appEnabled=$true;$id=New-ApiIdentity 'Opened Later'
+    Assert ((Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup).status -eq 'complete') 'Fixture did not complete.'
+    Assert ((Get-BootstrapStatus $id $f.stateRoot $f.request).projectVisibility -eq 'private') 'Status did not report the private project.'
+    $journalPath=Get-BootstrapJournalPath $id $f.stateRoot;$before=[IO.File]::ReadAllText($journalPath)
+    $f.repos[$id.fullName].private=$false
+    $mutations=@($f.calls | Where-Object method -ne 'GET').Count
+    $status=Get-BootstrapStatus $id $f.stateRoot $f.request
+    $resume=Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    foreach ($report in @($status,$resume)) {
+        Assert ($report.status -eq 'complete' -and $report.conflicts.Count -eq 0 -and $report.projectVisibility -eq 'public') ('Public project was not a non-blocking fact: '+($report | ConvertTo-Json -Depth 9 -Compress))
+    }
+    Assert ([IO.File]::ReadAllText($journalPath) -ceq $before -and @($f.calls | Where-Object method -ne 'GET').Count -eq $mutations) 'Visibility readback rewrote the journal or a repository.'
+}
+Test 'creation still refuses a changed identity or private companion once the project is public' {
+    foreach ($change in @('id','name','companion')) {
+        $f=New-GitHubFixture;$f.supportsPullRequests=$true;$f.appEnabled=$true;$id=New-ApiIdentity ('Opened '+$change)
+        Assert ((Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup).status -eq 'complete') 'Fixture did not complete.'
+        $f.repos[$id.fullName].private=$false
+        switch ($change) {
+            id {$f.repos[$id.fullName].id++}
+            name {$f.repos[$id.fullName].full_name="$($id.owner)/Renamed-Project"}
+            companion {$f.repos[$id.notesFullName].private=$true}
+        }
+        $mutations=@($f.calls | Where-Object method -ne 'GET').Count
+        foreach ($report in @((Get-BootstrapStatus $id $f.stateRoot $f.request),(Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup))) {
+            Assert ($report.status -eq 'blocked' -and ($report.conflicts -join ' ') -match 'identity differs|no longer public') "Changed $change accepted: $($report.conflicts -join '; ')"
+        }
+        Assert (@($f.calls | Where-Object method -ne 'GET').Count -eq $mutations) "Refused $change still mutated a repository."
+    }
+}
+Test 'creation blocks a project made public before its foundation was published until it is private again' {
+    $f=New-GitHubFixture;$id=New-ApiIdentity 'Opened Early';$f.emptyRefStatus=409;$f.emptyRefMessage='Unrelated repository conflict.'
+    $first=Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($first.status -eq 'partial' -and $first.phases.privateRepository -eq 'verified' -and -not $first.phases.ContainsKey('privateContent')) 'Fixture did not stop before publishing the foundation.'
+    $f.emptyRefStatus=404;$f.repos[$id.fullName].private=$false
+    $mutations=@($f.calls | Where-Object method -ne 'GET').Count
+    foreach ($report in @((Get-BootstrapStatus $id $f.stateRoot $f.request),(Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup))) {
+        Assert ($report.status -eq 'blocked' -and ($report.conflicts -join ' ') -match 'became public before bootstrap published its foundation') ('Early public project was accepted: '+($report | ConvertTo-Json -Depth 9 -Compress))
+    }
+    Assert (@($f.calls | Where-Object method -ne 'GET').Count -eq $mutations -and @($f.gitCalls | Where-Object {$_.arguments[0] -eq 'push'}).Count -eq 0) 'Foundation was published into a public repository.'
+    $f.repos[$id.fullName].private=$true
+    $resumed=Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($resumed.phases.privateContent -eq 'verified' -and $resumed.projectVisibility -eq 'private') ('Private again, resume did not publish the foundation: '+($resumed | ConvertTo-Json -Depth 9 -Compress))
+}
+Test 'creation resumes a project made public after its foundation was published' {
+    $f=New-GitHubFixture -FailPhase labels;$f.supportsPullRequests=$true;$f.appEnabled=$true;$id=New-ApiIdentity 'Opened Midway'
+    $first=Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($first.status -eq 'partial' -and $first.phases.privateContent -eq 'verified') 'Fixture did not reach labels.'
+    $f.repos[$id.fullName].private=$false;$f.failPhase=''
+    $resume=Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+    Assert ($resume.status -eq 'complete' -and $resume.conflicts.Count -eq 0 -and $resume.projectVisibility -eq 'public') ('Published public project did not finish: '+($resume | ConvertTo-Json -Depth 9 -Compress))
+    Assert (@($f.calls | Where-Object isRepositoryCreate).Count -eq 2 -and @($f.gitCalls | Where-Object {$_.arguments[0] -eq 'push'}).Count -eq 1) 'Resume recreated or pushed the project again.'
+}
 Test 'creation accepts only browser evidence tied to the public repository ID' {
     $f=New-GitHubFixture;$id=New-ApiIdentity 'Browser'
     Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup | Out-Null
