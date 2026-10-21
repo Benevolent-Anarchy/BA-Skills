@@ -59,7 +59,8 @@ function New-ReleaseSetupConfiguration($Facts, [string[]]$Stores, $ExistingExpor
     $standaloneAliases=@($exports.Keys | Where-Object {$exports[$_] -cin @($desktop | ForEach-Object {$_.name})})
     $verificationSettings=[ordered]@{gate=[ordered]@{script=$verification;arguments=@()}}
     if ($standaloneAliases.Count) {$verificationSettings.standalone=[ordered]@{exports=$standaloneAliases;script=$standaloneScript;arguments=@('{artifact}')}}
-    return [ordered]@{schemaVersion=1;project=$Facts.project;previousRelease=$null;exports=$exports;verification=$verificationSettings;distributions=$distributions;androidVersionCodePolicy='increment-selected'}
+    # A new game tags its releases unless it turns that off; one already configured keeps what it has.
+    return [ordered]@{schemaVersion=1;project=$Facts.project;previousRelease=$null;exports=$exports;verification=$verificationSettings;distributions=$distributions;androidVersionCodePolicy='increment-selected';sourceTag=$true}
 }
 
 # Lists the stores a configuration declares, in its order; notes counts only while true, as only then is it selectable.
@@ -184,7 +185,7 @@ function Get-ReleaseSetup([string]$Repository, [string[]]$Destination=@(), $Conf
 # Sets public dotted paths, expanding a channel/depot shorthand only when an override is supplied.
 function Set-ReleaseSetupAnswer($Configuration, [string]$Key, $Value) {
     $parts=$Key.Split('.')
-    if ($parts[0] -cnotin @('project','previousRelease','exports','verification','distributions','androidVersionCodePolicy')) {throw "Unknown setup answer: $Key"}
+    if ($parts[0] -cnotin @('project','previousRelease','exports','verification','distributions','androidVersionCodePolicy','sourceTag')) {throw "Unknown setup answer: $Key"}
     $cursor=$Configuration
     for ($i=0;$i -lt $parts.Count-1;$i++) {
         $part=$parts[$i]
@@ -214,6 +215,7 @@ function Merge-ReleaseSetupAnswers($report, $answers, [string]$Repository) {
         $candidate=New-ReleaseSetupConfiguration $report.facts $stores $config.exports
         $candidate.previousRelease=$config.previousRelease;$candidate.verification=$config.verification
         if ($config.Contains('androidVersionCodePolicy')) {$candidate.androidVersionCodePolicy=$config.androidVersionCodePolicy} else {$candidate.Remove('androidVersionCodePolicy')}
+        if ($config.Contains('sourceTag')) {$candidate.sourceTag=$config.sourceTag} else {$candidate.Remove('sourceTag')}
         foreach ($store in @($candidate.distributions.Keys)) {if ($store -cne 'notes' -and $config.distributions.Contains($store)) {$candidate.distributions[$store]=$config.distributions[$store]}}
         $config=$candidate
     }

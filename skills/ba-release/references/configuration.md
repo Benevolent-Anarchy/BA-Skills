@@ -22,6 +22,7 @@ blockers, including deliberately unknown publication facts.
 | `verification.standalone` | Shared `{exports, script, arguments?}` hook, or array of those objects for different scripts. `exports` contains aliases. An unknown script may remain `null`. |
 | `distributions` | Store settings below. Declaring a store makes operations available; nothing is selected automatically. |
 | `androidVersionCodePolicy` | Default `increment-selected`: reserve each selected Android preset's existing code + 1 once. `existing` preserves a separately managed valid scheme. Never derive codes by removing version dots. |
+| `sourceTag` | `true` tags each shipped release on origin with an annotated `v<version>` tag on its source, pushed once a store is live; see [source tag](#source-tag). Omitted or `false`, nothing is tagged. A new setup writes `true`. |
 
 Godot `application/config/version` supplies the human-readable version. Operations
 remain `patch`, `minor`, `major` and `current`; a retry or later destination
@@ -118,8 +119,25 @@ absolute machine paths or credentials. Windows file/product version overrides
 must be empty or follow the source version (`.0` accepted). Android `version/name`
 must be empty (Godot fallback) or match it. Reservation updates matching explicit
 metadata and selected Android counters once; commit those source settings locally
-before exporting. Scripts do not create source commits, tags or pushes. See
-[execution](execution.md).
+before exporting. Scripts create no source commits and push no branches; the only
+source push is a `sourceTag` release tag. See [execution](execution.md).
+
+## Source tag
+
+With `"sourceTag": true` every plan shows the tag publication will make:
+`sourceTag.name` is `v` and the version, `commit` the release's source,
+`repository` the GitHub repository origin names, and `message` the Godot title and
+version. A version no Git tag name can hold blocks the plan. Approving the plan
+approves the tag. The tag names the source the release was first prepared from:
+an extension that commits an Android counter moves the plan's `head`, never the
+tag, and that artifact's own source stays in the journal.
+
+A new setup writes `true`. A game configured earlier keeps tagging off until a
+setup answer `"sourceTag": true` turns it on; leave it off for a game that already
+tags its releases another way. Changing stores keeps the game's choice, and
+`-MigrateConfiguration` refuses a change to it, so a prepared release never gains
+or loses its tag. Publication makes the tag only after a store is live; see
+[execution](execution.md#approval-publication-and-recovery).
 
 ## First-run setup
 

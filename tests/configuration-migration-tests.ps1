@@ -15,7 +15,7 @@ function Save-MigrationCommit([string]$Repo, [string]$Message) {
 function Set-PlannerCommitProbe([string]$Selection, [scriptblock]$Inject) {
     & (Get-Module Release) {param($selection,$inject)
         $script:PlannerProbe=@{planner=${function:Get-ReleasePlan};selection=$selection;inject=$inject}
-        function script:Get-ReleasePlan([string]$Repository, [string[]]$Destination=@(), $BaselineSnapshot=$null, [string]$StateRoot, [string]$VersionChange='current', $FrozenPrevious, [string]$ReleaseVersion) {
+        function script:Get-ReleasePlan([string]$Repository, [string[]]$Destination=@(), $BaselineSnapshot=$null, [string]$StateRoot, [string]$VersionChange='current', $FrozenPrevious, [string]$ReleaseVersion, [string]$TagCommit) {
             $probe=$script:PlannerProbe
             $complete=$null -ne $BaselineSnapshot -and -not @($Destination | Where-Object {$_ -cne 'notes' -and -not $BaselineSnapshot.Contains($_)}).Count
             if ($probe.inject -and $complete -and ($Destination -join ',') -ceq $probe.selection) {$run=$probe.inject;$probe.inject=$null;& $run}

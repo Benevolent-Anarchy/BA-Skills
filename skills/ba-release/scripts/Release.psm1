@@ -8,7 +8,7 @@ Import-Module (Join-Path $PSScriptRoot 'HostPaths.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'StoreAdapters.psm1') -Force
 . (Join-Path $PSScriptRoot 'Configuration.ps1')
 
-# Uses only read-only Git commands here; release scripts do not create source commits or tags.
+# Uses only read-only Git commands here; release scripts create no source commits, and only SourceTag.ps1 makes a tag.
 function Read-ReleaseGit([string]$Repository, [string[]]$Arguments) {
     $result = Invoke-ReleaseTool 'git' (@('--no-optional-locks','-C',$Repository) + $Arguments) $Repository
     if ($result.exitCode -ne 0) { throw "Git read failed: $($Arguments[0]). Check the repository or ref." }
@@ -107,7 +107,7 @@ function Get-ReleaseConfiguration([string]$Repository, $Configuration = $null) {
     try { Assert-ReleaseJson $json.RootElement } finally { $json.Dispose() }
     $document = $raw | ConvertFrom-Json -AsHashtable
     $config = ConvertTo-ReleaseRuntimeConfiguration $document
-    Assert-ReleaseFields $config @('schemaVersion','project','previousReleaseRef','exports','verification','destinations','androidVersionCodePolicy','standalone','destinationBaselines') @('schemaVersion','project','previousReleaseRef','exports','verification','destinations') 'release.json'
+    Assert-ReleaseFields $config @('schemaVersion','project','previousReleaseRef','exports','verification','destinations','androidVersionCodePolicy','standalone','destinationBaselines','sourceTag') @('schemaVersion','project','previousReleaseRef','exports','verification','destinations') 'release.json'
     if ($config.Contains('androidVersionCodePolicy') -and $config.androidVersionCodePolicy -cnotin @('existing','increment-selected')) {throw 'androidVersionCodePolicy must be existing or increment-selected.'}
     if ($config.schemaVersion -isnot [long] -and $config.schemaVersion -isnot [int]) { throw 'schemaVersion must be integer 1.' }
     if ($config.schemaVersion -ne 1) { throw 'Unsupported schemaVersion; expected 1.' }
@@ -254,8 +254,9 @@ function Get-ReleaseSourceRepository([string]$Repository) {
 # Emits a reproducible plan without exports, checks, writes, Git mutations or network access. A prepared release passes its
 # own canonical boundary as $FrozenPrevious, as it passes its baselines, so what later ships elsewhere never changes its plan.
 # $ReleaseVersion names the version being released where it is not yet the plan's own, as before a bump is reserved, so the
-# boundary leaves out only that release's receipts.
-function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $BaselineSnapshot=$null, [string]$StateRoot, [ValidateSet('current','patch','minor','major')][string]$VersionChange='current', $FrozenPrevious, [string]$ReleaseVersion) {
+# boundary leaves out only that release's receipts. A prepared release passes its tag's commit as $TagCommit, so an
+# extension that moves HEAD never moves the tag.
+function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $BaselineSnapshot=$null, [string]$StateRoot, [ValidateSet('current','patch','minor','major')][string]$VersionChange='current', $FrozenPrevious, [string]$ReleaseVersion, [string]$TagCommit) {
     $settings = Get-ReleaseConfiguration $Repository
     $version = Get-ReleaseVersion $settings.version $VersionChange
     $Repository = $settings.repository
@@ -368,11 +369,26 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
         else { $draft += "No commits since the confirmed previous release.`n" }
     } else { $draft += "Previous published release boundary is unconfirmed; release notes cannot yet be derived.`n" }
     $draft+="`n[Release availability](../availability/$version.json)`n"
+    # Only a game that turns sourceTag on plans a tag, which names the release's source: HEAD for a new release.
+    $sourceTag=$null
+    if ($settings.config.sourceTag) {
+        $tagged=$head
+        if ($TagCommit) {
+            $saved = Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'rev-parse','--verify','--quiet',"$TagCommit^{commit}") $Repository
+            $ancestor = if ($saved.exitCode -eq 0 -and $saved.text.Trim() -ceq $TagCommit) {Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Repository,'merge-base','--is-ancestor',$TagCommit,$head) $Repository} else {$null}
+            if (-not $ancestor -or $ancestor.exitCode -ne 0) { throw 'The prepared release''s tag commit must be an exact commit that is an ancestor of HEAD.' }
+            $tagged=$TagCommit
+        }
+        $tagName="v$version"
+        $format=Invoke-ReleaseTool 'git' @('check-ref-format',"refs/tags/$tagName") $Repository
+        if ($format.exitCode -ne 0) { $blockers.Add("sourceTag: $tagName is not a valid Git tag name; release another version or turn sourceTag off.") }
+        $sourceTag=[ordered]@{name=$tagName; commit=$tagged; repository=(Get-ReleaseSourceRepository $Repository); message="$(if ($settings.title) {$settings.title} else {'Release'}) $version"}
+    }
     $configurationReady=($blockers.Count -eq 0)
     $sourceChanges=@($dirty.Split("`n") | Where-Object {$_})
     if ($dirty) { $blockers.Add('The source working tree contains uncommitted files; review and commit or resolve them before preparation.') }
     if ($VersionChange -ne 'current') {$blockers.Add('Projected source version must be reserved and committed by prepare before this becomes a buildable release plan.')}
-    return [ordered]@{
+    $plan = [ordered]@{
         schemaVersion=1; mode='plan'; planId=$planId; repository=$Repository; head=$head
         version=$version; sourceVersion=$settings.version; versionChange=$VersionChange; preview=($VersionChange -ne 'current'); configSha256=$settings.configHash; previousCommit=$previous
         selectedDestinations=$selected; notesRepository=$settings.notesRepository;baselines=$baselines
@@ -380,6 +396,8 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
         notesDraft=$draft; configurationReady=$configurationReady; sourceChanges=$sourceChanges
         blockers=$blockers.ToArray(); ready=($blockers.Count -eq 0)
     }
+    if ($sourceTag) {$plan.sourceTag=$sourceTag}
+    return $plan
 }
 
 # Writes only owned journal files through a same-directory atomic replacement.
@@ -495,7 +513,7 @@ function Invoke-ReleasePrepare([string]$Repository, [string[]]$Destination, [str
     $priorState=if (Test-Path -LiteralPath (Join-Path $statePath 'state.json')) {[IO.File]::ReadAllText((Join-Path $statePath 'state.json')) | ConvertFrom-Json -AsHashtable} else {$null}
     # A prepared release keeps its frozen baselines and canonical boundary from the first plan on, however far another checkout
     # has since moved them. A new one is checked at the version it is about to reserve.
-    $frozen=if ($priorState -and -not $NewRelease) {@{BaselineSnapshot=$priorState.plan.baselines;FrozenPrevious=$priorState.plan.previousCommit}} else {@{}}
+    $frozen=if ($priorState -and -not $NewRelease) {@{BaselineSnapshot=$priorState.plan.baselines;FrozenPrevious=$priorState.plan.previousCommit;TagCommit=(Get-ReleasePlanTagCommit $priorState.plan)}} else {@{}}
     $releasing=if ($frozen.Count) {@{}} else {@{ReleaseVersion=(Get-ReleaseVersion $settings.version $VersionChange)}}
     $plan = Get-ReleasePlan -Repository $Repository -Destination $Destination -StateRoot $StateRoot @frozen @releasing
     if (-not $plan.configurationReady) { throw "Release plan is blocked: $($plan.blockers -join ' ')" }
@@ -569,7 +587,7 @@ function Invoke-ReleasePrepare([string]$Repository, [string[]]$Destination, [str
             } catch { $state.exports[$preset.name].status='failed'; $state.exports[$preset.name].error='Local export failed; inspect the engine and preset.' }
             Write-ReleaseJson $stateFile $state
         }
-        $fresh = Get-ReleasePlan $settings.repository $plan.selectedDestinations $plan.baselines -FrozenPrevious $plan.previousCommit
+        $fresh = Get-ReleasePlan $settings.repository $plan.selectedDestinations $plan.baselines -FrozenPrevious $plan.previousCommit -TagCommit (Get-ReleasePlanTagCommit $plan)
         if (-not $fresh.ready -or $fresh.planId -cne $plan.planId) { $state.status='preparation-failed'; Write-ReleaseJson $stateFile $state; throw 'Source or configuration changed during preparation.' }
         $state.status = if (@($state.exports.Values | Where-Object {$_.status -ne 'succeeded'}).Count) {'preparation-failed'} else {'prepared'}
         if ($state.status -eq 'prepared') {
@@ -624,13 +642,17 @@ function Get-ReleaseNotesHash([string]$StatePath, $Plan) {
 }
 
 # Summarizes progress without conflating uploaded/submitted artifacts with verified store publication. An abandoned
-# destination has no more work, so only the others decide the status.
+# destination has no more work, so only the others decide the status. A planned tag is one more step once publication has
+# reached it: it waits for a live store, and a release is published only once its tag is on origin.
 function Get-ReleaseOverallStatus($State) {
     $statuses=@($State.plan.selectedDestinations | ForEach-Object {$State.destinations[$_].status} | Where-Object {$_ -ne 'abandoned'})
     if (-not $statuses.Count) {return 'abandoned'}
+    $tag=if ($State.plan.Contains('sourceTag') -and $State.Contains('sourceTag') -and $State.sourceTag.status -ne 'pending') {$State.sourceTag} else {$null}
+    if ($tag) {$statuses+=@($tag.status)}
     if ($statuses -contains 'uncertain' -or $statuses -contains 'in-progress') {return 'needs-reconciliation'}
     $complete=@($statuses | Where-Object {$_ -in @('succeeded','submitted','awaiting-store-action')})
     $failed=@($State.plan.selectedDestinations | Where-Object {$State.destinations[$_].status -eq 'failed' -or ($State.destinations[$_].Contains('preflightStatus') -and $State.destinations[$_].preflightStatus -eq 'failed')})
+    if ($tag -and ($tag.status -eq 'failed' -or ($tag.Contains('preflightStatus') -and $tag.preflightStatus -eq 'failed'))) {$failed+=@('sourceTag')}
     if ($failed.Count) {return $(if ($complete.Count) {'partial-failure'} else {'publication-failed'})}
     if ($statuses -contains 'pending') {return 'prepared'}
     if (@($statuses | Where-Object {$_ -notin @('succeeded','submitted','awaiting-store-action','awaiting-release','held')}).Count -eq 0) {
@@ -673,7 +695,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
         $stateFile = Join-Path $StatePath 'state.json'
         $state = [IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable
         if ($state.schemaVersion -ne 1 -or $state.status -in @('preparing','preparation-failed') -or $state.verification -ne 'succeeded') { throw 'Release has not been prepared successfully.' }
-        $fresh = Get-ReleasePlan $state.plan.repository $state.plan.selectedDestinations $state.plan.baselines -FrozenPrevious $state.plan.previousCommit
+        $fresh = Get-ReleasePlan $state.plan.repository $state.plan.selectedDestinations $state.plan.baselines -FrozenPrevious $state.plan.previousCommit -TagCommit (Get-ReleasePlanTagCommit $state.plan)
         if (-not $fresh.ready -or $fresh.planId -cne $state.plan.planId) { throw 'Source or release configuration changed after preparation.' }
         foreach ($destination in $state.plan.destinations) {
             $record=$state.destinations[$destination.id]
@@ -716,7 +738,23 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 $notesRecord.error='Public notes preflight failed; check public visibility, write permissions, approved availability link and conflicting notes before any store publication.'
                 if ($_.Exception.Data.Contains('releaseDiagnostic')) {$notesRecord.error += ' '+$_.Exception.Data['releaseDiagnostic']}
                 $state.status=Get-ReleaseOverallStatus $state;Write-ReleaseJson $stateFile $state
-                return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}
+                return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations;sourceTag=$state['sourceTag']}
+            }
+        }
+        # A tag that could never be made as planned stops publication before any store write, as the notes preflight does.
+        if ($state.plan.Contains('sourceTag') -and (Get-ReleaseSourceTagRecord $state).status -ne 'succeeded') {
+            $tagRecord=$state.sourceTag
+            try {
+                Assert-ReleaseSourceTagDestination $state.plan
+                if ($tagRecord.Contains('preflightStatus') -and $tagRecord.preflightStatus -eq 'failed') {$tagRecord.error=$null}
+                $tagRecord.preflightStatus='succeeded'
+            }
+            catch {
+                $tagRecord.status='failed';$tagRecord.preflightStatus='failed'
+                $tagRecord.error='Source tag preflight failed; check origin, Git''s tagger identity and any existing tag of this name before any store publication.'
+                if ($_.Exception.Data.Contains('releaseDiagnostic')) {$tagRecord.error += ' '+$_.Exception.Data['releaseDiagnostic']}
+                $state.status=Get-ReleaseOverallStatus $state;Write-ReleaseJson $stateFile $state
+                return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations;sourceTag=$tagRecord}
             }
         }
         # Hold the game's shared ledger from the first channel check to the last receipt: no other checkout under this state
@@ -738,7 +776,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                     try {Publish-ReleaseAvailability $state $StatePath $GhExecutable;$record.error=$null}
                     catch {
                         $record.error=if ($_.Exception.Data.Contains('releaseDiagnostic')) {'Public availability record was not updated. '+$_.Exception.Data['releaseDiagnostic']} else {'Public availability record update failed; rerun publication after inspecting GitHub access.'}
-                        $state.status='partial-failure';Write-ReleaseJson $stateFile $state;return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations}
+                        $state.status='partial-failure';Write-ReleaseJson $stateFile $state;return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations;sourceTag=$state['sourceTag']}
                     }
                 }
             }
@@ -820,10 +858,25 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             # A channel this upload made live is recorded at once, so a later check elsewhere sees it even if this run stops.
             if ($record.remote.Contains('live') -and $record.remote.live -eq $true) {Save-ReleaseLiveReceipts $StatePath $state @($destination.id)}
         }
+        # The tag says this release shipped, so like the public notes it waits until a store is actually live.
+        if ($state.plan.Contains('sourceTag') -and $state.sourceTag.status -ne 'succeeded') {
+            $tagRecord=$state.sourceTag
+            if (-not (Test-ReleaseShipped $state $StatePath)) {$tagRecord.status='awaiting-release';$tagRecord.error=$null}
+            else {
+                try {Publish-ReleaseSourceTag $state.plan;$tagRecord.status='succeeded';$tagRecord.error=$null}
+                catch {
+                    $tagRecord.status='failed'
+                    # Do not persist Git's own output: a remote URL in it can carry credentials.
+                    $tagRecord.error='Source tag attempt failed; check push access to origin and any existing tag of this name, then rerun publication.'
+                    if ($_.Exception.Data.Contains('releaseDiagnostic')) {$tagRecord.error += ' '+$_.Exception.Data['releaseDiagnostic']}
+                }
+            }
+            Write-ReleaseJson $stateFile $state
+        }
         $state.status = Get-ReleaseOverallStatus $state
         Write-ReleaseJson $stateFile $state
         Save-ReleaseLiveReceipts $StatePath $state
-        return @{status=$state.status; statePath=$StatePath; version=$state.plan.version; destinations=$state.destinations}
+        return @{status=$state.status; statePath=$StatePath; version=$state.plan.version; destinations=$state.destinations; sourceTag=$state['sourceTag']}
     } finally { if ($ledgerLock) {$ledgerLock.Dispose()}; $lock.Dispose() }
 }
 # Reads an observed store receipt, refusing credential-like values and duplicate keys, with its observation time kept as
@@ -907,6 +960,7 @@ function Confirm-ReleaseStoreCompletion([string]$StatePath, [string]$ReceiptPath
 . (Join-Path $PSScriptRoot 'ReleaseRecord.ps1')
 . (Join-Path $PSScriptRoot 'SentRecord.ps1')
 . (Join-Path $PSScriptRoot 'PublicNotes.ps1')
+. (Join-Path $PSScriptRoot 'SourceTag.ps1')
 . (Join-Path $PSScriptRoot 'Doctor.ps1')
 . (Join-Path $PSScriptRoot 'PublicationHold.ps1')
 . (Join-Path $PSScriptRoot 'PlanComparison.ps1')

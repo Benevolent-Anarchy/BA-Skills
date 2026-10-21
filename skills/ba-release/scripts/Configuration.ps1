@@ -31,12 +31,15 @@ function Assert-ReleasePatternList($Patterns, [string]$Location) {
 
 # Expands shared configuration without changing the original document or its approval hash.
 function ConvertTo-ReleaseRuntimeConfiguration($Document, [switch]$AllowIncomplete) {
-    $fields=@('schemaVersion','project','previousRelease','exports','verification','distributions','androidVersionCodePolicy')
+    $fields=@('schemaVersion','project','previousRelease','exports','verification','distributions','androidVersionCodePolicy','sourceTag')
     Assert-ReleaseFields $Document $fields @('schemaVersion','project','previousRelease','exports','verification','distributions') 'release.json'
     if (($Document.schemaVersion -isnot [int] -and $Document.schemaVersion -isnot [long]) -or $Document.schemaVersion -ne 1) {
         throw 'Unsupported schemaVersion; expected integer 1.'
     }
     Assert-ReleaseBaselineSetting $Document.previousRelease 'Root'
+    # Off unless set, so a game that leaves it out plans exactly as it did before the setting existed.
+    $sourceTag=Get-ReleaseInheritedSetting $Document 'sourceTag' $false
+    if ($sourceTag -isnot [bool]) {throw 'sourceTag must be a boolean; true tags each release on origin once a store is live.'}
     if ($Document.exports -isnot [Collections.IDictionary] -or (-not $AllowIncomplete -and $Document.exports.Count -eq 0)) {
         throw 'exports must map aliases to existing Godot preset names.'
     }
@@ -127,5 +130,5 @@ function ConvertTo-ReleaseRuntimeConfiguration($Document, [switch]$AllowIncomple
     }
     $policy=Get-ReleaseInheritedSetting $Document 'androidVersionCodePolicy' 'increment-selected'
     if ($policy -cnotin @('increment-selected','existing')) {throw 'androidVersionCodePolicy must be increment-selected or existing.'}
-    return [ordered]@{schemaVersion=1;project=$Document.project;previousReleaseRef=$Document.previousRelease;exports=@($Document.exports.Values);verification=[ordered]@{script=$gate.script;arguments=(Get-ReleaseInheritedSetting $gate 'arguments' @())};standalone=$checks.ToArray();destinations=$destinations.ToArray();destinationBaselines=$baselines;androidVersionCodePolicy=$policy}
+    return [ordered]@{schemaVersion=1;project=$Document.project;previousReleaseRef=$Document.previousRelease;exports=@($Document.exports.Values);verification=[ordered]@{script=$gate.script;arguments=(Get-ReleaseInheritedSetting $gate 'arguments' @())};standalone=$checks.ToArray();destinations=$destinations.ToArray();destinationBaselines=$baselines;androidVersionCodePolicy=$policy;sourceTag=$sourceTag}
 }

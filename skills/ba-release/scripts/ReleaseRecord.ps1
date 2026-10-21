@@ -227,7 +227,7 @@ function Get-ReleaseConfigurationMigration($State, $Settings, [string]$Head) {
     # The diff above leaves project files untouched, so the frozen document validates against the same presets.
     $frozen=(Get-ReleaseConfiguration $repository $prepared[0]).config
     $current=$Settings.config
-    $fields=[ordered]@{schemaVersion='schemaVersion';project='project';previousReleaseRef='previousRelease';verification='verification.gate';androidVersionCodePolicy='androidVersionCodePolicy'}
+    $fields=[ordered]@{schemaVersion='schemaVersion';project='project';previousReleaseRef='previousRelease';verification='verification.gate';androidVersionCodePolicy='androidVersionCodePolicy';sourceTag='sourceTag'}
     foreach ($field in $fields.Keys) {
         if ((Get-ReleaseComparableValue $frozen[$field]) -cne (Get-ReleaseComparableValue $current[$field])) {throw "Configuration migration only adds stores; $($fields[$field]) changed since preparation."}
     }
@@ -280,7 +280,7 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
     # only the added channels are observed now.
     $frozen=[ordered]@{}
     foreach ($id in $state.plan.baselines.Keys) {$frozen[$id]=$state.plan.baselines[$id]}
-    $fresh=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit
+    $fresh=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit -TagCommit (Get-ReleasePlanTagCommit $state.plan)
     Assert-ReleaseAddedBaselines $state $fresh.baselines $added
     if ($settings.configHash -cne $state.plan.configSha256) {
         $migration=Get-ReleaseConfigurationMigration $state $settings $fresh.head
@@ -290,15 +290,15 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
         # Every introduced destination is frozen with the release, selected or not, so each must be complete now.
         $adopted=@(@($selected)+@($migration.addedDestinations) | Sort-Object -Unique -CaseSensitive)
         $introduced=@($adopted | Where-Object {$_ -cnotin $state.plan.selectedDestinations})
-        $observed=Get-ReleasePlan $settings.repository $adopted $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit
+        $observed=Get-ReleasePlan $settings.repository $adopted $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit -TagCommit (Get-ReleasePlanTagCommit $state.plan)
         Assert-ReleaseAddedBaselines $state $observed.baselines $introduced
         $snapshot=[ordered]@{}
         foreach ($id in $state.plan.baselines.Keys) {$snapshot[$id]=$state.plan.baselines[$id]}
         foreach ($id in $introduced) {if ($observed.baselines.Contains($id)) {$snapshot[$id]=$observed.baselines[$id]}}
-        $expanded=Get-ReleasePlan $settings.repository $adopted $snapshot $stateRoot -FrozenPrevious $state.plan.previousCommit
+        $expanded=Get-ReleasePlan $settings.repository $adopted $snapshot $stateRoot -FrozenPrevious $state.plan.previousCommit -TagCommit (Get-ReleasePlanTagCommit $state.plan)
         if (-not $expanded.ready) {throw "Configuration migration adopts every added destination, selected or not; complete them or leave them out of the committed change. Plan is blocked: $($expanded.blockers -join ' ')"}
         # Phase one rebinds only the original selection, keeping its frozen baselines and notes boundary.
-        $migrated=Get-ReleasePlan $settings.repository $state.plan.selectedDestinations $state.plan.baselines $stateRoot -FrozenPrevious $state.plan.previousCommit
+        $migrated=Get-ReleasePlan $settings.repository $state.plan.selectedDestinations $state.plan.baselines $stateRoot -FrozenPrevious $state.plan.previousCommit -TagCommit (Get-ReleasePlanTagCommit $state.plan)
         if (-not $migrated.ready) {throw "Migrated release plan is blocked: $($migrated.blockers -join ' ')"}
         if ($migrated.previousCommit -cne $state.plan.previousCommit) {throw 'Configuration migration cannot move the previous-release boundary of the prepared release.'}
         # Planning rereads HEAD and release.json, so save only plans built from the snapshot that passed validation.
@@ -352,9 +352,9 @@ function Expand-ReleaseDestinations([string]$StatePath, [string[]]$Destination, 
     }
     $snapshot=[ordered]@{}
     foreach ($id in $state.plan.baselines.Keys) {$snapshot[$id]=$state.plan.baselines[$id]}
-    $observed=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit
+    $observed=Get-ReleasePlan $settings.repository $selected $frozen $stateRoot -FrozenPrevious $state.plan.previousCommit -TagCommit (Get-ReleasePlanTagCommit $state.plan)
     foreach ($id in $added) {if ($observed.baselines.Contains($id)) {$snapshot[$id]=$observed.baselines[$id]}}
-    $plan=Get-ReleasePlan $settings.repository $selected $snapshot -FrozenPrevious $state.plan.previousCommit
+    $plan=Get-ReleasePlan $settings.repository $selected $snapshot -FrozenPrevious $state.plan.previousCommit -TagCommit (Get-ReleasePlanTagCommit $state.plan)
     if (-not $plan.ready) {throw "Extension plan is blocked: $($plan.blockers -join ' ')"}
     if ($plan.head -cne $head -or $plan.configSha256 -cne $state.plan.configSha256) {throw 'Source or release.json changed during extension; nothing was saved. Inspect the change, then retry.'}
         $current=[IO.File]::ReadAllText($stateFile) | ConvertFrom-Json -AsHashtable

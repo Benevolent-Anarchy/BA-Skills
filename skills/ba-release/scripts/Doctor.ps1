@@ -43,6 +43,10 @@ function Get-ReleaseDoctor {
     }
     if ('itch' -in $types) {& $add 'itch-auth' 'unverified' 'Verify the existing Butler login and selected target access before publication; no sign-in was attempted.'}
     if ('notes' -in $types) {& $add 'notes-access' 'unverified' 'Verify the public notes repository and GitHub write permission before publication; no network request was made.'}
+    if ($plan.Contains('sourceTag')) {
+        $identity=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$settings.repository,'var','GIT_COMMITTER_IDENT') $settings.repository
+        & $add 'source-tag' $(if ($identity.exitCode -eq 0) {'unverified'} else {'blocked'}) $(if ($identity.exitCode -eq 0) {'Git can name the annotated tag''s tagger; push access to origin and existing tags there are not verified, as no network request was made.'} else {'Git has no tagger identity for the annotated release tag; set user.name and user.email for this checkout.'})
+    }
     $engine=$null;$engineVersion=$null;$directories=$null
     if ($plan.requiredExports.Count) {
         try {$engine=Get-ReleaseEngine $GodotExecutable} catch {}

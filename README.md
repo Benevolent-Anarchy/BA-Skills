@@ -25,7 +25,9 @@ Game settings live in that game's root release.json. See the skill's concise
 [execution](skills/ba-release/references/execution.md) references. Setup inspects
 configuration and runs read-only plans; writes require explicit validated answers.
 Publication requires explicit destination
-selection and approval of the concrete plan and notes.
+selection and approval of the concrete plan and notes. A game whose release.json
+sets `sourceTag`, as a new setup does, also gets an annotated `v<version>` tag on
+each release's source, pushed to origin once a store is live and never moved.
 
 First use: run `scripts/release.ps1 -Mode setup -Repository <game-root>` from
 the canonical skill directory for inspected facts and missing questions, or add
