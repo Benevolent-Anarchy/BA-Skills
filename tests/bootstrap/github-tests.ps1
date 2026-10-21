@@ -312,6 +312,29 @@ Test 'creation blocks a project made public before its foundation was published 
     $resumed=Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
     Assert ($resumed.phases.privateContent -eq 'verified' -and $resumed.projectVisibility -eq 'private') ('Private again, resume did not publish the foundation: '+($resumed | ConvertTo-Json -Depth 9 -Compress))
 }
+Test 'creation rechecks the project repository immediately before its initial push' {
+    foreach ($change in @('visibility','id')) {
+        $f=New-GitHubFixture;$id=New-ApiIdentity ('Late '+$change)
+        # Change the repository after both preflights, at the main-ref read that precedes the push.
+        $inner=$f.request;$late=@{pending=$true}
+        $request={param($Method,$Endpoint,$Body)
+            if ($late.pending -and $Endpoint -eq "/repos/$($id.fullName)/git/ref/heads/main") {
+                $late.pending=$false
+                if ($change -eq 'visibility') {$f.repos[$id.fullName].private=$false} else {$f.repos[$id.fullName].id++}
+            }
+            & $inner $Method $Endpoint $Body
+        }.GetNewClosure()
+        $report=Invoke-FoundationFixtureBootstrap $id $f.stateRoot $request $f.git $f.obsidianSetup
+        $expected=if ($change -eq 'visibility') {'became public before bootstrap published its foundation'} else {'identity differs'}
+        Assert ($report.status -eq 'blocked' -and ($report.conflicts -join ' ') -match $expected) ("Late $change change was not blocked: "+($report | ConvertTo-Json -Depth 9 -Compress))
+        Assert (@($f.gitCalls | Where-Object {$_.arguments[0] -eq 'push'}).Count -eq 0 -and -not $report.phases.ContainsKey('privateContent')) "Foundation was pushed after a late $change change."
+        if ($change -eq 'visibility') {
+            $f.repos[$id.fullName].private=$true
+            $resumed=Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup
+            Assert ($resumed.phases.privateContent -eq 'verified' -and @($f.gitCalls | Where-Object {$_.arguments[0] -eq 'push'}).Count -eq 1) 'Private again, resume did not publish the foundation once.'
+        }
+    }
+}
 Test 'creation resumes a project made public after its foundation was published' {
     $f=New-GitHubFixture -FailPhase labels;$f.supportsPullRequests=$true;$f.appEnabled=$true;$id=New-ApiIdentity 'Opened Midway'
     $first=Invoke-FoundationFixtureBootstrap $id $f.stateRoot $f.request $f.git $f.obsidianSetup

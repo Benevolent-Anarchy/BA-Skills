@@ -166,6 +166,7 @@ Test 'obsidian derives fresh clone identity with isolated vault journals and no 
     $second=$first.Clone();$second.projectPath=Join-Path $cloneParent 'Renamed Local Folder';$second.parent=$cloneParent;$second.vaultPath=Join-Path $second.projectPath 'docs'
     Assert ((Get-ObsidianJournalPath $first $f.stateRoot) -ne (Get-ObsidianJournalPath $second $f.stateRoot)) 'Two clones share state.'
     Assert ($first.title -ceq $f.identity.title -and $first.projectPath -eq $f.identity.projectPath) 'Identity guessed from directory instead of Git/README.'
+    Assert ($first.projectVisibility -ceq 'private') 'Private project visibility was not returned.'
 }
 Test 'obsidian local setup accepts a project made public and refuses its companion and unrelated repositories' {
     $f=New-ObsidianFixture 'public project'
@@ -177,7 +178,7 @@ Test 'obsidian local setup accepts a project made public and refuses its compani
         return @{StatusCode=404;Data=$null}
     }.GetNewClosure()
     $id=Get-LocalProjectIdentity $f.identity.projectPath $request
-    Assert ($id.fullName -ceq $project -and $id.notesFullName -ceq $notes -and $id.vaultPath -eq $f.identity.vaultPath) 'Public project was refused or misidentified.'
+    Assert ($id.fullName -ceq $project -and $id.notesFullName -ceq $notes -and $id.vaultPath -eq $f.identity.vaultPath -and $id.projectVisibility -ceq 'public') 'Public project was refused or misidentified.'
     # The checkout holds a full foundation, so only the companion check can refuse these.
     Invoke-FixtureGit $f.identity.projectPath @('remote','set-url','origin',"https://github.com/$notes.git") | Out-Null
     Expect-Error {Get-LocalProjectIdentity $f.identity.projectPath $request} 'no public .+-release-notes-release-notes companion'

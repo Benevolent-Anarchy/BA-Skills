@@ -326,6 +326,6 @@ function Get-LocalProjectIdentity([string]$Repository,[scriptblock]$Request={par
     $line=([IO.File]::ReadAllText((Join-Path $path 'README.md')) -split "`n")[0].TrimEnd("`r")
     if ($line -notmatch '^# (.+)$') {throw 'Project README needs its original top-level project title.'}
     $title=$Matches[1].Replace('\_','_')
-    @{title=$title;description='';owner=$owner;repository=$repositoryName;fullName="$owner/$repositoryName";notesRepository=$repositoryName+'-release-notes';notesFullName="$owner/$repositoryName-release-notes";parent=(Split-Path $path -Parent);projectPath=$path;vaultPath=(Join-Path $path 'docs');defaultBranch='main'}
+    @{title=$title;description='';owner=$owner;repository=$repositoryName;fullName="$owner/$repositoryName";notesRepository=$repositoryName+'-release-notes';notesFullName="$owner/$repositoryName-release-notes";parent=(Split-Path $path -Parent);projectPath=$path;vaultPath=(Join-Path $path 'docs');defaultBranch='main';projectVisibility=$(if ($repo.Data.private) {'private'} else {'public'})}
 }
 Export-ModuleMember -Function Invoke-ObsidianRequest,Get-ObsidianPluginRelease,Get-ObsidianJournalPath,Install-ProjectObsidian,Get-LocalProjectIdentity

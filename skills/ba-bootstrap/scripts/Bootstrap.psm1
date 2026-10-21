@@ -391,6 +391,10 @@ function Invoke-Bootstrap(
             # GitHub uses this specific conflict for a newly created repository with no commits.
             if ($remote.StatusCode -eq 409 -and ($null -eq $remote.Data -or $remote.Data.message -cne 'Git Repository is empty.')) {throw 'Initial main ref has an unresolved GitHub conflict; preserve the checkout.'}
             if ($remote.StatusCode -in @(404,409)) {
+                # Its owner can open the repository after preflight; publish only into the recorded, still-private one.
+                $repo=(Invoke-CheckedApi $Request GET "/repos/$($Identity.fullName)").Data
+                $conflict=if ($repo.id -ne $journal.repositories.private -or $repo.full_name -ine $Identity.fullName) {"Recorded repository identity differs: $($Identity.fullName)"} else {Get-BootstrapVisibilityConflict 'private' $repo $journal $Identity.fullName}
+                if ($conflict) {return Get-BootstrapReport $Identity $journal 'blocked' @() @($conflict) -StateRoot $StateRoot}
                 $push=& $Git $Identity.projectPath @('push','--set-upstream','origin','main')
                 $remote=Invoke-CheckedApi $Request GET "/repos/$($Identity.fullName)/git/ref/heads/main" $null @(200,404)
                 if ($remote.StatusCode -ne 200) {throw "Initial main push is unresolved (exit $($push.ExitCode)); resume to compare the remote ref."}

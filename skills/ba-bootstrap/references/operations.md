@@ -48,7 +48,7 @@ After bootstrap is complete, use `local-setup -Repository <actual checkout> -Ref
 
 ## Project repository visibility
 
-Creation always makes the project repository private, and refuses a create response that says otherwise. Bootstrap publishes the foundation only into a private repository. After that, its owner may make the project public. That is the owner's decision, not a conflict.
+Creation always makes the project repository private, and refuses a create response that says otherwise. Bootstrap publishes the foundation only into a private repository: immediately before the initial push it reads the repository back again, and if its ID, full name or private visibility changed since preflight, it returns `blocked` without pushing. After that, its owner may make the project public. That is the owner's decision, not a conflict.
 
 Plan, status and resume read back the recorded project repository and report `projectVisibility` (`private` or `public`). A repository ID or full name that differs from the journal is still a conflict. Visibility depends on how far the invocation got:
 
@@ -57,7 +57,7 @@ Plan, status and resume read back the recorded project repository and report `pr
 
 The release-notes companion must stay public; a private companion is still a conflict.
 
-Local setup accepts a private origin as before. A public origin must also have its own public `<repository>-release-notes` companion, read back from GitHub. A companion has no companion of its own, so this refuses a clone of the companion and unrelated public repositories. It also refuses a public project whose companion was deleted or made private. The check needs no creation journal, so a fresh clone on another machine passes it too. If GitHub returns an error other than 404 for the companion, local setup reports the HTTP status for a retry instead of refusing the repository.
+Local setup accepts a private origin as before. A public origin must also have its own public `<repository>-release-notes` companion, read back from GitHub. A companion has no companion of its own, so this refuses a clone of the companion and unrelated public repositories. It also refuses a public project whose companion was deleted or made private. The check needs no creation journal, so a fresh clone on another machine passes it too. If GitHub returns an error other than 404 for the companion, local setup reports the HTTP status for a retry instead of refusing the repository. Its result reports the `projectVisibility` it read. The vault journal does not record it, since it can change.
 
 ## Public release-notes repository
 
