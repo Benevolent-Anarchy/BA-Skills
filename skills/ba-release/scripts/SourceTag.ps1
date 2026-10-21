@@ -73,10 +73,11 @@ function Get-ReleaseSourceTagProgress($Plan, [string]$Url) {
 }
 
 # Checks, before any store write, that the tag can be made as planned: origin names the planned repository, no tag of that
-# name names another commit and Git can name the tagger where the tag is still to be made. Nothing is written.
-function Assert-ReleaseSourceTagDestination($Plan) {
+# name names another commit and Git can name the tagger where the tag is still to be made. A tag already $Made needs no
+# tagger. Nothing is written.
+function Assert-ReleaseSourceTagDestination($Plan, [switch]$Made) {
     $progress=Get-ReleaseSourceTagProgress $Plan (Get-ReleaseTagPushUrl $Plan)
-    if ($progress) {return}
+    if ($progress -or $Made) {return}
     $identity=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Plan.repository,'var','GIT_COMMITTER_IDENT') $Plan.repository
     if ($identity.exitCode -ne 0) {throw (New-ReleaseDiagnosticError 'Git has no tagger identity; set user.name and user.email for this checkout.')}
 }

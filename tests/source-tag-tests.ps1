@@ -216,6 +216,54 @@ Test 'a tag publication has not reached keeps a confirmed release from counting 
     Assert ($result.status -eq 'published' -and $result.destinations.steam.attempts -eq 1 -and (Get-OriginTags $fixture.origin)['v1.2.3'].commit -ceq $state.plan.head) "The next publication did not finish the tag: $($result.status) $($result.sourceTag.error)"
 }
 
+Test 'a tag made earlier is checked again before an extension''s new store write' {
+    $fixture=New-TagFixture 'tag-extension-conflict' -Stores
+    $repo=$fixture.repo
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows') $fixture.stateRoot $engine
+    $approval=Get-TagApproval $prepared.statePath
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler @approval
+    Assert ($result.sourceTag.status -eq 'succeeded') "The first release was not tagged: $($result.sourceTag.error)"
+    $source=(Read-TagState $prepared.statePath).plan.head
+    $older=Invoke-FixtureGit $repo @('rev-parse','HEAD~1')
+    Invoke-FixtureGit $repo @('tag','--delete','v1.2.3') | Out-Null
+    Invoke-FixtureGit $repo @('tag','v1.2.3',$older) | Out-Null
+    $extended=Expand-ReleaseDestinations $prepared.statePath @('steam') $engine
+    Assert ($extended.status -eq 'prepared') "The release was not extended to Steam: $($extended.status)"
+    $approval=Get-TagApproval $prepared.statePath
+    $env:BA_STEAM_USERNAME='fixture-account'
+    try {
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam @approval
+        Assert ($result.destinations.steam.attempts -eq 0 -and $result.sourceTag.status -eq 'succeeded' -and $result.sourceTag.preflightStatus -eq 'failed' -and $result.sourceTag.error -match "already names $older in this checkout" -and $result.status -ne 'published') "A tag conflict that appeared after tagging let the extension upload: $($result.status) $($result.sourceTag | ConvertTo-Json -Compress)"
+        Assert ((Invoke-FixtureGit $repo @('rev-parse','v1.2.3^{commit}')) -ceq $older -and (Get-OriginTags $fixture.origin)['v1.2.3'].commit -ceq $source) 'A tag moved while the extension was refused.'
+        # Once the stray tag is reconciled by hand, the added store goes out and the tag on origin stays as it was made.
+        Invoke-FixtureGit $repo @('tag','--delete','v1.2.3') | Out-Null
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam
+    } finally {Remove-Item Env:BA_STEAM_USERNAME}
+    Assert ($result.destinations.steam.attempts -eq 1 -and $result.destinations['itch-windows'].attempts -eq 1 -and $result.sourceTag.preflightStatus -eq 'succeeded' -and $null -eq $result.sourceTag.error -and (Get-OriginTags $fixture.origin)['v1.2.3'].commit -ceq $source) "The reconciled extension did not publish: $($result.status) $($result.sourceTag.error)"
+}
+
+Test 'a waiting tag defers to holds until a store is live, and a held release never counts as published' {
+    $fixture=New-TagFixture 'tag-held' -Stores
+    $prepared=Invoke-ReleasePrepare $fixture.repo @('itch-windows','steam') $fixture.stateRoot $engine
+    $held=Set-ReleaseDestinationHold $prepared.statePath @('itch-windows','steam') 'Waiting for launch day.'
+    Assert ($held.status -eq 'on-hold') "A wholly held tagged release was not on hold: $($held.status)"
+    $approval=Get-TagApproval $prepared.statePath
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam @approval
+    Assert ($result.status -eq 'on-hold' -and $result.sourceTag.status -eq 'awaiting-release' -and -not (Get-OriginTags $fixture.origin).Count) "Publishing a wholly held release hid the hold: $($result.status) $($result.sourceTag.status)"
+    Set-ReleaseDestinationHold $prepared.statePath @('steam') -Release | Out-Null
+    $env:BA_STEAM_USERNAME='fixture-account'
+    try {$result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam}
+    finally {Remove-Item Env:BA_STEAM_USERNAME}
+    Assert ($result.status -eq 'needs-store-action' -and $result.sourceTag.status -eq 'awaiting-release') "An uploaded Steam build beside a hold was misreported: $($result.status) $($result.sourceTag.status)"
+    $state=Read-TagState $prepared.statePath
+    $receipt=Join-Path $sandbox 'tag-held-receipt.json'
+    Write-Json $receipt @{destination='steam';planId=$state.plan.planId;notesSha256=$approval.ApprovedNotesSha256;observedAt=[DateTimeOffset]::UtcNow.ToString('o');live=$true;appId=100;buildId='999';branch='default';announcementUrl='https://store.steampowered.com/news/app/100/view/125'}
+    $confirmed=Confirm-ReleaseStoreCompletion $prepared.statePath $receipt
+    Assert ($confirmed.status -eq 'awaiting-release') "With Steam live the waiting tag did not show as the next step: $($confirmed.status)"
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam
+    Assert ($result.status -eq 'on-hold' -and $result.sourceTag.status -eq 'succeeded' -and $result.destinations['itch-windows'].status -eq 'held' -and (Get-OriginTags $fixture.origin)['v1.2.3'].commit -ceq $state.plan.head) "The tag did not follow the live store while itch stayed held: $($result.status) $($result.sourceTag.error)"
+}
+
 Test 'doctor needs a tagger identity only for a tag still to be made' {
     $fixture=New-TagFixture 'tag-doctor'
     $repo=$fixture.repo

@@ -646,13 +646,18 @@ function Get-ReleaseNotesHash([string]$StatePath, $Plan) {
 
 # Summarizes progress without conflating uploaded/submitted artifacts with verified store publication. An abandoned
 # destination has no more work, so only the others decide the status. A planned tag is one more step: a release is
-# published only once its tag is on origin. A tag publication has not reached yet, pending or not yet recorded, as after a
-# stop between a store's saved result and the tag step, waits for the next publication as a tag awaiting a live store does.
+# published only once its tag is on origin. A tag still waiting, pending, not yet recorded (as after a stop between a store's
+# saved result and the tag step) or awaiting a live store, counts as awaiting-release. Until one of the release's stores is
+# live only unholding a store can move it, so it then defers to any hold, which already keeps the release unpublished.
 function Get-ReleaseOverallStatus($State) {
     $statuses=@($State.plan.selectedDestinations | ForEach-Object {$State.destinations[$_].status} | Where-Object {$_ -ne 'abandoned'})
     if (-not $statuses.Count) {return 'abandoned'}
     $tag=if (-not $State.plan.Contains('sourceTag')) {$null} elseif ($State.Contains('sourceTag')) {$State.sourceTag} else {[ordered]@{status='pending'}}
-    if ($tag) {$statuses+=@($(if ($tag.status -eq 'pending') {'awaiting-release'} else {$tag.status}))}
+    if ($tag) {
+        $live=@($State.plan.destinations | Where-Object {$_.selected -and $_.type -ne 'notes' -and $State.destinations[$_.id].remote.Contains('live') -and $State.destinations[$_.id].remote.live -eq $true}).Count
+        if ($tag.status -notin @('pending','awaiting-release')) {$statuses+=@($tag.status)}
+        elseif ($live -or $statuses -notcontains 'held') {$statuses+=@('awaiting-release')}
+    }
     if ($statuses -contains 'uncertain' -or $statuses -contains 'in-progress') {return 'needs-reconciliation'}
     $complete=@($statuses | Where-Object {$_ -in @('succeeded','submitted','awaiting-store-action')})
     $failed=@($State.plan.selectedDestinations | Where-Object {$State.destinations[$_].status -eq 'failed' -or ($State.destinations[$_].Contains('preflightStatus') -and $State.destinations[$_].preflightStatus -eq 'failed')})
@@ -745,16 +750,19 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations;sourceTag=$state['sourceTag']}
             }
         }
-        # A tag that could never be made as planned stops publication before any store write, as the notes preflight does.
-        if ($state.plan.Contains('sourceTag') -and (Get-ReleaseSourceTagRecord $state).status -ne 'succeeded') {
-            $tagRecord=$state.sourceTag
+        # A tag that could never be made as planned stops publication before any store write, as the notes preflight does. It is
+        # checked again on every run, even once made, so a conflicting tag that appeared since stops a later run's store writes,
+        # such as an extension's; a tag already made needs no tagger, and stays succeeded while the conflict is reconciled.
+        if ($state.plan.Contains('sourceTag')) {
+            $tagRecord=Get-ReleaseSourceTagRecord $state
             try {
-                Assert-ReleaseSourceTagDestination $state.plan
+                Assert-ReleaseSourceTagDestination $state.plan -Made:($tagRecord.status -eq 'succeeded')
                 if ($tagRecord.Contains('preflightStatus') -and $tagRecord.preflightStatus -eq 'failed') {$tagRecord.error=$null}
                 $tagRecord.preflightStatus='succeeded'
             }
             catch {
-                $tagRecord.status='failed';$tagRecord.preflightStatus='failed'
+                if ($tagRecord.status -ne 'succeeded') {$tagRecord.status='failed'}
+                $tagRecord.preflightStatus='failed'
                 $tagRecord.error='Source tag preflight failed; check origin, Git''s tagger identity and any existing tag of this name before any store publication.'
                 if ($_.Exception.Data.Contains('releaseDiagnostic')) {$tagRecord.error += ' '+$_.Exception.Data['releaseDiagnostic']}
                 $state.status=Get-ReleaseOverallStatus $state;Write-ReleaseJson $stateFile $state
