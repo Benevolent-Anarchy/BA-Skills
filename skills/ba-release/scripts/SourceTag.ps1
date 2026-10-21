@@ -58,26 +58,29 @@ function New-ReleaseTagConflictError($Tag, [string]$Where, [string]$Commit) {
     return New-ReleaseDiagnosticError "Tag $($Tag.name) already names $Commit $Where, not the release's source $($Tag.commit); a tag is never moved, so reconcile it by hand."
 }
 
-# Finds where the tag stands: 'origin' where origin already has it on the release's source, 'local' where only this checkout
-# does, or $null where neither has it. A tag of that name on another commit is refused wherever it is, including here when
-# origin's is right, since a local version tag on the wrong source misleads whatever is branched from it.
-function Get-ReleaseSourceTagProgress($Plan, [string]$Url) {
+# Finds where the tag stands, given the commit origin's tag of that name names, or $null: 'origin' where origin has it on
+# the release's source, 'local' where only this checkout does, or $null where neither has it. A tag of that name on another
+# commit is refused wherever it is, including here when origin's is right, since a local version tag on the wrong source
+# misleads whatever is branched from it.
+function Get-ReleaseSourceTagProgress($Plan, $Remote) {
     $tag=$Plan.sourceTag
-    $remote=Get-ReleaseRemoteTagCommit $Plan.repository $Url $tag.name
-    if ($remote -and $remote -cne $tag.commit) {throw (New-ReleaseTagConflictError $tag 'on origin' $remote)}
+    if ($Remote -and $Remote -cne $tag.commit) {throw (New-ReleaseTagConflictError $tag 'on origin' $Remote)}
     $local=Get-ReleaseLocalTagCommit $Plan.repository $tag.name
     if ($local -and $local -cne $tag.commit) {throw (New-ReleaseTagConflictError $tag 'in this checkout' $local)}
-    if ($remote) {return 'origin'}
+    if ($Remote) {return 'origin'}
     if ($local) {return 'local'}
     return $null
 }
 
 # Checks, before any store write, that the tag can be made as planned: origin names the planned repository, no tag of that
-# name names another commit and Git can name the tagger where the tag is still to be made. A tag already $Made needs no
-# tagger. Nothing is written.
-function Assert-ReleaseSourceTagDestination($Plan, [switch]$Made) {
-    $progress=Get-ReleaseSourceTagProgress $Plan (Get-ReleaseTagPushUrl $Plan)
-    if ($progress -or $Made) {return}
+# name names another commit and Git can name the tagger where the tag is still to be made. A recorded success stands only
+# while origin's tag names the release's source; otherwise $Record goes back to pending, so the tag is made again, from this
+# checkout's tag where it still has one and needing a tagger where it has none, rather than taken as done. Nothing but
+# $Record is written.
+function Assert-ReleaseSourceTagDestination($Plan, $Record) {
+    $remote=Get-ReleaseRemoteTagCommit $Plan.repository (Get-ReleaseTagPushUrl $Plan) $Plan.sourceTag.name
+    if ($Record.status -eq 'succeeded' -and $remote -cne $Plan.sourceTag.commit) {$Record.status='pending'}
+    if (Get-ReleaseSourceTagProgress $Plan $remote) {return}
     $identity=Invoke-ReleaseTool 'git' @('--no-optional-locks','-C',$Plan.repository,'var','GIT_COMMITTER_IDENT') $Plan.repository
     if ($identity.exitCode -ne 0) {throw (New-ReleaseDiagnosticError 'Git has no tagger identity; set user.name and user.email for this checkout.')}
 }
@@ -87,7 +90,7 @@ function Assert-ReleaseSourceTagDestination($Plan, [switch]$Made) {
 function Publish-ReleaseSourceTag($Plan) {
     $tag=$Plan.sourceTag;$repository=$Plan.repository;$ref="refs/tags/$($tag.name)"
     $url=Get-ReleaseTagPushUrl $Plan
-    $progress=Get-ReleaseSourceTagProgress $Plan $url
+    $progress=Get-ReleaseSourceTagProgress $Plan (Get-ReleaseRemoteTagCommit $repository $url $tag.name)
     if ($progress -eq 'origin') {return}
     if (-not $progress) {
         $made=Invoke-ReleaseTool 'git' @('-C',$repository,'tag','--annotate','--message',$tag.message,$tag.name,$tag.commit) $repository

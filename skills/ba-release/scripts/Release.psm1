@@ -648,15 +648,20 @@ function Get-ReleaseNotesHash([string]$StatePath, $Plan) {
 # destination has no more work, so only the others decide the status. A planned tag is one more step: a release is
 # published only once its tag is on origin. A tag still waiting, pending, not yet recorded (as after a stop between a store's
 # saved result and the tag step) or awaiting a live store, counts as awaiting-release. Until one of the release's stores is
-# live only unholding a store can move it, so it then defers to any hold, which already keeps the release unpublished.
-function Get-ReleaseOverallStatus($State) {
+# live only unholding a store can move it, so it then defers to any hold, which already keeps the release unpublished. Live
+# means what publication accepts for the tag: this journal's stores and, given $StatePath, the game's shared live receipts
+# and the other journals of this release, so a store another checkout made live is not hidden behind a hold here.
+function Get-ReleaseOverallStatus($State, [string]$StatePath) {
     $statuses=@($State.plan.selectedDestinations | ForEach-Object {$State.destinations[$_].status} | Where-Object {$_ -ne 'abandoned'})
     if (-not $statuses.Count) {return 'abandoned'}
     $tag=if (-not $State.plan.Contains('sourceTag')) {$null} elseif ($State.Contains('sourceTag')) {$State.sourceTag} else {[ordered]@{status='pending'}}
     if ($tag) {
-        $live=@($State.plan.destinations | Where-Object {$_.selected -and $_.type -ne 'notes' -and $State.destinations[$_.id].remote.Contains('live') -and $State.destinations[$_.id].remote.live -eq $true}).Count
         if ($tag.status -notin @('pending','awaiting-release')) {$statuses+=@($tag.status)}
-        elseif ($live -or $statuses -notcontains 'held') {$statuses+=@('awaiting-release')}
+        elseif ($statuses -notcontains 'held') {$statuses+=@('awaiting-release')}
+        else {
+            $live=@($State.plan.destinations | Where-Object {$_.selected -and $_.type -ne 'notes' -and $State.destinations[$_.id].remote.Contains('live') -and $State.destinations[$_.id].remote.live -eq $true}).Count
+            if ($live -or ($StatePath -and (Test-ReleaseShipped $State $StatePath))) {$statuses+=@('awaiting-release')}
+        }
     }
     if ($statuses -contains 'uncertain' -or $statuses -contains 'in-progress') {return 'needs-reconciliation'}
     $complete=@($statuses | Where-Object {$_ -in @('succeeded','submitted','awaiting-store-action')})
@@ -746,17 +751,18 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 $notesRecord.preflightStatus='failed'
                 $notesRecord.error='Public notes preflight failed; check public visibility, write permissions, approved availability link and conflicting notes before any store publication.'
                 if ($_.Exception.Data.Contains('releaseDiagnostic')) {$notesRecord.error += ' '+$_.Exception.Data['releaseDiagnostic']}
-                $state.status=Get-ReleaseOverallStatus $state;Write-ReleaseJson $stateFile $state
+                $state.status=Get-ReleaseOverallStatus $state $StatePath;Write-ReleaseJson $stateFile $state
                 return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations;sourceTag=$state['sourceTag']}
             }
         }
         # A tag that could never be made as planned stops publication before any store write, as the notes preflight does. It is
         # checked again on every run, even once made, so a conflicting tag that appeared since stops a later run's store writes,
-        # such as an extension's; a tag already made needs no tagger, and stays succeeded while the conflict is reconciled.
+        # such as an extension's. A success stands only while origin's tag names the release's source, and then survives a
+        # conflict here until it is reconciled; a tag gone from origin is owed again and made at the end of this run.
         if ($state.plan.Contains('sourceTag')) {
             $tagRecord=Get-ReleaseSourceTagRecord $state
             try {
-                Assert-ReleaseSourceTagDestination $state.plan -Made:($tagRecord.status -eq 'succeeded')
+                Assert-ReleaseSourceTagDestination $state.plan $tagRecord
                 if ($tagRecord.Contains('preflightStatus') -and $tagRecord.preflightStatus -eq 'failed') {$tagRecord.error=$null}
                 $tagRecord.preflightStatus='succeeded'
             }
@@ -765,7 +771,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
                 $tagRecord.preflightStatus='failed'
                 $tagRecord.error='Source tag preflight failed; check origin, Git''s tagger identity and any existing tag of this name before any store publication.'
                 if ($_.Exception.Data.Contains('releaseDiagnostic')) {$tagRecord.error += ' '+$_.Exception.Data['releaseDiagnostic']}
-                $state.status=Get-ReleaseOverallStatus $state;Write-ReleaseJson $stateFile $state
+                $state.status=Get-ReleaseOverallStatus $state $StatePath;Write-ReleaseJson $stateFile $state
                 return @{status=$state.status;statePath=$StatePath;version=$state.plan.version;destinations=$state.destinations;sourceTag=$tagRecord}
             }
         }
@@ -885,7 +891,7 @@ function Invoke-ReleasePublish([string]$StatePath, [string]$ApprovedPlanId, [str
             }
             Write-ReleaseJson $stateFile $state
         }
-        $state.status = Get-ReleaseOverallStatus $state
+        $state.status = Get-ReleaseOverallStatus $state $StatePath
         Write-ReleaseJson $stateFile $state
         Save-ReleaseLiveReceipts $StatePath $state
         return @{status=$state.status; statePath=$StatePath; version=$state.plan.version; destinations=$state.destinations; sourceTag=$state['sourceTag']}
@@ -958,7 +964,7 @@ function Confirm-ReleaseStoreCompletion([string]$StatePath, [string]$ReceiptPath
         }
         if ($record.status -ne 'succeeded') {
             $record.remote.completion=$receipt; $record.remote.phase='store-verified';$record.remote.live=$true;$record.status='succeeded';$record.error=$null
-            $state.status=Get-ReleaseOverallStatus $state
+            $state.status=Get-ReleaseOverallStatus $state $StatePath
             Write-ReleaseJson $stateFile $state
         }
         # Recording again on a repeated confirmation repairs a ledger write interrupted after the first one was saved.

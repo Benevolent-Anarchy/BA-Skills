@@ -277,7 +277,7 @@ function Confirm-ReleaseAbandonment([string]$StatePath, [string]$ReceiptPath, [s
         if ($record.status -ne 'abandoned') {
             $record.remote.abandonment=[ordered]@{receipt=$receipt;authorizedAt=[DateTimeOffset]::UtcNow.ToString('o')}
             $record.status='abandoned';$record.error=$null
-            $state.status=Get-ReleaseOverallStatus $state
+            $state.status=Get-ReleaseOverallStatus $state $StatePath
             Write-ReleaseJson $stateFile $state
         }
         foreach ($entry in $own) {$entry['abandoned']=$record.remote.abandonment}

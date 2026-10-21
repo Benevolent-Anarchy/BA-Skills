@@ -308,8 +308,10 @@ and push URLs must name the planned repository, and origin must push to exactly
 one URL, counting every push URL it has; no tag of that name may name another
 commit, on origin or in this checkout, even where origin's is right; and Git must
 have a tagger identity where the tag is still to be made. A failure stops publication
-with nothing sent; a tag already made stays `succeeded`, with its preflight failed,
-until the conflict is reconciled. The tag then waits, `awaiting-release`, until a store is live
+with nothing sent. A recorded success stands only while origin's tag names the
+release's source. A tag gone from origin is owed again: that run pushes back this
+checkout's tag, or makes it anew, which needs a tagger. A tag still on origin stays
+`succeeded`, with its preflight failed, while a conflict here is reconciled. The tag then waits, `awaiting-release`, until a store is live
 by the same evidence the public notes need; an uploaded Steam build or submitted
 Play edit is not enough. Publication then makes the annotated tag in this
 checkout, unless one here already names the release's source, pushes that one tag
@@ -325,8 +327,8 @@ classified `error`, never Git's own output or origin's URL. A release with a
 planned tag is `published` only once the tag is on origin, including after a
 publication that stopped before reaching it, so after a console confirmation
 re-run publish to make it, as for public notes. While no store of the release is
-live, a waiting tag defers to any hold, so a release whose stores are all held is
-`on-hold`.
+live, by the evidence the tag waits for, from any checkout, a waiting tag defers
+to any hold, so a release whose stores are all held is `on-hold`.
 
 Beside the live ledger, `repositories/<id>/sent.json` records every build any checkout has started sending to each store channel, live or not, such as a Steam build awaiting activation or a Play edit in review. Publication records a build there as it starts each store attempt, and takes the entry back only if the attempt failed before reaching the store. Each release state keeps its own entry per destination, so two checkouts sending the same source and version are recorded, and reconciled, separately. Entries are matched by the state's physical location, so one recorded under another spelling or through a link is still that state's. A replay records a store write its release already made, without making it again. A game that has no `sent.json` yet, such as one released before it existed, gets one built from every release journal under the state root. Some journals stop that publication, naming the journal by its place under the state root: one that cannot be read, and one of this game that lacks a record seeding reads or holds one of the wrong type. That record can be a selected store's record, its status or its remote progress. A journal whose checkout's other journals name a different game does not stop it. Repair or remove the journal, then retry. Notes-only journals, and store records from before remote progress was kept, are read as they are.
 

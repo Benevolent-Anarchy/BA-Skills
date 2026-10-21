@@ -264,6 +264,68 @@ Test 'a waiting tag defers to holds until a store is live, and a held release ne
     Assert ($result.status -eq 'on-hold' -and $result.sourceTag.status -eq 'succeeded' -and $result.destinations['itch-windows'].status -eq 'held' -and (Get-OriginTags $fixture.origin)['v1.2.3'].commit -ceq $state.plan.head) "The tag did not follow the live store while itch stayed held: $($result.status) $($result.sourceTag.error)"
 }
 
+Test 'a tag gone from origin after tagging is owed again before an extension''s release counts as published' {
+    $fixture=New-TagFixture 'tag-gone' -Stores
+    $repo=$fixture.repo
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows') $fixture.stateRoot $engine
+    $approval=Get-TagApproval $prepared.statePath
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler @approval
+    Assert ($result.sourceTag.status -eq 'succeeded') "The first release was not tagged: $($result.sourceTag.error)"
+    $source=(Read-TagState $prepared.statePath).plan.head
+    $made=Invoke-FixtureGit $repo @('rev-parse','refs/tags/v1.2.3')
+    # Gone from origin only: this checkout's tag goes back as it was made.
+    Invoke-FixtureGit $repo @('push','--quiet','origin',':refs/tags/v1.2.3') | Out-Null
+    Assert ((Expand-ReleaseDestinations $prepared.statePath @('itch-linux') $engine).status -eq 'prepared') 'The release was not extended to itch Linux.'
+    $approval=Get-TagApproval $prepared.statePath
+    $env:BA_FIXTURE_ALLOW_LINUX='1'
+    try {$result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler @approval}
+    finally {Remove-Item Env:BA_FIXTURE_ALLOW_LINUX}
+    Assert ($result.status -eq 'published' -and $result.destinations['itch-linux'].attempts -eq 1 -and $result.destinations['itch-windows'].attempts -eq 1 -and $result.sourceTag.status -eq 'succeeded' -and (Invoke-FixtureGit $fixture.origin @('for-each-ref','--format=%(objectname)','refs/tags/v1.2.3')) -ceq $made) "A tag gone from origin was taken as done: $($result.status) $(Get-OriginTags $fixture.origin | ConvertTo-Json -Compress)"
+    # Gone from origin and here: the tag must be made anew, which needs a tagger, so nothing is sent until Git has one.
+    Invoke-FixtureGit $repo @('push','--quiet','origin',':refs/tags/v1.2.3') | Out-Null
+    Invoke-FixtureGit $repo @('tag','--delete','v1.2.3') | Out-Null
+    Assert ((Expand-ReleaseDestinations $prepared.statePath @('steam') $engine).status -eq 'prepared') 'The release was not extended to Steam.'
+    $approval=Get-TagApproval $prepared.statePath
+    $env:BA_STEAM_USERNAME='fixture-account'
+    $prior=$env:GIT_COMMITTER_NAME
+    try {
+        $env:GIT_COMMITTER_NAME='<>'
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam @approval
+        Assert ($result.destinations.steam.attempts -eq 0 -and $result.sourceTag.status -eq 'failed' -and $result.sourceTag.error -match 'tagger identity' -and $result.status -ne 'published' -and -not (Get-OriginTags $fixture.origin).Count) "A tag gone everywhere was taken as done without a tagger to make it: $($result.status) $($result.sourceTag | ConvertTo-Json -Compress)"
+        if ($null -eq $prior) {Remove-Item Env:GIT_COMMITTER_NAME} else {$env:GIT_COMMITTER_NAME=$prior}
+        $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler -SteamCmdExecutable $steam
+    } finally {
+        Remove-Item Env:BA_STEAM_USERNAME
+        if ($null -eq $prior) {Remove-Item Env:GIT_COMMITTER_NAME -ErrorAction SilentlyContinue} else {$env:GIT_COMMITTER_NAME=$prior}
+    }
+    $tags=Get-OriginTags $fixture.origin
+    Assert ($result.destinations.steam.attempts -eq 1 -and $result.sourceTag.status -eq 'succeeded' -and $tags['v1.2.3'].type -eq 'tag' -and $tags['v1.2.3'].commit -ceq $source) "The tag was not made anew on the release's source: $($result.sourceTag.error) $($tags | ConvertTo-Json -Compress)"
+}
+
+Test 'a tag another checkout''s live store made ready is not hidden behind a hold here' {
+    $fixture=New-TagFixture 'tag-shared-live' -Stores
+    $repo=$fixture.repo
+    # This checkout's Steam build is confirmed live while its tag still waits for the next publication.
+    $first=Invoke-ReleasePrepare $repo @('steam') $fixture.stateRoot $engine
+    $approval=Get-TagApproval $first.statePath
+    $env:BA_STEAM_USERNAME='fixture-account'
+    try {Invoke-ReleasePublish -StatePath $first.statePath -SteamCmdExecutable $steam @approval | Out-Null}
+    finally {Remove-Item Env:BA_STEAM_USERNAME}
+    $state=Read-TagState $first.statePath
+    $receipt=Join-Path $sandbox 'tag-shared-live-receipt.json'
+    Write-Json $receipt @{destination='steam';planId=$state.plan.planId;notesSha256=$approval.ApprovedNotesSha256;observedAt=[DateTimeOffset]::UtcNow.ToString('o');live=$true;appId=100;buildId='999';branch='default';announcementUrl='https://store.steampowered.com/news/app/100/view/126'}
+    Assert ((Confirm-ReleaseStoreCompletion $first.statePath $receipt).status -eq 'awaiting-release' -and -not (Get-OriginTags $fixture.origin).Count) 'The fixture did not leave a live release waiting for its tag.'
+    # Another checkout of the same source holds its only store, yet its tag can be made now.
+    $worktree=Join-Path $sandbox 'tag-shared-live-worktree'
+    Invoke-FixtureGit $repo @('worktree','add','--quiet','--detach',$worktree,$state.plan.head) | Out-Null
+    $second=Invoke-ReleasePrepare $worktree @('itch-windows') $fixture.stateRoot $engine
+    $held=Set-ReleaseDestinationHold $second.statePath @('itch-windows') 'Waiting for launch day.'
+    Assert ($held.status -eq 'awaiting-release') "A hold hid tag work another checkout's live store made ready: $($held.status)"
+    $approval=Get-TagApproval $second.statePath
+    $result=Invoke-ReleasePublish -StatePath $second.statePath -ButlerExecutable $butler @approval
+    Assert ($result.status -eq 'on-hold' -and $result.sourceTag.status -eq 'succeeded' -and $result.destinations['itch-windows'].attempts -eq 0 -and (Get-OriginTags $fixture.origin)['v1.2.3'].commit -ceq $state.plan.head) "The ready tag was not made while the store stayed held: $($result.status) $($result.sourceTag.error)"
+}
+
 Test 'doctor needs a tagger identity only for a tag still to be made' {
     $fixture=New-TagFixture 'tag-doctor'
     $repo=$fixture.repo
