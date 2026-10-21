@@ -13,7 +13,8 @@ function Get-ReleaseSourceTagRecord($State) {
 }
 
 # Gives the one URL a push to origin goes to, after the user's own URL rewriting, once origin's fetch and push settings are
-# seen to name the plan's GitHub repository. A URL is never kept or reported, as one can carry credentials.
+# seen to name the plan's GitHub repository. A push goes to every push URL origin has, so all of them are counted, and
+# origin with more than one is refused. A URL is never kept or reported, as one can carry credentials.
 function Get-ReleaseTagPushUrl($Plan) {
     $repository=$Plan.repository
     if ((Get-ReleaseSourceRepository $repository) -ne $Plan.sourceTag.repository) {throw (New-ReleaseDiagnosticError "Origin no longer names $($Plan.sourceTag.repository).")}
@@ -22,8 +23,8 @@ function Get-ReleaseTagPushUrl($Plan) {
         try {$named=ConvertTo-ReleaseSourceRepository $url.Trim()} catch {$named=$null}
         if ($named -ne $Plan.sourceTag.repository) {throw (New-ReleaseDiagnosticError "Origin's push URL does not name $($Plan.sourceTag.repository) without credentials.")}
     }
-    $urls=@((Read-ReleaseGit $repository @('remote','get-url','--push','origin')).Split("`n") | Where-Object {$_.Trim()})
-    if ($urls.Count -ne 1) {throw (New-ReleaseDiagnosticError 'Origin must have exactly one push URL for the release tag.')}
+    $urls=@((Read-ReleaseGit $repository @('remote','get-url','--push','--all','origin')).Split("`n") | Where-Object {$_.Trim()})
+    if ($urls.Count -ne 1) {throw (New-ReleaseDiagnosticError 'Origin must push to exactly one URL for the release tag.')}
     return $urls[0].Trim()
 }
 
@@ -58,19 +59,16 @@ function New-ReleaseTagConflictError($Tag, [string]$Where, [string]$Commit) {
 }
 
 # Finds where the tag stands: 'origin' where origin already has it on the release's source, 'local' where only this checkout
-# does, or $null where neither has it. A tag of that name on another commit, on origin or here, is refused.
+# does, or $null where neither has it. A tag of that name on another commit is refused wherever it is, including here when
+# origin's is right, since a local version tag on the wrong source misleads whatever is branched from it.
 function Get-ReleaseSourceTagProgress($Plan, [string]$Url) {
     $tag=$Plan.sourceTag
     $remote=Get-ReleaseRemoteTagCommit $Plan.repository $Url $tag.name
-    if ($remote) {
-        if ($remote -cne $tag.commit) {throw (New-ReleaseTagConflictError $tag 'on origin' $remote)}
-        return 'origin'
-    }
+    if ($remote -and $remote -cne $tag.commit) {throw (New-ReleaseTagConflictError $tag 'on origin' $remote)}
     $local=Get-ReleaseLocalTagCommit $Plan.repository $tag.name
-    if ($local) {
-        if ($local -cne $tag.commit) {throw (New-ReleaseTagConflictError $tag 'in this checkout' $local)}
-        return 'local'
-    }
+    if ($local -and $local -cne $tag.commit) {throw (New-ReleaseTagConflictError $tag 'in this checkout' $local)}
+    if ($remote) {return 'origin'}
+    if ($local) {return 'local'}
     return $null
 }
 

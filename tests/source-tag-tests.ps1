@@ -120,9 +120,13 @@ Test 'a tag of the release''s name on another commit is never moved and stops pu
     $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler
     Assert ($result.sourceTag.preflightStatus -eq 'failed' -and $result.sourceTag.error -match 'in this checkout' -and $result.destinations['itch-windows'].attempts -eq 0) "A conflicting tag in this checkout did not stop publication: $($result.sourceTag.error)"
     Assert ((Invoke-FixtureGit $repo @('rev-parse','v1.2.3^{commit}')) -ceq $older -and -not (Get-OriginTags $fixture.origin).Count) 'The checkout''s conflicting tag moved or was pushed.'
+    # The right tag on origin does not excuse the wrong one here.
+    Invoke-FixtureGit $repo @('push','--quiet','origin',"$($state.plan.head):refs/tags/v1.2.3") | Out-Null
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler
+    Assert ($result.sourceTag.preflightStatus -eq 'failed' -and $result.sourceTag.error -match "already names $older in this checkout" -and $result.destinations['itch-windows'].attempts -eq 0) "A conflicting tag here passed because origin's was right: $($result.sourceTag.error)"
+    Assert ((Invoke-FixtureGit $repo @('rev-parse','v1.2.3^{commit}')) -ceq $older -and (Get-OriginTags $fixture.origin)['v1.2.3'].commit -ceq $state.plan.head) 'A tag moved while publication was refused.'
     # A tag already on the release's source, though made by hand, counts as done and is kept as it is.
     Invoke-FixtureGit $repo @('tag','--delete','v1.2.3') | Out-Null
-    Invoke-FixtureGit $repo @('push','--quiet','origin',"$($state.plan.head):refs/tags/v1.2.3") | Out-Null
     $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler
     Assert ($result.status -eq 'published' -and $result.sourceTag.status -eq 'succeeded' -and $null -eq $result.sourceTag.error) "A tag already on the release's source was not accepted: $($result.status) $($result.sourceTag.error)"
     Assert ((Get-OriginTags $fixture.origin)['v1.2.3'].type -eq 'commit') 'A hand-made tag on the release source was replaced.'
@@ -157,13 +161,72 @@ Test 'Git without a tagger identity stops the tag before any store write' {
     Assert ($result.sourceTag.preflightStatus -eq 'failed' -and $result.sourceTag.error -match 'tagger identity' -and $result.destinations['itch-windows'].attempts -eq 0) "A missing tagger identity did not stop publication: $($result.sourceTag.error)"
 }
 
-Test 'a push URL naming another repository stops the tag before any store write' {
+Test 'a push URL naming another repository, or a second push URL, stops the tag before any store write' {
     $fixture=New-TagFixture 'tag-push-url'
     $prepared=Invoke-ReleasePrepare $fixture.repo @('itch-windows') $fixture.stateRoot $engine
     $approval=Get-TagApproval $prepared.statePath
     Invoke-FixtureGit $fixture.repo @('config','remote.origin.pushurl','https://github.com/Example/Other-Game.git') | Out-Null
     $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler @approval
     Assert ($result.sourceTag.preflightStatus -eq 'failed' -and $result.sourceTag.error -match 'push URL does not name Example/Real-Game' -and $result.destinations['itch-windows'].attempts -eq 0) "A push URL elsewhere did not stop publication: $($result.sourceTag.error)"
+    # Both name the planned repository, but a push would go to each, wherever URL rewriting sends them.
+    Invoke-FixtureGit $fixture.repo @('config','remote.origin.pushurl','https://github.com/Example/Real-Game.git') | Out-Null
+    Invoke-FixtureGit $fixture.repo @('config','--add','remote.origin.pushurl','git@github.com:Example/Real-Game.git') | Out-Null
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler
+    Assert ($result.sourceTag.preflightStatus -eq 'failed' -and $result.sourceTag.error -match 'push to exactly one URL' -and $result.destinations['itch-windows'].attempts -eq 0 -and -not (Get-OriginTags $fixture.origin).Count) "Two push URLs did not stop publication: $($result.sourceTag.error)"
+}
+
+Test 'an edited tag commit in the journal no longer matches the approval, so nothing is sent or tagged' {
+    $fixture=New-TagFixture 'tag-journal-edit'
+    $repo=$fixture.repo
+    $prepared=Invoke-ReleasePrepare $repo @('itch-windows') $fixture.stateRoot $engine
+    $approval=Get-TagApproval $prepared.statePath
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $journal=Read-TagState $prepared.statePath
+    $older=Invoke-FixtureGit $repo @('rev-parse','HEAD~1')
+    $same=Get-ReleasePlan $repo @('itch-windows') -StateRoot $fixture.stateRoot
+    $edited=Get-ReleasePlan $repo @('itch-windows') -StateRoot $fixture.stateRoot -TagCommit $older
+    Assert ($same.planId -ceq $journal.plan.planId -and $edited.planId -cne $journal.plan.planId) 'The plan ID does not cover the tag commit.'
+    $journal.plan.sourceTag.commit=$older;Write-Json $stateFile $journal
+    $env:BA_FIXTURE_UPLOAD_LOG=Join-Path $sandbox 'tag-journal-edit-uploads.txt'
+    try {Expect-Error {Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler @approval} 'changed after preparation|approval'}
+    finally {Remove-Item Env:BA_FIXTURE_UPLOAD_LOG}
+    Assert (-not (Test-Path (Join-Path $sandbox 'tag-journal-edit-uploads.txt')) -and -not (Get-OriginTags $fixture.origin).Count -and -not (Invoke-FixtureGit $repo @('tag','--list','v1.2.3'))) 'An edited tag commit led to a store or tag write.'
+}
+
+Test 'a tag publication has not reached keeps a confirmed release from counting as published' {
+    $fixture=New-TagFixture 'tag-interrupted' -Stores
+    $prepared=Invoke-ReleasePrepare $fixture.repo @('steam') $fixture.stateRoot $engine
+    $approval=Get-TagApproval $prepared.statePath
+    $env:BA_STEAM_USERNAME='fixture-account'
+    try {Invoke-ReleasePublish -StatePath $prepared.statePath -SteamCmdExecutable $steam @approval | Out-Null}
+    finally {Remove-Item Env:BA_STEAM_USERNAME}
+    # A run stopped after saving Steam's result, before the tag step, leaves the tag as the preflight recorded it.
+    $stateFile=Join-Path $prepared.statePath 'state.json'
+    $journal=Read-TagState $prepared.statePath
+    $journal.sourceTag=[ordered]@{status='pending';error=$null;preflightStatus='succeeded'};Write-Json $stateFile $journal
+    # A record never written, with every store done, still leaves the tag outstanding.
+    $journal.Remove('sourceTag');$journal.destinations.steam.status='succeeded'
+    Assert ((& (Get-Module Release) {param($state) Get-ReleaseOverallStatus $state} $journal) -eq 'awaiting-release') 'A planned tag never recorded was left out of the release status.'
+    $state=Read-TagState $prepared.statePath
+    $receipt=Join-Path $sandbox 'tag-interrupted-receipt.json'
+    Write-Json $receipt @{destination='steam';planId=$state.plan.planId;notesSha256=$approval.ApprovedNotesSha256;observedAt=[DateTimeOffset]::UtcNow.ToString('o');live=$true;appId=100;buildId='999';branch='default';announcementUrl='https://store.steampowered.com/news/app/100/view/124'}
+    $confirmed=Confirm-ReleaseStoreCompletion $prepared.statePath $receipt
+    Assert ($confirmed.status -eq 'awaiting-release' -and -not (Get-OriginTags $fixture.origin).Count) "Confirmation called the release published with its tag still pending: $($confirmed.status)"
+    $result=Invoke-ReleasePublish -StatePath $prepared.statePath -SteamCmdExecutable $steam
+    Assert ($result.status -eq 'published' -and $result.destinations.steam.attempts -eq 1 -and (Get-OriginTags $fixture.origin)['v1.2.3'].commit -ceq $state.plan.head) "The next publication did not finish the tag: $($result.status) $($result.sourceTag.error)"
+}
+
+Test 'doctor needs a tagger identity only for a tag still to be made' {
+    $fixture=New-TagFixture 'tag-doctor'
+    $repo=$fixture.repo
+    $prior=$env:GIT_COMMITTER_NAME;$env:GIT_COMMITTER_NAME='<>'
+    try {
+        $check=@((Get-ReleaseDoctor -Repository $repo -Destination @('itch-windows') -GodotExecutable $engine -ButlerExecutable $butler).checks | Where-Object id -EQ 'source-tag')
+        Assert ($check.Count -eq 1 -and $check[0].status -eq 'blocked' -and $check[0].message -match 'tagger identity') "Doctor did not block a tag it would have to make without a tagger: $($check | ConvertTo-Json -Compress)"
+        Invoke-FixtureGit $repo @('tag','v1.2.3') | Out-Null
+        $check=@((Get-ReleaseDoctor -Repository $repo -Destination @('itch-windows') -GodotExecutable $engine -ButlerExecutable $butler).checks | Where-Object id -EQ 'source-tag')
+        Assert ($check.Count -eq 1 -and $check[0].status -eq 'unverified' -and $check[0].message -match 'already names the release''s source') "Doctor required a tagger for a tag it reuses: $($check | ConvertTo-Json -Compress)"
+    } finally {if ($null -eq $prior) {Remove-Item Env:GIT_COMMITTER_NAME} else {$env:GIT_COMMITTER_NAME=$prior}}
 }
 
 Test 'an extension that moves HEAD for an Android counter keeps the tag on the release''s original source' {

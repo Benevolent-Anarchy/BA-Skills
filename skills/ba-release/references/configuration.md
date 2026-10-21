@@ -127,8 +127,10 @@ source push is a `sourceTag` release tag. See [execution](execution.md).
 With `"sourceTag": true` every plan shows the tag publication will make:
 `sourceTag.name` is `v` and the version, `commit` the release's source,
 `repository` the GitHub repository origin names, and `message` the Godot title and
-version. A version no Git tag name can hold blocks the plan. Approving the plan
-approves the tag. The tag names the source the release was first prepared from:
+version. A version no Git tag name can hold blocks the plan. The tag is part of
+the plan ID, so approving the plan approves the tag, and an edit to the journal's
+tag no longer matches that approval. The tag names the source the release was
+first prepared from:
 an extension that commits an Android counter moves the plan's `head`, never the
 tag, and that artifact's own source stays in the journal.
 

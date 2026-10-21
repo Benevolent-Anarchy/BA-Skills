@@ -361,14 +361,6 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
         elseif ($target.type -eq 'steam') {$target.depots | ForEach-Object {$_.preset}}
     }) | Sort-Object -Unique -CaseSensitive)
     $requiredExports=@($settings.presets | Where-Object {$_.name -cin $needed})
-    $identity = [ordered]@{schemaVersion=1; repository=$Repository; head=$head; configSha256=$settings.configHash; version=$version; previousCommit=$previous; selectedDestinations=$selected;baselines=$baselines;versionChange=$VersionChange}
-    $planId = Get-ReleaseTextHash ($identity | ConvertTo-Json -Depth 10 -Compress)
-    $draft = "# $($settings.title) $version`n`n<!-- sourceCommit: $head; previousCommit: $previous -->`n`n"
-    if ($previous) {
-        if ($changes.Count) { $draft += (($changes | ForEach-Object { "- $($_.subject)" }) -join "`n") + "`n" }
-        else { $draft += "No commits since the confirmed previous release.`n" }
-    } else { $draft += "Previous published release boundary is unconfirmed; release notes cannot yet be derived.`n" }
-    $draft+="`n[Release availability](../availability/$version.json)`n"
     # Only a game that turns sourceTag on plans a tag, which names the release's source: HEAD for a new release.
     $sourceTag=$null
     if ($settings.config.sourceTag) {
@@ -384,6 +376,17 @@ function Get-ReleasePlan([string]$Repository, [string[]]$Destination = @(), $Bas
         if ($format.exitCode -ne 0) { $blockers.Add("sourceTag: $tagName is not a valid Git tag name; release another version or turn sourceTag off.") }
         $sourceTag=[ordered]@{name=$tagName; commit=$tagged; repository=(Get-ReleaseSourceRepository $Repository); message="$(if ($settings.title) {$settings.title} else {'Release'}) $version"}
     }
+    $identity = [ordered]@{schemaVersion=1; repository=$Repository; head=$head; configSha256=$settings.configHash; version=$version; previousCommit=$previous; selectedDestinations=$selected;baselines=$baselines;versionChange=$VersionChange}
+    # The tag joins the identity only where planned, so an untagged plan keeps the ID it had before tags existed, and an
+    # edit to a prepared release's saved tag commit changes the ID its approval names.
+    if ($sourceTag) {$identity.sourceTag=$sourceTag}
+    $planId = Get-ReleaseTextHash ($identity | ConvertTo-Json -Depth 10 -Compress)
+    $draft = "# $($settings.title) $version`n`n<!-- sourceCommit: $head; previousCommit: $previous -->`n`n"
+    if ($previous) {
+        if ($changes.Count) { $draft += (($changes | ForEach-Object { "- $($_.subject)" }) -join "`n") + "`n" }
+        else { $draft += "No commits since the confirmed previous release.`n" }
+    } else { $draft += "Previous published release boundary is unconfirmed; release notes cannot yet be derived.`n" }
+    $draft+="`n[Release availability](../availability/$version.json)`n"
     $configurationReady=($blockers.Count -eq 0)
     $sourceChanges=@($dirty.Split("`n") | Where-Object {$_})
     if ($dirty) { $blockers.Add('The source working tree contains uncommitted files; review and commit or resolve them before preparation.') }
@@ -642,13 +645,14 @@ function Get-ReleaseNotesHash([string]$StatePath, $Plan) {
 }
 
 # Summarizes progress without conflating uploaded/submitted artifacts with verified store publication. An abandoned
-# destination has no more work, so only the others decide the status. A planned tag is one more step once publication has
-# reached it: it waits for a live store, and a release is published only once its tag is on origin.
+# destination has no more work, so only the others decide the status. A planned tag is one more step: a release is
+# published only once its tag is on origin. A tag publication has not reached yet, pending or not yet recorded, as after a
+# stop between a store's saved result and the tag step, waits for the next publication as a tag awaiting a live store does.
 function Get-ReleaseOverallStatus($State) {
     $statuses=@($State.plan.selectedDestinations | ForEach-Object {$State.destinations[$_].status} | Where-Object {$_ -ne 'abandoned'})
     if (-not $statuses.Count) {return 'abandoned'}
-    $tag=if ($State.plan.Contains('sourceTag') -and $State.Contains('sourceTag') -and $State.sourceTag.status -ne 'pending') {$State.sourceTag} else {$null}
-    if ($tag) {$statuses+=@($tag.status)}
+    $tag=if (-not $State.plan.Contains('sourceTag')) {$null} elseif ($State.Contains('sourceTag')) {$State.sourceTag} else {[ordered]@{status='pending'}}
+    if ($tag) {$statuses+=@($(if ($tag.status -eq 'pending') {'awaiting-release'} else {$tag.status}))}
     if ($statuses -contains 'uncertain' -or $statuses -contains 'in-progress') {return 'needs-reconciliation'}
     $complete=@($statuses | Where-Object {$_ -in @('succeeded','submitted','awaiting-store-action')})
     $failed=@($State.plan.selectedDestinations | Where-Object {$State.destinations[$_].status -eq 'failed' -or ($State.destinations[$_].Contains('preflightStatus') -and $State.destinations[$_].preflightStatus -eq 'failed')})
