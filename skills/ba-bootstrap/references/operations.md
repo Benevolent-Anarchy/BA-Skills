@@ -1,5 +1,7 @@
 # Bootstrap operations
 
+On Linux use `scripts/bootstrap.sh` and kebab-case options; see [Linux operations](linux.md) for command mapping, XDG state, dependencies and app verification. PowerShell examples below remain the Windows interface.
+
 ## Outcomes and recovery
 
 | Result | Meaning and next action |
@@ -12,7 +14,7 @@
 | `missing-input` | Collect the listed inputs; no creation has started. |
 | `discarded` | Explicitly requested unpublished preparation was removed. A new invocation can use the same name. |
 
-Creation journals live under `%LOCALAPPDATA%/BA-Skills/ba-bootstrap/state/`; vault journals are separately keyed by actual vault path under `vaults/`. Use the result's exact `journalPath`. These files contain identity, generated hashes, returned repository IDs and phase/ref receipts, never authentication tokens. Atomic snapshots and an exclusive lock protect retries. Preserve unreadable or incompatible journals; use a matching skill version or resolve the concrete conflict before continuing.
+Creation journals live under `$XDG_STATE_HOME/BA-Skills/ba-bootstrap/state/` (default `~/.local/state/BA-Skills/ba-bootstrap/state/`) on Linux and `%LOCALAPPDATA%/BA-Skills/ba-bootstrap/state/` on Windows; vault journals are separately keyed by actual vault path under `vaults/`. Use the result's exact `journalPath`. These files contain identity, generated hashes, returned repository IDs and phase/ref receipts, never authentication tokens. Atomic snapshots and an exclusive lock protect retries. Preserve unreadable or incompatible journals; use a matching skill version or resolve the concrete conflict before continuing.
 
 New creation journals use schema v2 and include normalized preset/options, recipe version, exact dependency resolution, retained preparation checkpoints, a byte manifest/frozen snapshot and separate native staging/checkout receipts. Complete preparation and the selected full gate before the first repository POST; verify effective ignores and unchanged source bytes before recording success. Repeat the full gate on the private checkout before committing its exact frozen tree. Documentation or frontend success alone cannot replace a missing native check.
 
