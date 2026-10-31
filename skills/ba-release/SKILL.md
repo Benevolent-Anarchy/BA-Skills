@@ -7,8 +7,12 @@ description: Set up, plan, prepare, publish or resume Benevolent Anarchy Godot r
 
 Use the scripts beside this file as the implementation of release operations.
 Resolve `scripts/` relative to this SKILL.md's directory, including when installed
-through a link. Run with PowerShell 7.3 or newer (`pwsh`). The workflow is the same
-in any agent; do not substitute model-generated shell operations for the scripts.
+through a link. On Linux/WSL use `scripts/release.sh` with Bash and Python 3;
+on Windows use PowerShell 7.3+ (`scripts/release.ps1`). Read the
+[native Linux commands and option mapping](references/linux.md) before running
+on Linux. The workflow is the same in any agent; do not substitute model-generated
+shell operations for the scripts. Examples below use Windows spelling; on Linux
+select the `.sh` entry point and mapped `--kebab-case` options.
 
 ## Setup and plan
 
@@ -163,6 +167,8 @@ explicit configuration writes, validation, discovery and read-only plans against
 real projects. Keep future update notification outside this workflow; stable
 version labels and the public record do not require separate desktop executables.
 
+For native Linux commands, hooks, keyless authentication and discovery, read
+[native Linux operation](references/linux.md).
 For installation, native Windows/WSL discovery and checks, read
 [installation](references/installation.md).
 
