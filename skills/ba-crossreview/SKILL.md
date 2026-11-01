@@ -9,6 +9,8 @@ Claude and Codex review each other's pull requests. The agent that wrote a pull 
 
 It works the same in both directions: when Claude is the author the script runs `codex`, and when Codex is the author it runs `claude`.
 
+Neither agent is trying to win. The aim is the best software, not being right or looking good: concede a finding that's right, and decline one only on the evidence, never to save face. Mistakes and dead-ends go on the record as plainly as fixes, whether they are yours, the reviewer's, or the skill's own, such as a round that cost far more than it found.
+
 ## Authority
 
 A request to cross-review a pull request authorizes, for that pull request only:
@@ -72,7 +74,7 @@ Findings are numbered `F1`, `F2` and so on across the whole cross-review, most s
 
 Check each finding against the code yourself, and give it one of three answers:
 - **fixed:** it's right. Fix it, add a test where the project expects one, run the project's gate, then commit and push. Name the commit in the note.
-- **declined:** it's wrong, or not worth changing. Say why with evidence: the code, a test, or a project rule. Don't decline to avoid work.
+- **declined:** it's wrong, or not worth changing. Say why with evidence: the code, a test, or a project rule. Don't decline to avoid work or to save face.
 - **escalated:** only Cicely can decide it, for example a question of design, scope or priority, or a point you're unsure of that the code and the project's notes can't settle. Use it too for a finding the reviewer still holds after you have declined it twice; don't argue a third time. Say in the note what she has to decide, then give `stakes`, why it matters, and two to four `options`, each with what it implies, and your `recommendation` if you have one. Write them for someone who hasn't followed the review.
 
 A finding that carries Cicely's decision is answered by what she decided: fix it her way, or decline it where she said to leave it.
@@ -93,7 +95,7 @@ Write the answers to a JSON file outside the repository, such as in your scratch
 python3 scripts/crossreview.py reply --repository <clone> --pull-request <n> --replies <file>
 ```
 
-It refuses unless every open finding has exactly one answer, refuses an escalation without its stakes and options, and refuses a `fixed` answer while the pull request is still at the reviewed head, since the reviewer could not see the fix. It posts your answers as your own comment.
+It refuses unless every open finding has exactly one answer, refuses an escalation without its stakes or without at least two options that each say what they imply, and refuses a `fixed` answer while the pull request is still at the reviewed head, since the reviewer could not see the fix. It posts your answers as your own comment.
 
 **When another round may not be worth it.** If every finding you answered was minor or a nit, and your answers changed fewer than 200 lines, the next round would mostly confirm small fixes and could turn up more small points. Then `reply` doesn't go straight on: it asks Cicely, as the decision `next-round`, whether to have another round or stop, with what the last round cost. A blocker or major finding, or bigger changes, go straight to another round. The rounds limit still caps it all.
 
@@ -101,7 +103,7 @@ It refuses unless every open finding has exactly one answer, refuses an escalati
 
 When a command reports the turn `cicely`, the cross-review is paused: the reviewer asked a question only she can answer, you escalated a finding, or another round may not be worth it. Stop and call for her attention: use your harness's notification tool if it has one. Then give her the command's `briefing` as it is, since it is written for her, and add your own view where you have one. Don't run another round, and don't guess her answer. Wait for her.
 
-Record her answers exactly as she wrote them: don't summarize, tidy or translate them. A decision that later proves wrong has to be traceable to what she was told and what she said. One answer for each item waiting for her, in a JSON file:
+Record her answers exactly as she wrote them: don't summarize, tidy or translate them. A decision that later proves wrong has to be traceable to what she was told and what she said. The record is the real pull request. When the cross-review runs against a test or a faked GitHub, her answers land only in that fixture: tell her so at the time, and copy them, with what she was asked, to the real pull request or an Issue before the fixture goes. One answer for each item waiting for her, in a JSON file:
 
 ```json
 [{"id": "F3", "decision": "Keep it a module for now; I'll plan plugins separately."},
@@ -140,5 +142,6 @@ At `done`, `stopped` or `limit`, give Cicely the briefing, then tell her:
 - what you declined, and whether the reviewer accepted your reasons
 - what she decided, and how each decision was carried out
 - anything still open, with both positions
+- any mistake along the way, yours or the reviewer's, and any round that cost much more than it found, said plainly
 
 The pull request stays a draft: marking it ready is her call.

@@ -353,6 +353,13 @@ class CrossReview(unittest.TestCase):
         self.review()
         self.assertIn('Escalation F1 needs `stakes`',
                       self.reply(('F1', 'escalated', 'For Cicely.'), ('F2', 'declined', 'No.'), ok=False)['error'])
+        for options in ([{'choice': 'Module'}, {'choice': 'Plugin', 'implies': 'A week of packaging first.'}],
+                        [{'choice': 'Module', 'implies': ' '}, {'choice': 'Plugin', 'implies': 'A week first.'}],
+                        [{'choice': '', 'implies': 'Ships now.'}, {'choice': 'Plugin', 'implies': 'A week first.'}],
+                        [{'choice': 'Plugin', 'implies': 'A week first.'}, 'Module']):
+            incomplete = dict(escalation('F1', 'For Cicely.'), options=options)
+            self.assertIn('with both filled in',
+                          self.reply(incomplete, ('F2', 'declined', 'No.'), ok=False)['error'], options)
         result = self.reply(escalation('F1', 'Cicely decides the architecture.'), ('F2', 'declined', 'Not a bug.'))
         self.assertEqual((result['pending'], result['turn']), (['F1'], 'cicely'))
         answers = self.posts()[1]['body']
@@ -512,6 +519,27 @@ class CrossReview(unittest.TestCase):
                      'about 1.2M tokens (900k cached, $1.25)', '- Open, for Codex to answer: F1'):
             self.assertIn(text, body)
         self.assertEqual(len(self.comments()), 2)
+
+    def test_status_finds_a_first_review_whose_status_comment_failed(self):
+        (self.fixture / 'comment-fails').write_text('', encoding='utf-8')
+        self.queue(review(finding('One'), sleep=3))
+        process = subprocess.Popen([sys.executable, '-B', str(SCRIPT), 'review', '--repository', str(self.repo),
+                                    '--pull-request', '7', '--author', 'codex'], env=self.env, stdout=subprocess.PIPE,
+                                   text=True, encoding='utf-8')
+        try:
+            self.wait_for(lambda: (self.script('status').get('running') or {}).get('latest'))
+            status = self.script('status')
+            self.assertEqual((status['rounds'], status['turn'], status['running']['latest']),
+                             (0, 'review', 'read `widget.py`'))
+            self.assertIn('### Cross-review of #7: Claude is reviewing round 1', status['briefing'])
+            self.assertEqual(self.comments(), [])
+        finally:
+            (self.fixture / 'comment-fails').unlink()
+            output, _ = process.communicate(timeout=60)
+        result = json.loads(output)
+        self.assertEqual(result['round'], 1)
+        self.assertIn('commenting refused', ' '.join(result['warnings']))
+        self.assertIn('waiting for Codex to answer round 1', self.status_comment()['body'])
 
     def test_a_deleted_status_comment_is_posted_again(self):
         self.queue(review(finding('One')))

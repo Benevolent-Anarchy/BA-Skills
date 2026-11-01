@@ -1167,6 +1167,8 @@ def command_review(arguments: argparse.Namespace) -> dict:
     write_change(repo, change, context)
     timeout = arguments.timeout_minutes * 60
     warnings = []
+    # Saved before anything is published, so that `status` finds the review even when the status comment fails.
+    save(path, state)
     progress = Progress(path, context['round'], head,
                         lambda live: warnings.append(show_status(path, state, 'review', live)))
     progress.publish(dict(progress.now))
@@ -1260,9 +1262,14 @@ def command_reply(arguments: argparse.Namespace) -> dict:
             raise Refusal(f'Reply {reply.get("id")} has action {reply.get("action")!r}; use fixed, declined or escalated.')
         if not isinstance(reply.get('note'), str) or not reply['note'].strip():
             raise Refusal(f'Reply {reply.get("id")} needs a note.')
-        if reply['action'] == 'escalated' and (not words(reply.get('stakes')) or len(choices(reply.get('options'))) < 2):
+        options = reply.get('options')
+        if reply['action'] == 'escalated' and (
+                not words(reply.get('stakes')) or not isinstance(options, list) or len(options) < 2
+                or not all(isinstance(option, dict) and words(option.get('choice')) and words(option.get('implies'))
+                           for option in options)):
             raise Refusal(f'Escalation {reply.get("id")} needs `stakes`, why it matters, and at least two `options`, '
-                          'each {"choice", "implies"}, so that Cicely can decide it without having followed the review.')
+                          'each {"choice", "implies"} with both filled in, so that Cicely can decide it without '
+                          'having followed the review.')
     ids = [reply.get('id') for reply in replies]
     missing = [identifier for identifier in open_ids if identifier not in ids]
     extra = [identifier for identifier in ids if identifier not in open_ids or ids.count(identifier) > 1]
@@ -1382,7 +1389,7 @@ def command_status(arguments: argparse.Namespace) -> dict:
     path = state_path(repo, repository, arguments.pull_request)
     state = load_state(path)
     if state is None:
-        return {'pullRequest': arguments.pull_request, 'rounds': 0, 'turn': 'review'}
+        return {'pullRequest': arguments.pull_request, 'rounds': 0, 'turn': 'review', 'running': running(path)}
     last = state['rounds'][-1] if state['rounds'] else None
     move, live = turn(state), running(path)
     return {'pullRequest': arguments.pull_request, 'author': state['author'], 'reviewer': state['reviewer'],
