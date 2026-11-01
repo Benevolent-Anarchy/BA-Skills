@@ -1,5 +1,8 @@
 # Keyless Google Play authentication
 
+On Linux/WSL, use the [native entry points and option mapping](linux.md).
+Windows PowerShell examples below remain supported on Windows.
+
 Read this only when Google Play is selected and an Android Publisher token is
 needed. Holding Play must not run this setup or contact Google.
 
