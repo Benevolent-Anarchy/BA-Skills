@@ -159,6 +159,33 @@ else: print('HTTP 404 Not Found'); sys.exit(1)
         self.assertFalse(json.loads((self.repo/'release.json').read_text())['sourceTag'])
         self.cli('setup','--answers-path',answers,'--expected-config-sha256',r['configSha256']);self.assertTrue(json.loads((self.repo/'release.json').read_text())['sourceTag'])
 
+    def test_setup_reenables_notes_when_selected_in_stores(self):
+        self.config['distributions']['notes'] = False
+        self.save_config()
+        self.commit('disable public notes')
+        report = self.cli('setup', '--destination', 'notes')
+        answers = self.base / 'enable-notes.json'
+        answers.write_text(json.dumps({'stores': ['itch', 'notes']}))
+        result = self.cli('setup', '--destination', 'notes', '--answers-path', answers,
+                          '--expected-config-sha256', report['configSha256'])
+        self.assertIs(result['report']['configuration']['distributions']['notes'], True)
+        self.assertEqual(result['report']['configuration']['distributions']['itch'], self.config['distributions']['itch'])
+        self.commit('enable public notes')
+        planned = self.cli('plan', '--destination', 'notes')
+        self.assertTrue(next(d for d in planned['destinations'] if d['id'] == 'notes')['selected'])
+
+    def test_setup_python_hooks_run_without_shebang_or_execute_permission(self):
+        self.git('rm', 'tools/verify.sh', 'tools/standalone.sh')
+        self.write('tools/verify.py', 'import os\nwith open(os.environ["BA_TEST_LOG"], "a") as stream: stream.write("python-gate\\n")\n')
+        self.write('tools/standalone.py', 'import pathlib,sys\nassert (pathlib.Path(sys.argv[1])/"game.x86_64").is_file()\n')
+        self.config['verification'] = {'gate': {'script': 'tools/verify.py', 'arguments': []},
+                                       'standalone': {'exports': ['linux'], 'script': 'tools/standalone.py', 'arguments': ['{artifact}']}}
+        self.save_config()
+        self.commit('Python verification hooks')
+        self.assertEqual(self.cli('setup')['configuration']['verification']['gate']['script'], 'tools/verify.py')
+        self.prepare()
+        self.assertIn('python-gate', self.calls())
+
 
     def add_android(self, policy='existing'):
         self.write('export_presets.cfg',(self.repo/'export_presets.cfg').read_text()+'[preset.1]\nname="AAB"\nplatform="Android"\nexport_path="build/game.aab"\n[preset.1.options]\ngradle_build/use_gradle_build=true\ngradle_build/export_format=1\nversion/code=7\nversion/name="1.2.3"\npackage/unique_name="com.fixture.game"\npackage/signed=true\n')

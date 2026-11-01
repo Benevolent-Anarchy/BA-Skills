@@ -52,7 +52,9 @@ Always quote paths. Relative executable overrides containing `/` are fixed
 against the caller's directory before any mode changes working directory.
 
 Configuration stays shared. Native verification hooks can be executable native
-scripts or `.sh` files run through Bash. A configured `.ps1` hook resolves to its
+scripts, `.sh` files run through Bash, or `.py` files run through the release
+engine's Python interpreter. Shell and Python hooks need no execute bit; Python
+hooks need no shebang. A configured `.ps1` hook resolves to its
 existing `.sh` sibling on Linux; absence is an explicit error. In that case named
 `-CamelCase` arguments translate to `--kebab-case`, while values remain exact.
 A host must run meaningful functionality checks for its selected exports; Linux
@@ -60,10 +62,13 @@ startup checks do not verify Windows runtime behavior. Cross-exporting Windows
 requires its configured native check to verify the relevant functionality or
 fail. No tool or check is silently skipped.
 
-External commands receive closed input. Timeouts and cancellation send TERM to
+External commands receive closed input. Exports, uploads and the authorized
+wrapper command have no fixed runtime limit; short probes use explicit timeouts.
+Timeouts and cancellation send TERM to
 the entire owned process group, allow bounded graceful cleanup, then use KILL
 and bounded pipe draining/waiting. This also cleans descendants after a launcher
-exits. Nested release/gate processes handle TERM through cleanup before exiting;
+exits. The auth wrapper allows a longer cleanup interval than its release child,
+so nested release/gate processes can clean up and save their journals before exiting;
 an interrupted upload is persisted as uncertain and stops further publication.
 
 State defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/ba-release/releases`,
@@ -76,7 +81,9 @@ approval also binds notes and complete artifact hashes. Failed and uncertain
 operations retain progress; completed writes are never repeated on ordinary retry.
 The native engine preserves the original ordered plan identity and approval
 serialization, including PowerShell's zero/one/many pipeline cardinality for
-artifact hashes. Existing prepared journals can resume natively when their sealed
+artifact hashes. Both engines compare artifact files by path, size and hash
+without depending on enumeration order; the saved order and approval hash stay
+unchanged. Existing prepared journals can resume natively when their sealed
 source checkout, configuration, artifacts and notes still match. It completes
 only the historical omission of Android `useGradle` after every other plan field
 compares equal; approval and remote progress remain unchanged. Status, holds and
