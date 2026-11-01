@@ -19,6 +19,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -598,17 +599,19 @@ TOOLS = {
     'claude': 'You have only the Read, Grep and Glob tools, limited to your working directory and the folder holding '
               'the change, so you can\'t run commands or tests.',
 }
-# Cicely's decision: a check may run tests, sandboxed. Claude Code's sandbox doesn't run headless here, so Claude
-# checks by reading only, and says so.
+# Cicely's decision: a check may run tests, sandboxed. Claude's commands run in Codex's sandbox, set up as for
+# Codex's own checks: see `sandbox_shell`.
+SANDBOX = ('in a sandbox: you can write only in your working directory and in the temp folder `$TMPDIR` names, Git '
+           'can\'t write, and there is no network. You may undo a fix to see whether a test catches it, but put it '
+           'back. Whatever you leave in your working directory is discarded after the check.')
 CHECK_TOOLS = {
-    'codex': 'You may run commands, the project\'s tests among them, in a sandbox: you can write only in your working '
-             'directory and in the temp folder `$TMPDIR` names, Git can\'t write, and there is no network. You may '
-             'undo a fix to see whether a test catches it, but put it back. Whatever you leave in your working '
-             'directory is discarded after the check.',
-    'claude': 'You have only the Read, Grep and Glob tools, limited to your working directory and the folder holding '
-              'the change, so you can\'t run commands or tests. Where a test would settle a finding, say in '
-              '`evidence` that you couldn\'t run it.',
+    'codex': 'You may run commands, the project\'s tests among them, ' + SANDBOX,
+    'claude': 'You have the Read, Grep and Glob tools, limited to your working directory and the folder holding the '
+              'change, and the Bash tool, whose commands, the project\'s tests among them, run ' + SANDBOX,
 }
+SANDBOX_PROFILE = 'ba_crossreview_check'  # The name of the Codex permissions profile Claude's check commands run in.
+SANDBOX_TRIAL = 'Run the command `true` once with the Bash tool, then reply "done". Do nothing else.'
+SANDBOX_TRIAL_MINUTES = 3
 
 
 def event_of(line: str | None) -> dict:
@@ -654,6 +657,8 @@ def claude_activity(event: dict, worktree: Path) -> str | None:
             return f'read `{short(path)}`'
         if name in ('Grep', 'Glob'):
             return f'{"searched for" if name == "Grep" else "listed"} `{short(input.get("pattern") or "", 60)}`'
+        if name == 'Bash':
+            return f'ran `{short(str(input.get("command") or ""))}`'
         if name == 'StructuredOutput':
             return 'writing up the review'
     return None
@@ -808,17 +813,66 @@ def claude_usage(usage: dict) -> dict:
             'cached': cached, 'output': int(usage.get('output_tokens') or 0)}
 
 
+def toml_string(text: str) -> str:
+    """`text` as a TOML basic string."""
+    return '"' + ''.join(f'\\u{ord(char):04x}' if char in '"\\' or ord(char) < 32 or ord(char) == 127 else char
+                         for char in text) + '"'
+
+
+@contextlib.contextmanager
+def sandbox_shell(codex: str, worktree: Path, scratch: Path):
+    """Yields a wrapper for Claude Code to run each of a check's commands with, given as one command line, in Codex's
+    sandbox, set up as for Codex's own checks: everything can be read, only the checkout and the check's temp folder
+    written, Git can't write, and there is no network, nor any Unix socket such as D-Bus. Outside the sandbox, it
+    notes each command in `commands` beside it. Its folder is out of the sandbox's reach and holds an empty Codex home,
+    so neither your Codex configuration nor anything a command writes can change the sandbox."""
+    # Claude Code's own sandbox (2.1.316) doesn't start headless on Cicely's Linux (kernel 7.3, bubblewrap 0.12): its
+    # seccomp helper sets up a user namespace inside its bubblewrap sandbox, which gets no capabilities there, so the
+    # helper fails and the sandbox fails closed. Bubblewrap alone would start, but would let commands reach D-Bus, and
+    # through it have systemd start a process outside. Codex sets its seccomp filter, which blocks such sockets,
+    # without a namespace of its own.
+    with tempfile.TemporaryDirectory(prefix='ba-crossreview-') as folder:
+        folder = Path(folder)
+        home = folder / 'codex'
+        home.mkdir()
+        entries = {':root': 'read', str(worktree): 'write', str(scratch): 'write'}
+        profile = (f'permissions.{SANDBOX_PROFILE}={{filesystem={{'
+                   + ','.join(f'{toml_string(path)}={toml_string(access)}' for path, access in entries.items())
+                   + '},network={enabled=false}}')
+        wrapper = folder / 'shell'
+        wrapper.write_text('#!/bin/sh\n'
+                           f'echo ran >> {shlex.quote(str(folder / "commands"))}\n'
+                           f'exec env CODEX_HOME={shlex.quote(str(home))} {shlex.quote(codex)} sandbox '
+                           f'-P {SANDBOX_PROFILE} -C {shlex.quote(str(worktree))} -c {shlex.quote(profile)} '
+                           '-- bash -c "$1"\n', encoding='utf-8')
+        wrapper.chmod(0o700)
+        yield wrapper
+
+
+def sandbox_trial(executable: str, env: dict, wrapper: Path) -> None:
+    """Has Claude run one harmless command before a check, and refuses the check unless it went through the
+    `wrapper`: should Claude Code stop running commands through CLAUDE_CODE_SHELL_PREFIX, the check's would run
+    outside the sandbox. The trial runs in the wrapper's folder, where nothing from the pull request, such as its
+    CLAUDE.md, can steer it."""
+    try:
+        result = run([executable, '-p', '--output-format', 'json', '--no-session-persistence',
+                      '--permission-mode', 'dontAsk', '--restricted', '--strict-mcp-config',
+                      '--tools', 'Bash', '--allowedTools', 'Bash'],
+                     wrapper.parent, SANDBOX_TRIAL, env, SANDBOX_TRIAL_MINUTES * 60)
+        failure = f' The trial failed (exit {result.returncode}): {tail(result.stderr or result.stdout, 5)}' \
+            if result.returncode else ''
+    except TimedOut as error:
+        failure = f' {error}'
+    if not (wrapper.parent / 'commands').exists():
+        raise Refusal('The check wasn\'t started: Claude\'s trial command never reached Codex\'s sandbox, so its '
+                      'commands might run outside it. Claude Code may no longer run commands through '
+                      f'CLAUDE_CODE_SHELL_PREFIX.{failure}')
+
+
 def run_claude(executable: str, worktree: Path, change: Path, prompt: str, session: str | None,
                timeout: float, progress: Progress, check: dict | None = None) -> tuple[str, dict, dict]:
-    """Runs Claude as the reviewer, or, given a `check` with its token `budget`, as a focused check. Either way it
-    only reads."""
-    # Read-only: only the reading tools exist, confined to the checkout and the change. Restricted mode ignores
-    # settings that could allow more, and no MCP server or connector is loaded.
-    args = [executable, '-p', *(['--resume', session] if session else []),
-            '--output-format', 'stream-json', '--verbose',
-            '--json-schema', json.dumps(CHECK_SCHEMA if check else REVIEW_SCHEMA),
-            '--permission-mode', 'dontAsk', '--restricted', '--strict-mcp-config',
-            '--tools', 'Read,Grep,Glob', '--add-dir', str(change)]
+    """Runs Claude as the reviewer, read-only, or, given a `check` with its token `budget` and `scratch` folder, as a
+    focused check that may also run commands, in Codex's sandbox."""
     # A Claude Code session's marker in the environment would make this look like a nested session.
     env = {name: value for name, value in os.environ.items() if name != 'CLAUDECODE'}
     answer, messages = {}, {}
@@ -840,12 +894,29 @@ def run_claude(executable: str, worktree: Path, change: Path, prompt: str, sessi
         if check:
             over_budget(check['budget'], used())
 
-    try:
-        result = run_streaming(args, worktree, prompt, env, timeout, on_line)
-    except TimedOut as error:
+    with contextlib.ExitStack() as stack:
         if check:
-            raise LimitReached(str(error), 'time', used()) from None
-        raise
+            codex = shutil.which('codex')
+            if not codex:
+                raise Refusal('Claude\'s check runs its commands in Codex\'s sandbox, but the Codex CLI (codex) is not '
+                              'on PATH.')
+            wrapper = stack.enter_context(sandbox_shell(codex, worktree, check['scratch']))
+            env.update(TMPDIR=str(check['scratch']), CLAUDE_CODE_SHELL_PREFIX=str(wrapper))
+            sandbox_trial(executable, env, wrapper)
+        # Only the reading tools, confined to the checkout and the change, and a check's Bash, whose commands run in
+        # the sandbox. Restricted mode ignores settings that could allow more, and no MCP server or connector is
+        # loaded.
+        tools = ['--tools', 'Read,Grep,Glob,Bash', '--allowedTools', 'Bash'] if check else ['--tools', 'Read,Grep,Glob']
+        args = [executable, '-p', *(['--resume', session] if session else []),
+                '--output-format', 'stream-json', '--verbose',
+                '--json-schema', json.dumps(CHECK_SCHEMA if check else REVIEW_SCHEMA),
+                '--permission-mode', 'dontAsk', '--restricted', '--strict-mcp-config', *tools, '--add-dir', str(change)]
+        try:
+            result = run_streaming(args, worktree, prompt, env, timeout, on_line)
+        except TimedOut as error:
+            if check:
+                raise LimitReached(str(error), 'time', used()) from None
+            raise
     if result.returncode != 0 or answer.get('is_error') or not isinstance(answer.get('structured_output'), dict) \
             or not answer.get('session_id'):
         message = answer.get('result') if isinstance(answer.get('result'), str) else None
@@ -1189,11 +1260,9 @@ def check_comment(state: dict, round: dict) -> str:
 
 def tested(reviewer: str, done: bool) -> str:
     """What a focused check by this reviewer may do, or, once `done`, could do."""
-    if reviewer == 'codex':
-        return (f'Codex {"could" if done else "may"} run the tests, in a sandbox that writes only to its checkout and a '
-                'temp folder of its own, with no network.')
-    return (f'Claude {"could only read, so it ran" if done else "can only read, so it runs"} no tests: the skill runs '
-            'Claude read-only, as it has no sandbox for Claude that could safely let it run them.')
+    sandbox = "Codex's sandbox, which" if reviewer == 'claude' else 'a sandbox that'
+    return (f'{AGENTS[reviewer]} {"could" if done else "may"} run the tests, in {sandbox} writes only to its checkout '
+            'and a temp folder of its own, with no network.')
 
 
 def considerations(item: dict, recommends: str) -> str:
