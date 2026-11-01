@@ -1,10 +1,13 @@
 # Per-game release.json
 
+On Linux/WSL, use the [native entry points and option mapping](linux.md).
+Windows PowerShell examples below remain supported on Windows.
+
 Keep one human-edited JSON file at the source Git root. Schema version 1 groups
 settings by store and maps short export aliases to exact existing Godot preset
 names. Inspect the actual project before proposing values. Paths and executable
 filenames come from `export_presets.cfg`; they are not repeated in this file.
-PowerShell's built-in JSON support avoids another parser dependency.
+Both implementations use their runtime's built-in JSON support; no external parser dependency is needed.
 
 Validation rejects unknown/duplicate keys, credential-like settings, escaping
 paths and nonexistent presets. Valid configuration can still have planning
@@ -18,7 +21,7 @@ blockers, including deliberately unknown publication facts.
 | `project` | Relative Godot directory inside the source Git root. |
 | `previousRelease` | Confirmed previous published source commit/ref, or `null` until confirmed; must be an ancestor of the selected source when a release is first planned. Canonical notes count from the newer of this and the game's newest release in the shared live ledger, so it is needed only until a release is recorded there; a game whose earlier releases were recorded per checkout sets it once to its last release's source. |
 | `exports` | Object mapping lowercase aliases such as `windows`, `linux`, `apk`, `aab` to distinct, exact inspected preset names. |
-| `verification.gate` | `{script, arguments?}`: inspected repository-relative PowerShell script and string arguments, defaulting to `[]`. |
+| `verification.gate` | `{script, arguments?}`: inspected repository-relative verification script (native `.sh`/executable on Linux, `.ps1` on Windows; see [native hook mapping](linux.md)) and string arguments, defaulting to `[]`. |
 | `verification.standalone` | Shared `{exports, script, arguments?}` hook, or array of those objects for different scripts. `exports` contains aliases. An unknown script may remain `null`. |
 | `distributions` | Store settings below. Declaring a store makes operations available; nothing is selected automatically. |
 | `androidVersionCodePolicy` | Default `increment-selected`: reserve each selected Android preset's existing code + 1 once. `existing` preserves a separately managed valid scheme. Never derive codes by removing version dots. |
