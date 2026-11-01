@@ -7,8 +7,10 @@ reviewer call takes the next entry of reviews.json and streams events as the rea
 work, then, after the entry's `sleep`, its answer and token usage. A Codex focused check, run with write
 access, starts its session's rollout file under CODEX_HOME, as Codex does, unless the entry has `noRollout`;
 logs each of the entry's `tokens` there as a running total; and leaves the entry's `leaves` files behind.
-Claude reports each message's `streamed` usage with every event of that message, as Claude does. Git LFS
-counts as installed only when lfs-installed exists, and lfs-files.txt is what `git lfs ls-files` prints.
+Claude reports each message's `streamed` usage with every event of that message, as Claude does. An entry's
+`prHead` moves the pull request on while the reviewer reads, and its `viewFails` makes `gh pr view` fail from
+then on, until view-fails is removed. Git LFS counts as installed only when lfs-installed exists, and
+lfs-files.txt is what `git lfs ls-files` prints.
 """
 import json
 import os
@@ -41,6 +43,8 @@ if tool == 'gh':
     if args[:2] == ['pr', 'view']:
         if value('--repo') != 'fixture/repo':
             sys.exit('fixture: repository not explicit')
+        if (fixture / 'view-fails').exists():
+            sys.exit('fixture: GitHub unreachable')
         print((fixture / 'pr.json').read_text(encoding='utf-8'))
     elif args[:2] == ['pr', 'comment']:
         if (fixture / 'comment-fails').exists():
@@ -85,6 +89,8 @@ if review.get('prHead'):
     # The pull request moves on while the reviewer reads.
     pr = json.loads((fixture / 'pr.json').read_text(encoding='utf-8'))
     (fixture / 'pr.json').write_text(json.dumps(dict(pr, headRefOid=review['prHead'])), encoding='utf-8')
+if review.get('viewFails'):
+    (fixture / 'view-fails').touch()
 resuming = (tool == 'codex' and args[1:2] == ['resume']) or (tool == 'claude' and '--resume' in args)
 if review.get('exit') or (resuming and review.get('resumeFails')):
     print(review.get('stderr', 'fixture: reviewer failed'), file=sys.stderr)

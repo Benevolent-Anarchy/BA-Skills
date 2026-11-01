@@ -20,6 +20,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / 'skills/ba-crossreview/scripts/crossreview.py'
 FAKE = Path(__file__).resolve().parent / 'fake_agent.py'
+# A change to widget.py of more lines than new commits may have for a focused check of their own.
+LARGE = ''.join(f'value_{number} = {number}\n' for number in range(250))
 
 
 def finding(title, severity='major', file='widget.py', line=2, id=None, status='open', reply=None, detail='It breaks.',
@@ -592,15 +594,19 @@ class CrossReview(unittest.TestCase):
     def test_another_round_past_the_limit_is_cicelys_recorded_decision(self):
         self.queue(review(finding('One', detail='It breaks on Sundays.')))
         self.review('claude', '--max-rounds', '1')
-        self.push_fix()
+        fix = self.push_fix()
         result = self.reply(('F1', 'fixed', 'Handles Sundays now.'))
         self.assertEqual((result['turn'], result['pending']), ('cicely', ['next-round']))
         self.assertIn('Round 1 was the last of 1, so the cross-review pauses for Cicely', self.posts()[1]['body'])
+        # Codex found that the question `reply` asks named none of the commits the answers came in.
         for text in ('#### Another round after round 1, past the limit of 1?',
                      "All 1 rounds are used, and Codex hasn't checked Claude's answers to round 1:",
                      '- **F1** · major · One', '  - Codex: It breaks on Sundays.',
                      '  - Claude fixed it: Handles Sundays now.', 'round 1 took 0 min and about 1.2M tokens',
-                     "Stopping leaves Claude's answers to round 1 unchecked.", '1. **Another round** (round 2)',
+                     f'Nor has Codex reviewed 1 commit pushed since round 1:\n- `{fix[:7]}` Fix it',
+                     "Stopping leaves Claude's answers to round 1 unchecked, and the commits listed unreviewed.",
+                     'The commits listed stay unreviewed. Anything pushed after them is reviewed',
+                     '1. **Another round** (round 2)',
                      '2. **A focused check** of F1: Codex checks only that', '3. **Stop here:** the cross-review ends at'):
             self.assertIn(text, result['briefing'])
         self.assertIn(result['briefing'], self.status_comment()['body'])
@@ -631,30 +637,41 @@ class CrossReview(unittest.TestCase):
         self.assertEqual(len(self.calls('codex')), 1)
         for text in ("All 1 rounds are used, and Codex hasn't checked Claude's answers to round 1:",
                      '  - Claude declined it: Not a bug.',
-                     f'Nor has Codex reviewed the commits pushed since those answers, up to `{head[:7]}`.',
-                     "Stopping leaves Claude's answers to round 1, and the commits since, unchecked."):
+                     f'Nor has Codex reviewed 1 commit pushed since round 1:\n- `{head[:7]}` Fix it',
+                     "Stopping leaves Claude's answers to round 1 unchecked, and the commits listed unreviewed.",
+                     'The commits listed stay unreviewed. Anything pushed after them is reviewed, or put to you first, '
+                     'together with them.'):
             self.assertIn(text, result['briefing'])
         self.assertIn(result['briefing'], self.status_comment()['body'])
         self.assertEqual(self.script('status')['turn'], 'cicely')
         result = self.decide(('next-round', 'Still no.', 'stop'))
         self.assertEqual(result['turn'], 'stopped')
         self.assertIn(f"**You stopped it** after round 1, at `{head[:7]}`. Codex didn't check Claude's last answers: "
-                      'F1 (declined). Nor did it review the commits pushed since them.', result['briefing'])
+                      f'F1 (declined). Nor did it review the commits pushed since round 1:\n- `{head[:7]}` Fix it\n\n'
+                      'Anything pushed after them is reviewed, or put to you first, together with them. Marking the '
+                      'pull request ready is your call.', result['briefing'])
         self.assertIn('Cicely stopped the cross-review after round 1', self.review(ok=False)['error'])
         self.assertEqual([record['decisions'][0]['decision'] for record in self.script('status')['decisions']],
                          ['Leave it there.', 'Still no.'])
 
-    def test_commits_after_a_clean_last_round_go_to_cicely(self):
+    def test_large_commits_after_a_clean_last_round_go_to_cicely_listed_but_without_a_check(self):
         self.queue(review(summary='Fine.'))
         self.assertEqual(self.review('claude', '--max-rounds', '1')['turn'], 'done')
-        head = self.push_fix()
+        steps = []
+        for number in range(11):
+            (self.repo / 'widget.py').write_text(f'def add(a, b):\n    return a + b + {number}\n', encoding='utf-8')
+            steps.append(self.commit(f'Step {number}'))
+        self.push_fix(LARGE)
         result = self.review()
         self.assertEqual(result['pending'], ['next-round'])
-        for text in (f"All 1 rounds are used, and the commits pushed since round 1, up to `{head[:7]}`, haven't been "
-                     'reviewed.', 'Stopping leaves the commits since round 1 unreviewed.', '2. **Stop here:**'):
+        for text in (f"All 1 rounds are used, and Codex hasn't reviewed 12 commits pushed since round 1:\n"
+                     f'- `{steps[0][:7]}` Step 0\n', f'- `{steps[9][:7]}` Step 9\n- and 2 more\n',
+                     'Stopping leaves the commits since round 1 unreviewed.', '2. **Stop here:**'):
             self.assertIn(text, result['briefing'])
         self.assertNotIn('A focused check', result['briefing'])
-        self.assertIn('nothing to check', self.decide(('next-round', 'Check them.', 'check'), ok=False)['error'])
+        error = self.decide(('next-round', 'Check them.', 'check'), ok=False)['error']
+        self.assertIn('nothing to check', error)
+        self.assertIn('no new commits that change fewer than 200 lines', error)
         self.assertEqual(self.decide(('next-round', 'Yes, review those.', 'review'))['turn'], 'review')
         self.queue(review(summary='Still fine.'))
         self.assertEqual(self.review()['round'], 2)
@@ -669,7 +686,148 @@ class CrossReview(unittest.TestCase):
         status = self.script('status')
         self.assertEqual(status['turn'], 'stopped')
         self.assertIn(f"**You stopped it** after round 1, at `{head[:7]}`. Codex didn't review the commits since "
-                      'round 1.', status['briefing'])
+                      f'round 1:\n- `{head[:7]}` Fix it\n\nAnything pushed after them is reviewed, or put to you '
+                      'first, together with them.', status['briefing'])
+
+    def test_a_few_commits_after_a_clean_review_go_to_cicely_with_a_check_of_their_own(self):
+        self.queue(review(summary='Fine.'))
+        self.assertEqual(self.review()['turn'], 'done')
+        first = self.push_fix()
+        (self.repo / 'widget.py').write_text('def add(a, b):\n    """Adds."""\n    return a + b\n', encoding='utf-8')
+        second = self.pr['headRefOid'] = self.commit('Document add')
+        self.write_pr()
+        result = self.review()
+        self.assertEqual((result['reviewed'], result['turn'], result['pending']), (False, 'cicely', ['next-round']))
+        self.assertEqual(len(self.calls('codex')), 1)
+        for text in ('#### Review the commits pushed since round 1?',
+                     f'Nothing was left open after round 1, at `{self.head[:7]}`. Since then, 2 commits have been '
+                     'pushed that answer no finding, changing ',
+                     f"lines, and Codex hasn't reviewed them:\n- `{first[:7]}` Fix it\n- `{second[:7]}` Document add",
+                     'whenever they change fewer than 200 lines',
+                     '1. **Another round** (round 2 of 3): Codex reviews everything since round 1, these commits '
+                     'included',
+                     '2. **A focused check** of those commits: Codex reviews only them, for problems they introduce, '
+                     'in a fresh session, within 1M tokens and 20 min', 'If it finds none, the cross-review is done.',
+                     '3. **Stop here:** the cross-review ends at', 'The commits listed stay unreviewed.'):
+            self.assertIn(text, result['briefing'])
+        self.assertIn(result['briefing'], self.status_comment()['body'])
+        result = self.decide(('next-round', 'Just check those two.', 'check'))
+        self.assertEqual(result['turn'], 'check')
+        self.assertIn('**So:** a focused check of the new commits.', self.posts()[1]['body'])
+        self.assertIn(f'**Next:** Codex runs the focused check you chose, of the commits pushed since '
+                      f'`{self.head[:7]}`.', result['briefing'])
+        self.queue(check(problems=[finding('The docstring says nothing', 'nit')], session='codex-check-1'))
+        result = self.review()
+        self.assertEqual((result['check'], result['commits'], result['turn']), (1, [first, second], 'reply'))
+        self.assertEqual([finding['id'] for finding in result['open']], ['F1'])
+        call = self.calls('codex')[1]
+        self.assertIn('sandbox_mode="workspace-write"', call['args'])
+        for text in ('chose a focused check of those commits', f'reviewed it up to {self.head}', f'{self.head}..{second}',
+                     'Review only these commits', 'leave `verdicts` empty', 'Closes #3', "the project's tests among them",
+                     'When Cicely chose this, she said, word for word:\n\n> Just check those two.'):
+            self.assertIn(text, call['stdin'])
+        body = self.posts()[2]['body']
+        for text in (f'[Codex] Cross-review of #7: the check after round 1, at {second[:7]}',
+                     f'Cicely chose this focused check of 2 commits pushed since `{self.head[:7]}` instead of another '
+                     'round.', f'- `{first[:7]}` Fix it\n- `{second[:7]}` Document add',
+                     '**Problems**\n- **F1** · nit · `widget.py:2` · The docstring says nothing *(new)*'):
+            self.assertIn(text, body)
+        third = self.push_fix('def add(a, b):\n    """Returns a plus b."""\n    return a + b\n')
+        result = self.reply(('F1', 'fixed', 'It says what add returns now.'))
+        self.assertEqual((result['turn'], result['pending']), ('cicely', ['next-round']))
+        for text in ('#### What follows the check after round 1?',
+                     f'You chose a focused check of 2 commits pushed since `{self.head[:7]}`:\n- `{first[:7]}` Fix it',
+                     '- Problems it found, which Claude has answered:', '2. **A focused check** of F1:',
+                     '| [check after round 1](', '1 nit in 2 commits'):
+            self.assertIn(text, result['briefing'])
+        self.decide(('next-round', 'Check the fix.', 'check'))
+        self.queue(check(('F1', 'verified', 'The docstring says what add returns.'), session='codex-check-2'))
+        result = self.review()
+        self.assertEqual((result['check'], result['commits'], result['turn']), (2, [], 'done'))
+        self.assertIn(f'{second}..{third}', self.calls('codex')[2]['stdin'])
+
+    def test_a_clean_check_of_new_commits_ends_it_and_a_stop_lists_them_with_later_ones(self):
+        self.queue(review(summary='Fine.'))
+        self.review()
+        first = self.push_fix()
+        self.review()
+        self.decide(('next-round', 'Check it.', 'check'))
+        self.queue(check(summary='It holds up.'))
+        result = self.review()
+        self.assertEqual((result['check'], result['turn']), (1, 'done'))
+        self.assertIn('It found no problems in them.', self.posts()[2]['body'])
+        self.assertIn('nothing new in 1 commit', result['briefing'])
+        second = self.push_fix('def add(a, b):\n    return b + a\n')
+        result = self.review()
+        self.assertIn('#### Review the commits pushed since the check after round 1?', result['briefing'])
+        self.assertEqual(self.decide(('next-round', 'Not worth it.', 'stop'))['turn'], 'stopped')
+        self.assertIn('Cicely stopped the cross-review after the check after round 1', self.review(ok=False)['error'])
+        third = self.push_fix('def add(a, b):\n    return a + b  # Sums.\n')
+        result = self.review()
+        self.assertEqual((result['reviewed'], result['pending']), (False, ['next-round']))
+        self.assertIn(f'2 commits have been pushed that answer no finding', result['briefing'])
+        self.assertIn(f'- `{second[:7]}` Fix it\n- `{third[:7]}` Fix it\n', result['briefing'])
+        self.assertNotIn(first[:7] + '` Fix it', result['briefing'].split('| Round |')[0])
+        self.assertEqual(self.decide(('next-round', 'Fine, a full round.', 'review'))['turn'], 'review')
+        self.queue(review(summary='Still fine.', session='codex-thread-2'))
+        result = self.review()
+        self.assertEqual((result['round'], result['resumed'], result['turn']), (2, False, 'done'))
+        self.assertIn(f'from {self.head} to {third}', self.calls('codex')[2]['stdin'])
+
+    def test_a_check_of_new_commits_reviews_only_those_cicely_was_shown(self):
+        # Codex found that commits pushed after her choice went into the check too, past the size it allows.
+        self.queue(review(summary='Fine.'))
+        self.review()
+        shown = self.push_fix()
+        self.review()
+        self.decide(('next-round', 'Check it.', 'check'))
+        later = self.push_fix(LARGE)
+        # Codex found that the newer head was then forgotten: GitHub failing at the end, or `status`, which doesn't
+        # ask it, reported done with `later` unreviewed.
+        self.queue(check(summary='It holds up.', viewFails=True))
+        result = self.review()
+        self.assertEqual((result['check'], result['head'], result['commits'], result['turn']),
+                         (1, shown, [shown], 'review'))
+        call = self.calls('codex')[1]
+        self.assertIn(f'{self.head}..{shown}', call['stdin'])
+        self.assertNotIn(later, call['stdin'])
+        self.assertNotIn('done, with nothing open', self.status_comment()['body'])
+        (self.fixture / 'view-fails').unlink()
+        status = self.script('status')
+        self.assertEqual((status['turn'], status['head'], status['pullRequestHead']), ('review', shown, later))
+        self.assertEqual(self.script('finish')['turn'], 'review')
+        self.queue(review(summary='Still fine.', session='codex-thread-2'))
+        result = self.review()
+        self.assertEqual((result['round'], result['head'], result['turn']), (2, later, 'done'))
+
+    def test_a_check_of_new_commits_stopped_at_its_limit_leaves_them_unreviewed(self):
+        self.queue(review(summary='Fine.'))
+        self.review()
+        head = self.push_fix()
+        self.review()
+        self.decide(('next-round', 'Check it.', 'check'))
+        self.queue(check(tokens=[400000, 600000], sleep=30))
+        result = self.review('claude', '--budget-tokens', '500000')
+        self.assertEqual((result['stopped'], result['turn'], result['pending']), ('token', 'cicely', ['next-round']))
+        self.assertIn('**It was stopped at its token limit** before it reported, so those commits stay unreviewed.',
+                      self.posts()[2]['body'])
+        for text in (f'You chose a focused check of 1 commit pushed since `{self.head[:7]}`:\n- `{head[:7]}` Fix it',
+                     'reached its token limit before it reported',
+                     '1. **Another round** (round 2 of 3): a full review by Codex, in a fresh session, of all the '
+                     'commits since round 1', '2. **A focused check** of that commit:',
+                     'The commits listed stay unreviewed.', 'nothing reviewed (stopped at its token limit)'):
+            self.assertIn(text, result['briefing'])
+        self.decide(('next-round', 'Try again, with less time.', 'check'))
+        self.queue(check(sleep=30))
+        result = self.review('claude', '--timeout-minutes', '0.02')
+        self.assertEqual((result['check'], result['stopped'], result['turn']), (2, 'time', 'cicely'))
+        # Round 1 is the last step that ran to the end, so the second check reads from there.
+        self.assertIn(f'{self.head}..{head}', self.calls('codex')[2]['stdin'])
+        # A check stopped at its limit never ends the cross-review: Cicely's round runs.
+        self.assertEqual(self.decide(('next-round', 'A full round, then.', 'review'))['turn'], 'review')
+        self.queue(review(summary='Fine.', session='codex-thread-2'))
+        result = self.review()
+        self.assertEqual((result['round'], result['resumed'], result['turn']), (2, False, 'done'))
 
     def test_cicely_can_choose_a_focused_check_which_codex_runs_in_a_sandbox(self):
         self.queue(review(finding('No test', 'minor'), finding('Odd name', 'nit')))
@@ -780,7 +938,8 @@ class CrossReview(unittest.TestCase):
                       self.review('claude', '--budget-tokens', '5', ok=False)['error'])
         self.queue(review(finding('One', 'minor')))
         self.review()
-        self.reply(('F1', 'declined', 'Not a bug.'))
+        fix = self.push_fix()
+        self.reply(('F1', 'fixed', 'Adds now.'))
         self.decide(('next-round', 'A cheap check, then.', 'check'))
         self.queue(check(('F1', 'verified', 'Fine.'), tokens=[400000, 600000], sleep=30))
         started = time.monotonic()
@@ -804,6 +963,8 @@ class CrossReview(unittest.TestCase):
         result = self.review('claude', '--timeout-minutes', '0.02')
         self.assertEqual((result['check'], result['stopped'], result['turn']), (2, 'time', 'cicely'))
         self.assertIn('did not finish within 0.02 minutes', self.posts()[5]['body'])
+        # The first check reviewed nothing, so the second reads from round 1 and sees the fix.
+        self.assertIn(f'{self.head}..{fix}', self.calls('codex')[2]['stdin'])
 
     def test_a_check_that_finishes_past_its_token_limit_keeps_what_it_found_with_a_warning(self):
         # Codex found that a final count past the limit went unremarked; Cicely chose to keep such a result, with a
@@ -890,7 +1051,7 @@ class CrossReview(unittest.TestCase):
         self.assertNotIn('resume', call['args'])
         self.assertIn('sandbox_mode="read-only"', call['args'])
         # Codex found the round read only what came after the check, not everything since round 1.
-        for text in ('You are Codex', "a focused check of Claude's answers ran in another session",
+        for text in ('You are Codex', 'Since then a focused check ran in another session',
                      "The check couldn't verify it: No Sunday in the tests.", 'Claude fixed it: Handles Sundays now.',
                      'This is round 2', f'moved from {self.head} to {fix}', f'{self.head}..{fix}',
                      f'the changes since {self.head} introduced', 'she said, word for word:\n\n> Do a full round.'):
@@ -975,11 +1136,11 @@ class CrossReview(unittest.TestCase):
         self.review('claude')
         self.assertIn('Claude as the author', self.review('codex', ok=False)['error'])
 
-    def test_new_commits_after_a_clean_review_are_reviewed_as_another_round(self):
+    def test_large_commits_after_a_clean_review_are_reviewed_as_another_round(self):
         self.queue(review(summary='Fine.'))
         self.assertEqual(self.review()['turn'], 'done')
         self.assertIn('the cross-review is done', self.review(ok=False)['error'])
-        head = self.push_fix()
+        head = self.push_fix(LARGE)
         self.assertEqual(self.script('status')['head'], self.head)
         self.queue(review(summary='Still fine.'))
         result = self.review()
