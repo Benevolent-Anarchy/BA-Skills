@@ -1,5 +1,8 @@
 # Shared installation and discovery
 
+On Linux/WSL, use the [native entry points and option mapping](linux.md).
+Windows PowerShell examples below remain supported on Windows.
+
 The repository owns one `skills/ba-release` directory. Do not copy the skill into
 game repositories or maintain agent-specific workflow forks.
 
@@ -37,11 +40,12 @@ login environment. `-WslDistribution <name>` restricts it when combined with
 the link points to the same canonical source under `/mnt/...`. The installer
 does not assume WSL's home equals Windows' home and does not treat an old skills
 directory as proof an agent is installed. Distributions with no PATH-visible
-agents get no new links. Run the same installer from Linux `pwsh` for a Linux
-checkout; `-IncludeWsl` is only relevant from native Windows.
+agents get no new links. For a Linux checkout run native `install.sh`; `-IncludeWsl` is only relevant
+from native Windows.
 
-Use Linux `pwsh` and Linux Godot for a native WSL release workflow. If those are
-absent, run the native Windows release scripts against the Windows checkout;
+Use native Bash/Python release entry points and Linux Godot for a native WSL
+release workflow. For an existing Windows workflow, run the Windows release
+scripts against the Windows checkout;
 translate paths explicitly with `wslpath -w` when launching `pwsh.exe` from WSL.
 Installation does not install runtimes, engines, Butler, or credentials.
 

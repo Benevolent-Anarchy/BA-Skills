@@ -1,5 +1,8 @@
 # Store publication and observed completion
 
+On Linux/WSL, use the [native entry points and option mapping](linux.md).
+Windows PowerShell examples below remain supported on Windows.
+
 Every published store belongs in the game's configuration. Selection remains
 explicit on each plan; public notes are a separate selectable destination.
 Inspect store state before approval. A local plan validates project facts and

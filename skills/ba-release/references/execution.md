@@ -1,5 +1,8 @@
 # Execution and recovery
 
+On Linux/WSL, use the [native entry points and option mapping](linux.md).
+Windows PowerShell examples below remain supported on Windows.
+
 Use `pwsh -NoProfile -File <skill>/scripts/release.ps1`. The following arguments
 are passed after the script path. Comma-separated destination IDs work with
 `pwsh -File`; an array also works when calling from PowerShell.
