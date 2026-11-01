@@ -118,8 +118,6 @@ class Workflows(unittest.TestCase):
         self.assertTrue(result['enabledVerified'],result); self.assertEqual(b.read_json(preference),{'custom':True})
         self.assertTrue(all(p['digestVerification']=='verified' for p in result['plugins']))
 
-if __name__=='__main__': unittest.main()
-
 class PluginRecovery(unittest.TestCase):
     setUp=Workflows.setUp
     # This class reuses the isolated checkout fixture, and adds transaction interruption coverage.
@@ -203,3 +201,5 @@ class ReviewRegressions(unittest.TestCase):
         self.assertEqual(result['status'],'blocked',result); self.assertEqual(path.read_bytes(),before)
         self.assertFalse(Path(other['projectPath']).exists())
         self.assertEqual(self.engine.plan(original,self.preset)['status'],'ready')
+
+if __name__=='__main__': unittest.main()

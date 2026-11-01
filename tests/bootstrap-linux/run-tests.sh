@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
-python3 -m unittest discover -s tests/bootstrap-linux -p 'test_*.py' -v
+CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
+export PYTHONDONTWRITEBYTECODE=1
+python3 -B -m unittest discover -s tests/bootstrap-linux -p 'test_*.py' -v

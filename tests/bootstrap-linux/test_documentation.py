@@ -1,7 +1,9 @@
 import importlib.util
+import sys
 from pathlib import Path
 import tempfile
 import unittest
+sys.dont_write_bytecode=True
 ROOT=Path(__file__).resolve().parents[2]
 spec=importlib.util.spec_from_file_location('gate_docs',ROOT/'skills/ba-bootstrap/assets/project/tools/verify_linux.py'); g=importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
 class Documentation(unittest.TestCase):
@@ -53,5 +55,32 @@ class Documentation(unittest.TestCase):
         result=g.verify(self.root)
         self.assertFalse(result['Passed'],result)
         self.assertTrue(any('does-not-exist.md' in item and 'docs/NEXT.md:2:' in item for item in result['Diagnostics']),result)
+
+    def test_complete_gate_checks_all_commonmark_link_forms(self):
+        self.write('tools/verify.json','{"schemaVersion":1,"preset":"foundation","requiredChecks":["documentation"]}')
+        cases = {
+            'wrapped': 'See [the broken\nnote](docs/missing.md).\n',
+            'badge': '[![badge](docs/DESIGN.md)](docs/missing.md)\n',
+            'escaped bracket': '[a\\]b](docs/missing.md)\n',
+            'nested brackets': '[a [b] c](docs/missing.md)\n',
+            'formatted collapsed reference': '[*Foo*][]\n\n[*foo*]: docs/missing.md\n',
+            'formatted shortcut reference': '[*Foo*]\n\n[*foo*]: docs/missing.md\n',
+            'unclosed inline HTML comment': 'Compare a <!-- b in prose.\n\n[bad](docs/missing.md)\n',
+        }
+        for label, text in cases.items():
+            with self.subTest(label=label):
+                self.write('README.md',text)
+                result=g.verify(self.root)
+                self.assertFalse(result['Passed'],result)
+                self.assertTrue(any('link-target' in item and 'docs/missing.md' in item for item in result['Diagnostics']),result)
+
+    def test_wrapped_markdown_judgement_links_keep_their_label_and_metadata(self):
+        path=self.root/'docs/JUDGEMENTS.md'; original=path.read_text()
+        target='judgements/interface.md#focus-is-visible'
+        for link in ('[Focus is visible](\n  '+target+')','[Focus is visible]('+target+'\n  )','[Focus is\nvisible]('+target+')'):
+            with self.subTest(link=link):
+                path.write_text(original.replace('[[judgements/interface#Focus is visible|Focus is visible]]',link))
+                result=g.documentation(self.root)
+                self.assertTrue(result['Passed'],result)
 
 if __name__=='__main__': unittest.main()

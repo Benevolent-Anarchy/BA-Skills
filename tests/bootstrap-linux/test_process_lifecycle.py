@@ -40,7 +40,7 @@ class ProcessLifecycle(unittest.TestCase):
         self.assertTrue((self.root/'pids').exists(),'native subprocess did not start')
         pids=[int(p) for p in (self.root/'pids').read_text().split()]; self.groups.append(pids[0]); return child,pids
     def driver_source(self,module,args,timeout):
-        return '\n'.join(['import importlib.util,json,sys',f'spec=importlib.util.spec_from_file_location("probe",{str(module)!r})','module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)',f'args={args!r}', 'try:',f'    module.process(args,{str(self.root)!r},timeout={timeout})' if module==GATE else f'    module.command(args,cwd={str(self.root)!r},timeout={timeout})','except Exception as exc:', '    print(json.dumps({"error":str(exc)})); sys.exit(1)'])+'\n'
+        return '\n'.join(['import importlib.util,json,sys','sys.dont_write_bytecode=True',f'spec=importlib.util.spec_from_file_location("probe",{str(module)!r})','module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)',f'args={args!r}', 'try:',f'    module.process(args,{str(self.root)!r},timeout={timeout})' if module==GATE else f'    module.command(args,cwd={str(self.root)!r},timeout={timeout})','except Exception as exc:', '    print(json.dumps({"error":str(exc)})); sys.exit(1)'])+'\n'
     def assert_stopped(self,pids):
         deadline=time.monotonic()+2
         while any(alive(pid) for pid in pids) and time.monotonic()<deadline: time.sleep(.01)

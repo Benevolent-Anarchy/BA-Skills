@@ -276,9 +276,23 @@ def remove_owned(root,paths):
 
 class Bootstrap:
     def __init__(self,state_root=None,request=github,fetch=download,metadata_request=metadata,runner=command):
-        self.root=Path(state_root or os.environ.get('BA_BOOTSTRAP_STATE_ROOT') or Path(os.environ.get('XDG_STATE_HOME',Path.home()/'.local/state'))/'BA-Skills/ba-bootstrap/state').absolute()
+        self.root=Path(state_root or os.environ.get('BA_BOOTSTRAP_STATE_ROOT') or Path(os.environ.get('XDG_STATE_HOME') or Path.home()/'.local/state')/'BA-Skills/ba-bootstrap/state').absolute()
         self.request=request; self.fetch=fetch; self.metadata=metadata_request; self.runner=runner
-    def journal_path(self,id): return owned(self.root,self.root/(sha(id['owner']+'/'+id['repository'])+'.json'))
+    def journal_path(self,id):
+        name=id['owner']+'/'+id['repository']; canonical=owned(self.root,self.root/(sha(name.lower())+'.json'))
+        # Retain historical case-sensitive filenames and their locks. Every spelling
+        # must find the same existing invocation, without rewriting recovery receipts.
+        legacy=owned(self.root,self.root/(sha(name)+'.json'))
+        matches={path for path in (canonical,legacy) if path.exists()}
+        for path in self.root.glob('*.json'):
+            if path in matches: continue
+            try:
+                stored=read_json(owned(self.root,path))['identity']
+                previous=stored['owner']+'/'+stored['repository']
+                if previous.lower()==name.lower() and path.stem==sha(previous): matches.add(path)
+            except (OSError,ValueError,KeyError,TypeError): continue
+        if len(matches)>1: raise ValueError('Multiple journals exist for this case-insensitive GitHub name; preserve them and resolve the conflict')
+        return next(iter(matches),canonical)
     def api(self,method,endpoint,body=None,expected=(200,201,204)):
         code,data=self.request(method,endpoint,body)
         if code not in expected: raise RuntimeError(f'GitHub {method} {endpoint} failed (HTTP {code}): '+str((data or {}).get('message','unreadable response')))
@@ -768,7 +782,7 @@ class Bootstrap:
         if not ((root/'tools/verify.sh').is_file() and (root/'tools/verify_linux.py').is_file() or (root/'tools/verify.ps1').is_file() and (root/'tools/Documentation.psm1').is_file()): raise ValueError('Project foundation missing verification helpers')
         title=(root/'README.md').read_text().splitlines()[0]
         if not title.startswith('# '): raise ValueError('README needs original top-level title')
-        result=identity(title[2:].replace('\\_','_'),'Local setup',str(root.parent),owner); result.update(repository=repo,fullName=owner+'/'+repo,notesRepository=repo+'-release-notes',notesFullName=owner+'/'+repo+'-release-notes',projectPath=str(root),vaultPath=str(root/'docs'),description='',projectVisibility='private' if remote['private'] else 'public'); return result
+        result=identity(repo,'Local setup',str(root.parent),owner); result.update(title=title[2:].replace('\\_','_'),projectPath=str(root),vaultPath=str(root/'docs'),description='',projectVisibility='private' if remote['private'] else 'public'); return result
     def obsidian_request(self,method,url,body=None):
         if url.startswith('/'): return self.request(method,url,body)
         if method!='GET' or not url.startswith('https://'): raise ValueError('Plugin metadata requires HTTPS GET')
@@ -810,7 +824,7 @@ class Bootstrap:
                 for plugin in ids:
                     active=owned(vault,local/'plugins'/plugin); manifestpath=owned(vault,active/'manifest.json'); valid=False
                     try:
-                        manifest=read_json(manifestpath); valid=manifest['id']==plugin and re.fullmatch(STABLE,manifest['version']) and manifest['minAppVersion'] and owned(vault,active/'main.js').stat().st_size>0
+                        manifest=read_json(manifestpath); valid=manifest['id']==plugin and isinstance(manifest['version'],str) and bool(manifest['version'].strip()) and manifest['minAppVersion'] and owned(vault,active/'main.js').stat().st_size>0
                     except (OSError,ValueError,KeyError): valid=False
                     interrupted=journal.get('operation') and plugin in journal['operation']['releases']
                     if valid and not refresh and not interrupted:
@@ -917,7 +931,7 @@ def plugin_integrity(release,directory):
         if not re.fullmatch(r'sha256:[a-fA-F0-9]{64}',digest) or sha(path.read_bytes())!=digest[7:].lower(): raise ValueError('Plugin asset digest mismatch: '+name+'; preserve pinned bytes')
     return dict(digestVerification='verified' if not missing else 'unverified-by-digest' if len(missing)==len(release['assets']) else 'partial',assetsWithoutDigest=sorted(missing))
 
-def obsidian_settings(): return Path(os.environ.get('XDG_CONFIG_HOME',Path.home()/'.config'))/'obsidian/obsidian.json'
+def obsidian_settings(): return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'obsidian/obsidian.json'
 def obsidian_running():
     return any(command(['pgrep','-x',name],check=False).returncode==0 for name in ('obsidian','Obsidian')) if shutil.which('pgrep') else False
 def obsidian_version():
@@ -966,10 +980,6 @@ def main(argv=None):
         if args.mode in ('plan','create'):
             if args.parent is None: args.parent=input('Parent directory ['+str(Path.home()/'Dev')+']: ') or str(Path.home()/'Dev')
             if args.owner is None: args.owner=input('GitHub owner [Benevolent-Anarchy; cicely-f is also available]: ') or 'Benevolent-Anarchy'
-            if args.preset is None: args.preset=input('Preset [godot; tauri or foundation]: ') or 'godot'
-            if args.preset=='godot' and args.renderer is None: args.renderer=input('Renderer [compatibility; forward-plus or mobile]: ') or 'compatibility'
-            if args.preset=='tauri' and args.app_identifier is None and args.name and args.description:
-                proposed=selection(identity(args.name,args.description,args.parent,args.owner),'tauri')['appIdentifier']; args.app_identifier=input('Application identifier ['+proposed+']: ') or proposed
     if args.owner is None: args.owner='Benevolent-Anarchy'
     missing=[field for field in required if not getattr(args,field) or not getattr(args,field).strip()]
     if missing: print(json.dumps({'status':'missing-input','missing':missing})); return 1
@@ -986,7 +996,13 @@ def main(argv=None):
                 if args.description is not None and args.description!=id['description']: raise ValueError('Explicit description conflicts with stored invocation')
                 if args.parent is not None and str(Path(args.parent).absolute())!=id['parent']: raise ValueError('Explicit parent conflicts with stored invocation')
             else:
-                id=identity(args.name,args.description,str(Path.home()/'Dev') if args.parent is None else args.parent,args.owner); preset=journal.get('presetSelection') if journal else selection(id,args.preset or 'godot',args.renderer,args.app_identifier)
+                id=identity(args.name,args.description,str(Path.home()/'Dev') if args.parent is None else args.parent,args.owner)
+                if args.interactive and not journal:
+                    if args.preset is None: args.preset=input('Preset [godot; tauri or foundation]: ') or 'godot'
+                    if args.preset=='godot' and args.renderer is None: args.renderer=input('Renderer [compatibility; forward-plus or mobile]: ') or 'compatibility'
+                    if args.preset=='tauri' and args.app_identifier is None:
+                        proposed=selection(id,'tauri')['appIdentifier']; args.app_identifier=input('Application identifier ['+proposed+']: ') or proposed
+                preset=(journal.get('presetSelection') or selection(id,'foundation')) if journal else selection(id,args.preset or 'godot',args.renderer,args.app_identifier)
                 if journal: assert_journal_identity(journal,id,preset)
             if journal:
                 for key,opt in (('name',args.preset),('renderer',args.renderer),('appIdentifier',args.app_identifier)):

@@ -21,7 +21,27 @@ import xml.etree.ElementTree as ET
 sys.dont_write_bytecode=True
 sys.path.insert(0,str(Path(__file__).resolve().parent/'_vendor'))
 from markdown_it import MarkdownIt
+from markdown_it.rules_inline import autolink, image, link
 MARKDOWN=MarkdownIt('commonmark')
+
+def located_inline(rule,kind):
+    """Keep source positions while leaving CommonMark link recognition to the parser."""
+    def parse(state,silent):
+        start=state.pos; count=len(state.tokens)
+        matched=rule(state,silent)
+        if matched and not silent:
+            token=next(token for token in state.tokens[count:] if token.type==kind)
+            token.meta['source_span']=(start,state.pos)
+        return matched
+    return parse
+
+for name,rule,kind in (('link',link,'link_open'),('image',image,'image'),('autolink',autolink,'link_open')):
+    MARKDOWN.inline.ruler.at(name,located_inline(rule,kind))
+
+def rendered_text(children):
+    return ''.join(rendered_text(child.children or []) if child.type=='image' else
+                   child.content if child.type in ('text','code_inline') else
+                   ' ' if child.type in ('softbreak','hardbreak') else '' for child in children)
 
 REQUIRED = {'foundation':['documentation'], 'godot':['documentation','godot-import','godot-compile','gut-headless'], 'tauri':['documentation','typescript','frontend-tests','frontend-build','rust-format','rust-lint','rust-tests','tauri-build']}
 
@@ -120,7 +140,10 @@ def tokens(text):
         protected=block_spans(current,initial_tree,{'fence','code_block'})+inline_spans(current,initial_tree)
         if escaped(current,start) or any(a<=start<b for a,b in protected):
             at=start+len(marker); continue
-        close=current.find('-->' if marker=='<!--' else '%%',start+len(marker)); end=len(current) if close<0 else close+(3 if marker=='<!--' else 2)
+        close=current.find('-->' if marker=='<!--' else '%%',start+len(marker))
+        if marker=='<!--' and close<0 and not any(a<=start<b for a,b in block_spans(current,initial_tree,{'html_block'})):
+            at=start+len(marker); continue  # An unclosed inline opener is literal prose.
+        end=len(current) if close<0 else close+(3 if marker=='<!--' else 2)
         for i in range(start,end):
             if chars[i]!='\n': chars[i]=' '
         at=end
@@ -128,63 +151,38 @@ def tokens(text):
     for begin,end in block_spans(current,tree,{'fence','code_block','html_block'}):
         for i in range(begin,end):
             if chars[i]!='\n': chars[i]=' '
-    visible=''.join(chars); linkchars=list(visible); spans=inline_spans(visible,tree)
-    for a,b in spans:
-        for i in range(a,b):
-            if linkchars[i]!='\n': linkchars[i]=' '
-    linkable=''.join(linkchars); headings=[]; lines=visible.splitlines()
+    visible=''.join(chars); spans=inline_spans(visible,tree)
+    headings=[]; lines=visible.splitlines()
     for index,token in enumerate(tree):
         if token.type=='heading_open' and token.map:
             title=tree[index+1].content
             headings.append((int(token.tag[1:]),title,token.map[0]+1,anchor(title)))
-    refs={key.lower():value['href'] for key,value in environment.get('references',{}).items()}
-    def reference(label): return refs.get(re.sub(r'\s+',' ',label).strip().lower())
-    links=[]; occupied=[]
+    links=[]; wikispans=[]; starts=source_lines(visible)
     def add(kind,target,label,alias,start,end):
         links.append(dict(kind=kind,target=target,label=label,alias=alias,line=1+visible.count('\n',0,start),end=end-visible.rfind('\n',0,start)-1))
-        occupied.append((start,end))
+        wikispans.append((start,end))
     for match in re.finditer(r'\[\[([^]\n]+)\]\]',visible):
         if escaped(visible,match.start()) or any(a<=match.start()<b for a,b in spans): continue
         parts=match[1].split('|',1); target=parts[0].strip(); label=parts[1].strip() if len(parts)>1 else target.split('#',1)[0]
         add('wiki',target,label,len(parts)>1,match.start(),match.end())
-    for match in re.finditer(r'!?\[([^]\n]*)\]',linkable):
-        start,end=match.span()
-        if escaped(linkable,start) or any(a<=start<b for a,b in occupied): continue
-        label=inline_text(visible[start+(2 if visible[start:start+2]=='![' else 1):end-1]); target=None; finish=end
-        if end<len(linkable) and linkable[end]=='(':
-            pos=end+1
-            while pos<len(linkable) and linkable[pos].isspace(): pos+=1
-            if pos<len(linkable) and linkable[pos]=='<':
-                close=linkable.find('>',pos+1)
-                if close<0: continue
-                target=visible[pos+1:close]; pos=close+1
+    for token in tree:
+        if token.type!='inline' or not token.map: continue
+        children=token.children or []; content_lines=token.content.split('\n')
+        for index,child in enumerate(children):
+            if child.type not in ('link_open','image'): continue
+            start,end=child.meta['source_span']; row=token.content.count('\n',0,start)
+            startcolumn=start-token.content.rfind('\n',0,start)-1
+            sourcerow=token.map[0]+row
+            absolute=starts[sourcerow]+max(0,lines[sourcerow].find(content_lines[row]))+startcolumn
+            if any(a<=absolute<b for a,b in wikispans): continue
+            endrow=token.content.count('\n',0,end); column=end-token.content.rfind('\n',0,end)-1
+            # Inline content omits list/quote prefixes. Restore that offset for index metadata.
+            source=lines[token.map[0]+endrow]; offset=max(0,source.find(content_lines[endrow]))
+            if child.type=='image': label=rendered_text(child.children or [])
             else:
-                begin=pos; depth=0
-                while pos<len(linkable):
-                    char=linkable[pos]
-                    if escaped(linkable,pos): pos+=1; continue
-                    if char=='(': depth+=1
-                    elif char==')':
-                        if depth==0: break
-                        depth-=1
-                    elif char.isspace() and depth==0: break
-                    pos+=1
-                if depth: continue
-                target=visible[begin:pos]
-            while pos<len(linkable) and linkable[pos].isspace(): pos+=1
-            if pos<len(linkable) and linkable[pos] in ('"',"'"):
-                quote=linkable[pos]; pos+=1
-                while pos<len(linkable) and (linkable[pos]!=quote or escaped(linkable,pos)): pos+=1
-                pos+=1
-                while pos<len(linkable) and linkable[pos].isspace(): pos+=1
-            if pos>=len(linkable) or linkable[pos]!=')': continue
-            finish=pos+1
-        elif end<len(linkable) and linkable[end]=='[':
-            close=linkable.find(']',end+1)
-            if close<0: continue
-            target=reference(linkable[end+1:close] or label); finish=close+1
-        elif not (end<len(linkable) and linkable[end]==':'): target=reference(label)
-        if target is not None: add('markdown',target,label,True,start,finish)
+                close=next(i for i in range(index+1,len(children)) if children[i].type=='link_close')
+                label=rendered_text(children[index+1:close])
+            links.append(dict(kind='markdown',target=child.attrGet('src' if child.type=='image' else 'href'),label=label,alias=True,line=sourcerow+1,endLine=token.map[0]+endrow+1,end=offset+column))
     return dict(headings=headings,links=sorted(links,key=lambda item:item['line']),lines=lines)
 
 def documentation(root):
@@ -286,7 +284,7 @@ def documentation(root):
             if group!=dest: error(indexpath,link['line'],'index-group','Entry must be under its topical file link')
             if link['alias'] and link['label']!=h[1]: error(indexpath,link['line'],'index-entry','Indexed title differs')
             if corpus=='judgements' and record['metadata']:
-                tail=index['lines'][link['line']-1][link['end']:].strip(); expected='— '+record['metadata']
+                tail=index['lines'][link.get('endLine',link['line'])-1][link['end']:].strip(); expected='— '+record['metadata']
                 if not (tail==expected or tail.startswith(expected+' — ')) or record['incomplete'] and 'Incomplete historical record' not in tail: error(indexpath,link['line'],'judgement-index','Copy the complete Judged statement')
         for topic in topics:
             if counts.get(topic)!=1: error(indexpath,start,'topic-index','Expected one topic group for '+str(topic.relative_to(vault)))

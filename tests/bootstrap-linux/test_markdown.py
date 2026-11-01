@@ -1,6 +1,8 @@
 import importlib.util
+import sys
 from pathlib import Path
 import unittest
+sys.dont_write_bytecode=True
 ROOT=Path(__file__).resolve().parents[2]
 spec=importlib.util.spec_from_file_location('gate_markdown',ROOT/'skills/ba-bootstrap/assets/project/tools/verify_linux.py'); g=importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
 class Markdown(unittest.TestCase):
@@ -24,9 +26,11 @@ class Markdown(unittest.TestCase):
     def test_invalid_backtick_info_and_even_backslashes(self):
         result=g.tokens('```not `valid fence info\n## Behaviour of `Size`\n## Behaviour of `Colour`\n~~~\n## Hidden\n    ~~~\n## Still hidden\n~~~\n## Visible\n\\\\[[live]]\n')
         self.assertEqual([x[1] for x in result['headings']],['Behaviour of `Size`','Behaviour of `Colour`','Visible']); self.assertEqual([x['target'] for x in result['links']],['live'])
-if __name__=='__main__': unittest.main()
-
 class HtmlAndLabels(unittest.TestCase):
+    def test_wiki_links_do_not_inherit_commonmark_reference_targets(self):
+        result=g.tokens('[[design/live]]\n\n[design/live]: missing.md\n')
+        self.assertEqual([(link['kind'],link['target']) for link in result['links']],[('wiki','design/live')])
+
     def test_html_block_contents_and_attributes_do_not_become_markdown(self):
         result=g.tokens('<div title="[[hidden]]">\n## Hidden HTML\n[[also-hidden]]\n</div>\n\n## Visible\n')
         self.assertEqual([h[1] for h in result['headings']],['Visible']); self.assertEqual(result['links'],[])
@@ -63,3 +67,5 @@ class ContainerBlocks(unittest.TestCase):
     def test_nested_fence_ends_with_its_container_then_sibling_links_are_live(self):
         text='- Resources\n    - Nested\n\n      ```markdown\n      [Ignored](hidden.md)\n\n- [Missing](missing.md)\n'
         self.assertEqual([x['target'] for x in g.tokens(text)['links']],['missing.md'])
+
+if __name__=='__main__': unittest.main()

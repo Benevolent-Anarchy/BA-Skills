@@ -1,8 +1,10 @@
 import importlib.util
 import json
+import sys
 from pathlib import Path
 import tempfile
 import unittest
+sys.dont_write_bytecode=True
 ROOT = Path(__file__).resolve().parents[2]
 GATE = ROOT/'skills/ba-bootstrap/assets/project/tools/verify_linux.py'
 class GateTests(unittest.TestCase):
@@ -40,8 +42,6 @@ class GateTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): self.g.process(['bash','-c','exit 9'],self.root)
     def test_process_timeout_is_failure(self):
         with self.assertRaises(RuntimeError): self.g.process(['bash','-c','sleep 2'],self.root,timeout=.05)
-if __name__=='__main__': unittest.main()
-
 class NativeGateStages(unittest.TestCase):
     setUpClass=GateTests.__dict__['setUpClass']
     setUp=GateTests.setUp
@@ -66,3 +66,5 @@ class NativeGateStages(unittest.TestCase):
         self.assertEqual([s['Name'] for s in result['Stages']],config['requiredChecks'])
         output['empty']=True; result=self.g.verify(self.root,True,runner); self.assertFalse(result['Passed']); self.assertTrue(any(s['Name']=='frontend-tests' and not s['Passed'] for s in result['Stages']))
         output.update(empty=False,binary=False); (self.root/'src-tauri/target/release/test-app').unlink(); result=self.g.verify(self.root,True,runner); self.assertFalse(result['Passed']); self.assertTrue(any('application binary' in d for d in result['Diagnostics']))
+
+if __name__=='__main__': unittest.main()
