@@ -303,13 +303,21 @@ def check_out(repo: Path, worktree: Path, head: str) -> None:
 
 
 def hydrate(worktree: Path, remote: str) -> None:
-    """Pulls the head's Git LFS objects, which the read-only reviewer can't, and refuses to review pointers."""
+    """Pulls the head's Git LFS objects, which the read-only reviewer can't, and refuses to review pointers.
+
+    LFS is in use when a tracked .gitattributes file or the clone's info/attributes names its filter, or when
+    Git LFS, if installed, lists any file in the checkout."""
     found = run(['git', '-C', str(worktree), 'grep', '-q', '-e', 'filter=lfs', '--', ':(glob)**/.gitattributes'])
-    if found.returncode == 1:
-        return
-    if found.returncode != 0:
+    if found.returncode not in (0, 1):
         raise Refusal(f'Could not check the checkout for Git LFS: {tail(found.stderr)}')
-    if run(['git', '-C', str(worktree), 'lfs', 'version']).returncode != 0:
+    info = common_dir(worktree) / 'info' / 'attributes'
+    configured = found.returncode == 0 or (info.is_file() and 'filter=lfs' in info.read_text(errors='replace'))
+    installed = run(['git', '-C', str(worktree), 'lfs', 'version']).returncode == 0
+    if installed and not configured:
+        configured = bool(git(worktree, 'lfs', 'ls-files'))
+    if not configured:
+        return
+    if not installed:
         raise Refusal('The pull request uses Git LFS, but Git LFS is not installed.')
     git(worktree, 'lfs', 'pull', remote)
     # Each line is "<oid> <marker> <path>": "*" for a full object, "-" for a pointer.
@@ -354,9 +362,10 @@ def codex_settings() -> list[str]:
     top = re.split(r'(?m)^[ \t]*\[', text, maxsplit=1)[0]  # Top-level keys come before the first table.
     settings = []
     for key in ('model', 'model_reasoning_effort'):
-        match = re.search(rf'(?m)^[ \t]*{key}[ \t]*=[ \t]*"([A-Za-z0-9._:/-]+)"[ \t]*(?:#.*)?$', top)
+        # A TOML basic ("...") or literal ('...') string.
+        match = re.search(rf'(?m)^[ \t]*{key}[ \t]*=[ \t]*(["\'])([A-Za-z0-9._:/-]+)\1[ \t]*(?:#.*)?$', top)
         if match:
-            settings += ['-c', f'{key}="{match.group(1)}"']
+            settings += ['-c', f'{key}="{match.group(2)}"']
     return settings
 
 

@@ -43,7 +43,8 @@ class CrossReview(unittest.TestCase):
         for path in (self.repo, self.fixture, self.temp, self.codex_home, bin):
             path.mkdir()
         self.bin = bin
-        for tool in ('gh', 'codex', 'claude'):
+        # git-lfs is faked too, so no test reaches a real one; it counts as installed only where a test says so.
+        for tool in ('gh', 'codex', 'claude', 'git-lfs'):
             self.fake(tool)
         self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GH_REPO='wrong/repository',
                         PYTHONDONTWRITEBYTECODE='1', BA_CROSSREVIEW_FAKE=str(self.fixture), CLAUDECODE='1',
@@ -480,7 +481,7 @@ class CrossReview(unittest.TestCase):
         self.assertEqual(self.script('status')['turn'], 'reply')
 
     def test_git_lfs_objects_are_pulled_before_the_reviewer_reads(self):
-        self.fake('git-lfs')
+        (self.fixture / 'lfs-installed').write_text('', encoding='utf-8')
         (self.repo / '.gitattributes').write_text('*.bin filter=lfs diff=lfs merge=lfs -text\n', encoding='utf-8')
         (self.repo / 'asset.bin').write_text('version https://git-lfs.github.com/spec/v1\n', encoding='utf-8')
         self.git('add', '-A')
@@ -496,22 +497,41 @@ class CrossReview(unittest.TestCase):
         self.assertEqual(pull['args'], ['pull', 'origin'])
         self.assertEqual(Path(pull['cwd']), Path(self.calls('codex')[0]['cwd']))
 
-    def test_a_project_without_git_lfs_never_calls_it(self):
-        self.fake('git-lfs')
+    def test_lfs_files_are_found_without_tracked_attributes(self):
+        (self.fixture / 'lfs-installed').write_text('', encoding='utf-8')
+        (self.fixture / 'lfs-files.txt').write_text('0123456789 * asset.bin\n', encoding='utf-8')
         self.queue(review(finding('One')))
         self.review()
-        self.assertEqual(self.calls('git-lfs'), [])
+        self.assertIn(['pull', 'origin'], [call['args'] for call in self.calls('git-lfs')])
+
+    def test_lfs_named_in_info_attributes_needs_git_lfs(self):
+        (self.repo / '.git/info').mkdir(exist_ok=True)
+        (self.repo / '.git/info/attributes').write_text('*.bin filter=lfs -text\n', encoding='utf-8')
+        self.queue(review(finding('One')))
+        self.assertIn('Git LFS is not installed', self.review(ok=False)['error'])
+        (self.fixture / 'lfs-installed').write_text('', encoding='utf-8')
+        self.review()
+        self.assertIn(['pull', 'origin'], [call['args'] for call in self.calls('git-lfs')])
+
+    def test_a_project_without_git_lfs_is_never_pulled(self):
+        (self.fixture / 'lfs-installed').write_text('', encoding='utf-8')
+        self.queue(review(finding('One')))
+        self.review()
+        self.assertEqual([call['args'][0] for call in self.calls('git-lfs')], ['version', 'ls-files'])
 
     def test_codex_keeps_the_model_and_effort_its_configuration_names(self):
-        (self.codex_home / 'config.toml').write_text(
-            'model = "gpt-test"\nmodel_reasoning_effort = "xhigh"  # deep\n\n[profiles.fast]\nmodel = "other"\n',
-            encoding='utf-8')
-        self.queue(review(finding('One')))
-        self.review()
-        args = self.calls('codex')[0]['args']
-        self.assertIn('model="gpt-test"', args)
-        self.assertIn('model_reasoning_effort="xhigh"', args)
-        self.assertNotIn('model="other"', args)
+        for config in ('model = "gpt-test"\nmodel_reasoning_effort = "xhigh"  # deep\n\n[profiles.fast]\nmodel = "other"\n',
+                       "model = 'gpt-test'\nmodel_reasoning_effort = 'xhigh'\n[profiles.fast]\nmodel = 'other'\n"):
+            with self.subTest(config=config):
+                (self.codex_home / 'config.toml').write_text(config, encoding='utf-8')
+                self.queue(review(finding('One')))
+                self.review()
+                args = self.calls('codex')[-1]['args']
+                self.assertIn('model="gpt-test"', args)
+                self.assertIn('model_reasoning_effort="xhigh"', args)
+                self.assertNotIn('model="other"', args)
+                self.script('finish')
+                (self.repo / '.git/ba-crossreview/fixture-repo-7.json').unlink()
 
     def test_github_ssh_over_443_is_accepted(self):
         url = 'ssh://git@ssh.github.com:443/fixture/repo.git'

@@ -2,8 +2,8 @@
 
 The first argument names the tool being faked. Every call is logged to calls.jsonl in the directory
 BA_CROSSREVIEW_FAKE names, with its arguments, working directory and standard input. pr.json is what
-`gh pr view` prints; each reviewer call takes the next entry of reviews.json. lfs-files.txt is what
-`git lfs ls-files` prints.
+`gh pr view` prints; each reviewer call takes the next entry of reviews.json. Git LFS counts as installed
+only when lfs-installed exists, and lfs-files.txt is what `git lfs ls-files` prints.
 """
 import json
 import os
@@ -50,6 +50,8 @@ if tool == 'gh':
     sys.exit(0)
 
 if tool == 'git-lfs':
+    if not (fixture / 'lfs-installed').exists():
+        sys.exit('git: \'lfs\' is not a git command.')
     if args[:1] == ['ls-files']:
         path = fixture / 'lfs-files.txt'
         print(path.read_text(encoding='utf-8') if path.exists() else '', end='')
