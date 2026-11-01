@@ -8,12 +8,13 @@ work, then, after the entry's `sleep`, its answer and token usage. A Codex focus
 access, starts its session's rollout file under CODEX_HOME, as Codex does, unless the entry has `noRollout`;
 logs each of the entry's `tokens` there as a running total; and leaves the entry's `leaves` files behind.
 Claude reports each message's `streamed` usage with every event of that message, as Claude does, and runs
-the entry's `runs` commands with its Bash tool. A Claude call without a JSON schema is a check's trial: it
-runs `true`. Both run their commands through CLAUDE_CODE_SHELL_PREFIX, as Claude Code does, unless
-prefix-ignored exists, and `codex sandbox` runs the command it is given, without a sandbox. An entry's
-`prHead` moves the pull request on while the reviewer reads, and its `viewFails` makes `gh pr view` fail
-from then on, until view-fails is removed. Git LFS counts as installed only when lfs-installed exists, and
-lfs-files.txt is what `git lfs ls-files` prints.
+the entry's `runs` commands with its Bash tool, waiting for each, or, with `detached`, leaving them running
+in sessions of their own. A Claude call without a JSON schema is a check's trial: it runs `true`. Both run
+their commands through CLAUDE_CODE_SHELL_PREFIX, as Claude Code does, unless prefix-ignored exists, and
+`codex sandbox` runs the command it is given, without a sandbox. An entry's `prHead` moves the pull request
+on while the reviewer reads, and its `viewFails` makes `gh pr view` fail from then on, until view-fails is
+removed. Git LFS counts as installed only when lfs-installed exists, and lfs-files.txt is what `git lfs
+ls-files` prints.
 """
 import json
 import os
@@ -90,12 +91,15 @@ def emit(event):
     print(json.dumps(event), flush=True)
 
 
-def shell(command):
-    """Runs a command as Claude Code's Bash tool does."""
+def shell(command, detached=False):
+    """Runs a command as Claude Code's Bash tool does, or, `detached`, starts it in a session of its own, as Claude
+    Code does, and leaves it running."""
     prefix = os.environ.get('CLAUDE_CODE_SHELL_PREFIX')
-    if prefix and not (fixture / 'prefix-ignored').exists():
-        return subprocess.run([prefix, command], capture_output=True).returncode
-    return subprocess.run(['bash', '-c', command], capture_output=True).returncode
+    args = [prefix, command] if prefix and not (fixture / 'prefix-ignored').exists() else ['bash', '-c', command]
+    if detached:
+        subprocess.Popen(args, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return 0
+    return subprocess.run(args, capture_output=True).returncode
 
 
 if tool == 'codex' and args[:1] == ['sandbox']:
@@ -151,7 +155,7 @@ elif tool == 'claude':
     for command in review.get('runs', []):
         emit({'type': 'assistant', 'message': {'id': 'message-1', 'usage': streamed, 'content': [
             {'type': 'tool_use', 'name': 'Bash', 'input': {'command': command}}]}})
-        shell(command)
+        shell(command, review.get('detached'))
     emit({'type': 'assistant', 'message': {'id': 'message-1', 'usage': streamed, 'content': [
         {'type': 'text', 'text': 'Reading on.'}]}})
     time.sleep(review.get('sleep', 0))

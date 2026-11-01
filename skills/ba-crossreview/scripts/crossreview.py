@@ -824,8 +824,9 @@ def sandbox_shell(codex: str, worktree: Path, scratch: Path):
     """Yields a wrapper for Claude Code to run each of a check's commands with, given as one command line, in Codex's
     sandbox, set up as for Codex's own checks: everything can be read, only the checkout and the check's temp folder
     written, Git can't write, and there is no network, nor any Unix socket such as D-Bus. Outside the sandbox, it
-    notes each command in `commands` beside it. Its folder is out of the sandbox's reach and holds an empty Codex home,
-    so neither your Codex configuration nor anything a command writes can change the sandbox."""
+    notes each command's process in `commands` beside it, and when the check ends, however it ends, whatever is still
+    running of them is stopped. Its folder is out of the sandbox's reach and holds an empty Codex home, so neither your
+    Codex configuration nor anything a command writes can change the sandbox."""
     # Claude Code's own sandbox (2.1.316) doesn't start headless on Cicely's Linux (kernel 7.3, bubblewrap 0.12): its
     # seccomp helper sets up a user namespace inside its bubblewrap sandbox, which gets no capabilities there, so the
     # helper fails and the sandbox fails closed. Bubblewrap alone would start, but would let commands reach D-Bus, and
@@ -840,13 +841,61 @@ def sandbox_shell(codex: str, worktree: Path, scratch: Path):
                    + ','.join(f'{toml_string(path)}={toml_string(access)}' for path, access in entries.items())
                    + '},network={enabled=false}}')
         wrapper = folder / 'shell'
+        # The wrapper notes its process id and start time, the 22nd field of its stat, as `processes` reads them; the
+        # process goes on as Codex's sandbox.
         wrapper.write_text('#!/bin/sh\n'
-                           f'echo ran >> {shlex.quote(str(folder / "commands"))}\n'
+                           'command=$1\n'
+                           'read -r stat < /proc/$$/stat\n'
+                           "set -- ${stat##*') '}\n"
+                           f'echo "$$ ${{20}}" >> {shlex.quote(str(folder / "commands"))}\n'
                            f'exec env CODEX_HOME={shlex.quote(str(home))} {shlex.quote(codex)} sandbox '
                            f'-P {SANDBOX_PROFILE} -C {shlex.quote(str(worktree))} -c {shlex.quote(profile)} '
-                           '-- bash -c "$1"\n', encoding='utf-8')
+                           '-- bash -c "$command"\n', encoding='utf-8')
         wrapper.chmod(0o700)
-        yield wrapper
+        try:
+            yield wrapper
+        finally:
+            end_commands(folder / 'commands')
+
+
+def processes() -> dict[int, tuple[int, str]]:
+    """Each live process's parent and start time, by process id."""
+    found = {}
+    for entry in Path('/proc').iterdir():
+        if entry.name.isdigit():
+            with contextlib.suppress(OSError, ValueError, IndexError):
+                stat = (entry / 'stat').read_text(encoding='utf-8', errors='replace')
+                fields = stat[stat.rindex(')') + 2:].split()  # The name, in parentheses, may hold anything.
+                if fields[0] != 'Z':
+                    found[int(entry.name)] = (int(fields[1]), fields[19])
+    return found
+
+
+def end_commands(log: Path, seconds: float = 10) -> None:
+    """Stops the commands the wrapper noted in `log` that are still running, and whatever they started, and waits
+    for them to go. Claude Code starts each command in a session of its own, so stopping Claude at a check's limit
+    leaves them running, and one could write to the checkout after it is cleared. A process is known by its start
+    time as well as its id, so one that took over a finished command's id is left alone."""
+    try:
+        noted = {tuple(line.split()) for line in log.read_text(encoding='utf-8').splitlines()}
+    except OSError:
+        return
+    running = processes()
+    doomed = {pid: start for pid, (_, start) in running.items() if (str(pid), start) in noted}
+    while True:
+        started = {pid: start for pid, (parent, start) in running.items() if parent in doomed and pid not in doomed}
+        if not started:
+            break
+        doomed.update(started)
+    for pid in doomed:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        running = processes()
+        if not any(running.get(pid, (0, None))[1] == start for pid, start in doomed.items()):
+            break
+        time.sleep(0.1)
 
 
 def sandbox_trial(executable: str, env: dict, wrapper: Path) -> None:

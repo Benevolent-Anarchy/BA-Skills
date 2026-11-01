@@ -1056,6 +1056,21 @@ class CrossReview(unittest.TestCase):
                          (3, None, True, ['F1'], 'done'))
         self.assertIn('**It finished past its token limit,** at about 2k tokens', self.posts()[7]['body'])
 
+    def test_a_claude_check_stopped_at_its_limit_stops_the_commands_it_started(self):
+        # Codex found that Claude Code starts each command in a session of its own, so stopping Claude at a limit left
+        # them running, free to write to the checkout after it was cleared.
+        self.queue(review(finding('One', 'minor')))
+        self.review('codex')
+        self.reply(('F1', 'declined', 'Not a bug.'))
+        self.decide(('next-round', 'Check it.', 'check'))
+        self.queue(check(('F1', 'verified', 'Fine.'), runs=['sleep 3; echo late > late.txt'], detached=True, sleep=30))
+        result = self.review('codex', '--timeout-minutes', '0.02')
+        self.assertEqual((result['stopped'], result['turn']), ('time', 'cicely'))
+        worktree = Path(self.calls('claude')[2]['cwd'])
+        self.assertEqual(self.calls('codex')[-1]['args'][-1], 'sleep 3; echo late > late.txt')
+        time.sleep(4)
+        self.assertFalse((worktree / 'late.txt').exists())
+
     def test_a_claude_check_is_refused_unless_its_trial_command_reaches_the_sandbox(self):
         self.queue(review(finding('One', 'minor')))
         self.review('codex')
