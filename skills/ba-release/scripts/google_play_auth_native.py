@@ -17,7 +17,9 @@ def main():
     if command and command[0]=='--':command=command[1:]
     if not command:parser.error('An explicit action command after -- is required.')
     def action():
-        code,output=run(command[0],command[1:],cwd=os.getcwd())
+        # The native release owns separate tool groups and needs its own TERM
+        # grace plus time to journal uncertainty before this wrapper escalates.
+        code,output=run(command[0],command[1:],cwd=os.getcwd(),cleanup_grace=5)
         print(output,end='')
         return code
     try:

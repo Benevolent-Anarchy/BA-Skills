@@ -32,6 +32,7 @@ STEAM_IGNORE = ['steam_api*.dll', 'libsteam_api.so', 'libgodotsteam.*', 'steam_a
 STORES = ['itch', 'steam', 'google-play', 'notes']
 COMPLETE = ['succeeded', 'submitted', 'awaiting-store-action']
 HASH_RE = r'[0-9a-f]{40}(?:[0-9a-f]{24})?'
+ACCESS_TOKEN_RE = r'[A-Za-z0-9._~+/-]+=*'
 
 class ReleaseError(Exception):
     """An intentionally public diagnostic safe to return or persist."""
@@ -69,7 +70,7 @@ def terminate_process_group(process,grace=2):
             if stream:stream.close()
         if process.poll() is None:process.kill()
         try:process.wait(timeout=max(.05,min(grace,.2)))
-        except subprocess.TimeoutExpired:fail('External process did not exit after bounded termination; inspect its remaining process group.')
+        except subprocess.TimeoutExpired:raise InterruptedOperation('External process did not exit after bounded termination; reconcile remote progress and inspect its remaining process group before retrying.')
 
 class ApiError(ReleaseError):
     def __init__(self, status=None):
@@ -140,7 +141,13 @@ def fields(obj, allowed, required=(), where='configuration'):
         fail('Invalid or unknown fields in '+where+'.')
 
 def credential_free(text):
-    if re.search(r'(?i)(https?://[^/\s]+@|(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9]{12,}|Bearer\s+\S+|(?<![\w./-])--?(?:password|token|api.?key|secret|identity)\b|(?<![\w./-])[\w.-]*(?:password|passwd|pwd|token|api.?key|secret|credential)[\w.-]*["\s]*[:=]\s*["\s]*\S+)', text):
+    # Keep these patterns identical to Assert-ReleaseCredentialFreeText.
+    patterns = [
+        r'(?i)((?<![\w./-])--?(password|token|api.?key|secret|identity)\b|https?://[^/\s]+@|(?<![A-Za-z0-9])(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9]{12,}|Bearer\s+\S+)',
+        r'(?i)(?<![\w./-])[\w.-]*(?:password|passwd|pwd|token|api.?key|secret|credential)[\w.-]*[\x22\x27]?\s*[:=]\s*\S+',
+        r'(?i)Authorization[\x22\x27]?\s*[:=]\s*[\x22\x27]?\s*Basic\s+\S+',
+    ]
+    if any(re.search(pattern, text) for pattern in patterns):
         fail('Credential-like text is forbidden in public release configuration, notes and receipts.')
 
 def safe_path(root, relative, must=False, leaf=False):
@@ -159,7 +166,7 @@ def tool(name):
         return str(path) if path.is_file() and os.access(path, os.X_OK) else None
     return shutil.which(name)
 
-def run(executable, args=(), cwd=None, env=None, timeout=600):
+def run(executable, args=(), cwd=None, env=None, timeout=None, merge_stderr=True, cleanup_grace=2):
     if _CANCELLING:raise Cancellation('Release operation cancelled; no further external operations started.')
     executable = tool(executable)
     if not executable: fail('Required executable is missing or not runnable.')
@@ -167,10 +174,13 @@ def run(executable, args=(), cwd=None, env=None, timeout=600):
     try:
         process = subprocess.Popen([executable, *map(str, args)], cwd=cwd, env=environment,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, start_new_session=True)
+                                   stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE, start_new_session=True)
         try: output, _ = process.communicate(timeout=timeout)
         except (subprocess.TimeoutExpired, KeyboardInterrupt, Cancellation) as error:
-            terminate_process_group(process)
+            try:terminate_process_group(process,grace=cleanup_grace)
+            except InterruptedOperation:
+                if isinstance(error,Cancellation):raise error
+                raise
             if isinstance(error,Cancellation):raise
             raise InterruptedOperation('External operation timed out or was interrupted; reconcile remote progress before retrying.')
         return process.returncode, output.decode('utf-8', errors='replace')
@@ -621,7 +631,12 @@ def assert_artifacts(path,state):
     if state['status'] not in ['preparing','preparation-failed'] and not required.issubset(set(present)):fail('Required prepared artifact is missing.')
     for saved in state['artifacts']:
         directory=safe_path(path,saved['directory'],must=True)
-        if artifact(path,directory,saved['preset'],saved.get('sourceCommit'))!=saved:fail('Prepared artifact changed: '+saved['preset'])
+        current=artifact(path,directory,saved['preset'],saved.get('sourceCommit'))
+        # Keep the approved journal order and its hash; engines enumerate files
+        # using different ordinal/culture-aware sort rules.
+        saved_files={item['path']:item for item in saved['files']}
+        current_files={item['path']:item for item in current['files']}
+        if len(saved_files)!=len(saved['files']) or dict(current,files=current_files)!=dict(saved,files=saved_files):fail('Prepared artifact changed: '+saved['preset'])
 
 def engine(executable=None):
     if executable:
@@ -638,7 +653,11 @@ def hook_run(settings,script,args,cwd):
         script=script[:-4]+'.sh'
         args=[('--'+re.sub(r'([a-z0-9])([A-Z])',r'\1-\2',a[1:]).lower()) if re.fullmatch(r'-[A-Za-z][A-Za-z0-9]*',a) else a for a in args]
     path=safe_path(settings['repository'],script,leaf=True)
-    return run('bash',[path,*args],cwd) if path.suffix=='.sh' else run(str(path),args,cwd)
+    if path.suffix == '.sh':
+        return run('bash', [path, *args], cwd)
+    if path.suffix == '.py':
+        return run(sys.executable, [path, *args], cwd)
+    return run(str(path), args, cwd)
 
 def counter_presets(settings,planned,only=None):
     if settings['config']['androidVersionCodePolicy']=='existing':return []
@@ -684,7 +703,7 @@ def reserve_source(settings,planned,directory,change='current',new_release=False
             if actual not in [item['beforeSha256'],item['afterSha256']]:fail('Source settings changed outside reservation; inspect before resuming.')
             if actual==item['beforeSha256']:
                 if reservation['status']=='committed':fail('Committed release settings were reverted; refusing to change source on retry. Reconcile the reserved release first.')
-                path.write_text(item['content'],encoding='utf-8',newline='\n')
+                with path.open('w',encoding='utf-8',newline='\n') as stream:stream.write(item['content'])
         if git(settings['repository'],['status','--porcelain=v1','--untracked-files=all']):
             return {'status':'source-update-required','statePath':reservation['statePath'],'version':reservation['version'],'message':'Review and commit reserved version settings locally, then resume prepare with the same selection. No export has run.'}
         for item in reservation['files']:
@@ -1093,6 +1112,8 @@ def api_request(request,token=None):
     if not re.match(r'^https://(?:androidpublisher|iamcredentials)\.googleapis\.com/',uri):fail('API host must be the fixed Google service host.')
     token=token or os.environ.get('BA_GOOGLE_PLAY_ACCESS_TOKEN')
     if not token:fail('BA_GOOGLE_PLAY_ACCESS_TOKEN is required for selected Play publication.')
+    if not isinstance(token, str) or not re.fullmatch(ACCESS_TOKEN_RE, token):
+        raise ApiError() from None
     headers={'Authorization':'Bearer '+token};data=None
     if 'file' in request:headers['Content-Type']='application/octet-stream';data=Path(request['file']).read_bytes()
     elif 'body' in request:headers['Content-Type']='application/json';data=compact(request['body']).encode()
@@ -1100,7 +1121,7 @@ def api_request(request,token=None):
         with urllib.request.urlopen(urllib.request.Request(uri,data=data,headers=headers,method=request['method']),timeout=600) as response:
             raw=response.read().decode();return parse_json(raw) if raw.strip() else {}
     except urllib.error.HTTPError as exc:raise ApiError(exc.code) from None
-    except (urllib.error.URLError,TimeoutError,OSError):raise ApiError() from None
+    except (urllib.error.URLError,TimeoutError,OSError,ValueError):raise ApiError() from None
 
 def track_matches(track,release,language,notes):
     releases=track.get('releases',[])
@@ -1273,10 +1294,16 @@ def publish(path,approved_plan=None,approved_notes=None,butler='butler',gh='gh',
                 save()
             state['status']=overall(state,path);save();save_live(path,state);return result_state(state,path)
 
+def parse_timestamp(value):
+    # PowerShell's round-trip format has seven fractional digits, whereas
+    # Python 3.9/3.10 accept only three or six. Retain microsecond precision.
+    value=re.sub(r'\.(\d+)(?=(?:Z|[+-]\d{2}:\d{2})$)',lambda match:'.'+(match.group(1)+'000000')[:6],value)
+    return dt.datetime.fromisoformat(value.replace('Z','+00:00'))
+
 def observation(receipt):
     value=receipt.get('observedAt')
     if not isinstance(value,str) or not re.search(r'(Z|[+-]\d{2}:\d{2})$',value):fail('observedAt must have timezone and identify actual observation.')
-    try:observed=dt.datetime.fromisoformat(value.replace('Z','+00:00'))
+    try:observed=parse_timestamp(value)
     except ValueError:fail('Invalid observedAt timestamp.')
     if observed>dt.datetime.now(dt.timezone.utc)+dt.timedelta(minutes=5):fail('observedAt cannot be in the future.')
     return observed
@@ -1322,7 +1349,7 @@ def confirm(path,receipt_path,abandon=False,authorized=False):
             if abandon:
                 sent=sent_read(planned,path.parent.parent);key=store_key(destination);entries=sent.setdefault(key,[]);own=[e for e in entries if own_entry(e,path,destination)]
                 for entry in own:
-                    if entry.get('sentAt') and observed<dt.datetime.fromisoformat(entry['sentAt'].replace('Z','+00:00')):fail('observedAt precedes upload being abandoned; inspect console again.')
+                    if entry.get('sentAt') and observed<parse_timestamp(entry['sentAt']):fail('observedAt precedes upload being abandoned; inspect console again.')
                 if not own:
                     entry={'sourceCommit':remote.get('sourceCommit') or planned['head'],'version':planned['version'],'planId':planned['planId'],'statePath':str(path),'destination':destination['id'],'sentAt':None};own=[entry];entries.append(entry)
                 if record['status']!='abandoned':remote['abandonment']={'receipt':receipt,'authorizedAt':now()};record.update(status='abandoned',error=None)
@@ -1517,7 +1544,13 @@ def setup(repo,selection=(),answers_path=None,expected_hash=None,interactive=Fal
         stores=answers['stores']
         if not isinstance(stores,list) or any(s not in STORES for s in stores):fail('stores must list supported store types.')
         stores=[s for s in candidate['distributions'] if s in stores]+[s for s in dict.fromkeys(stores) if s not in candidate['distributions']]
-        proposed=setup_document(facts,stores,candidate['exports']);candidate['exports']=proposed['exports'];candidate['distributions']={s:copy.deepcopy(candidate['distributions'].get(s,proposed['distributions'][s])) for s in stores}
+        proposed = setup_document(facts, stores, candidate['exports'])
+        candidate['exports'] = proposed['exports']
+        candidate['distributions'] = {
+            store: copy.deepcopy(proposed['distributions'][store] if store == 'notes'
+                                 else candidate['distributions'].get(store, proposed['distributions'][store]))
+            for store in stores
+        }
     for key,value in answers.items():
         if key=='stores':continue
         parts=key.split('.')
@@ -1608,18 +1641,20 @@ def with_google_play_token(account,service_account,config_directory,action,gclou
     prior_config=os.environ.get('CLOUDSDK_CONFIG');prior_token=os.environ.get('BA_GOOGLE_PLAY_ACCESS_TOKEN')
     try:
         os.environ['CLOUDSDK_CONFIG']=str(directory)
-        code,output=run(gcloud,['auth','list','--format=json','--quiet'],directory,timeout=30)
+        code,output=run(gcloud,['auth','list','--format=json','--quiet'],directory,timeout=30,merge_stderr=False)
         if code:fail('Could not verify Google CLI active account.')
         identities=parse_json(output);active=[i for i in identities if i.get('status')=='ACTIVE']
         if len(active)!=1 or active[0].get('account')!=account:fail('Google CLI active account does not match authorized account.')
-        code,output=run(gcloud,['auth','print-access-token','--account='+account,'--quiet'],directory,timeout=30)
-        if code or not output.strip():fail('Google CLI token acquisition failed; sign in separately in authorized profile.')
+        code,output=run(gcloud,['auth','print-access-token','--account='+account,'--quiet'],directory,timeout=30,merge_stderr=False)
+        output = output.strip()
+        if code or not re.fullmatch(ACCESS_TOKEN_RE, output):fail('Google CLI token acquisition failed; sign in separately in authorized profile.')
         request={'method':'POST','uri':'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/'+service_account+':generateAccessToken','body':{'scope':['https://www.googleapis.com/auth/androidpublisher'],'lifetime':'3600s'}}
-        try:mint=(transport(request,output.strip()) if transport else api_request(request,output.strip()))
-        except ReleaseError:fail('Google Play token generation failed.')
+        try:mint=(transport(request,output) if transport else api_request(request,output))
+        except (ReleaseError, ValueError):
+            raise ReleaseError('Google Play token generation failed.') from None
         try:
-            expiry=dt.datetime.fromisoformat(mint['expireTime'].replace('Z','+00:00'));remaining=(expiry-dt.datetime.now(dt.timezone.utc)).total_seconds()
-            if not isinstance(mint['accessToken'],str) or not mint['accessToken'].strip() or not 120<remaining<=3900:raise ValueError()
+            expiry=parse_timestamp(mint['expireTime']);remaining=(expiry-dt.datetime.now(dt.timezone.utc)).total_seconds()
+            if not isinstance(mint['accessToken'],str) or not re.fullmatch(ACCESS_TOKEN_RE, mint['accessToken']) or not 120<remaining<=3900:raise ValueError()
         except (ValueError,KeyError,TypeError):fail('Google Play did not return a usable short-lived token.')
         os.environ['BA_GOOGLE_PLAY_ACCESS_TOKEN']=mint['accessToken'];output=None;mint=None
         return action()
