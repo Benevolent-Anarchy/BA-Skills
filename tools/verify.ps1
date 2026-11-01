@@ -29,7 +29,7 @@ $encoding=[Console]::OutputEncoding
 try {
     # Suites write in the console code page they inherit; UTF-8 keeps every character through the capture.
     try {[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)} catch {$encoding=$null}
-    foreach ($suite in @('tests/run-tests.ps1','tests/bootstrap/run-tests.ps1','tests/integrate/run-tests.ps1')) {
+    foreach ($suite in @('tests/run-tests.ps1','tests/bootstrap/run-tests.ps1','tests/integrate/run-tests.ps1','tests/crossreview/run-tests.ps1')) {
         $jobs.Add((Start-ThreadJob -ArgumentList (Join-Path $PSHOME 'pwsh.exe'),(Join-Path $root $suite) -ScriptBlock {
             param([string]$Pwsh,[string]$Suite)
             $start=[Diagnostics.ProcessStartInfo]::new($Pwsh)

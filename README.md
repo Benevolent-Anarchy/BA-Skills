@@ -5,6 +5,8 @@ The [bootstrap skill](skills/ba-bootstrap/SKILL.md) creates a private project, i
 
 The [integration skill](skills/ba-integrate/SKILL.md) merges a project's ready pull requests, the ones no longer drafts, in an order that works. Its [survey](skills/ba-integrate/scripts/survey.ps1) finds which pull requests conflict or build on each other without checking anything out. The skill then rehearses every merge and conflict resolution against the project's gate in a scratch worktree, and merges only after the plan is approved. Its scripts bring each branch up to date by replaying the rehearsed resolutions, land it with a merge commit only while GitHub still shows the pull request ready and every push replaces exactly the value inspected, and delete a merged branch only while it is still at the merged tip and no open pull request targets it. Afterwards it checks every issue the merged pull requests should have closed and, for any still open, investigates why rather than closing it. Each project's rules for this live in an `Integrating pull requests` section of its `AGENTS.md`; see [project notes](skills/ba-integrate/references/project-notes.md).
 
+The [cross-review skill](skills/ba-crossreview/SKILL.md) lets Claude and Codex review each other's pull requests without Cicely carrying findings between them. The pull request's author runs it. Its [script](skills/ba-crossreview/scripts/crossreview.py) runs the other agent's CLI headless and read-only, in a detached worktree at the pushed head, and posts that review on the pull request under the reviewer's tag. The author answers every finding: fixed and pushed, declined with reasons, or escalated to Cicely. Each later round resumes the reviewer's session to check the fixes and weigh the reasons, until nothing is open or three rounds are used, so Cicely sees only what the two couldn't settle. It needs Python 3.10 or newer and the reviewer's CLI logged in.
+
 The [release skill](skills/ba-release/SKILL.md) prepares and publishes Godot releases.
 Use PowerShell 7.3 or newer for release operations and repository verification;
 installation also supports PowerShell 7.2:
@@ -17,7 +19,7 @@ pwsh -NoProfile -File ./skills/ba-release/scripts/verify-discovery.ps1
 pwsh -NoProfile -File ./tools/verify.ps1
 ```
 
-The root installer defaults to all three skills and preflights all selected aliases before creating any. Bootstrap and integration request both native `.agents` and `.claude` aliases even without their command-line executables; release keeps its existing executable-based discovery. Each points to one canonical source; unrelated skills and conflicting files are preserved. Permanent installation should use this canonical checkout after integration, not an unmerged worktree.
+The root installer defaults to all four skills and preflights all selected aliases before creating any. Bootstrap, integration and cross-review request both native `.agents` and `.claude` aliases even without their command-line executables; release keeps its existing executable-based discovery. Each points to one canonical source; unrelated skills and conflicting files are preserved. Permanent installation should use this canonical checkout after integration, not an unmerged worktree.
 
 Game settings live in that game's root release.json. See the skill's concise
 [configuration](skills/ba-release/references/configuration.md),
