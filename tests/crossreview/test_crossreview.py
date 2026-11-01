@@ -7,6 +7,7 @@ so no test touches the network or a real agent.
 import fcntl
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -46,10 +47,10 @@ def review(*findings, summary='Reviewed.', **extra):
 
 
 def check(*verdicts, problems=(), summary='Checked.', **extra):
-    """A focused check's answer, with (id, verdict, evidence) tuples."""
+    """A focused check's answer, with (id, verdict, evidence) tuples, using 310k tokens unless `usage` says else."""
     return dict({'output': {'summary': summary, 'problems': list(problems),
-                            'verdicts': [dict(zip(('id', 'verdict', 'evidence'), verdict)) for verdict in verdicts]}},
-                **extra)
+                            'verdicts': [dict(zip(('id', 'verdict', 'evidence'), verdict)) for verdict in verdicts]},
+                 'usage': {'input': 300000, 'cached': 150000, 'output': 10000}}, **extra)
 
 
 class CrossReview(unittest.TestCase):
@@ -690,7 +691,7 @@ class CrossReview(unittest.TestCase):
         for text in ('Cicely, who owns the project, chose a focused check', 'F1 (minor, widget.py:2): No test',
                      'Claude fixed it: Added one.', "Claude declined it: The name is the project's.",
                      "the project's tests among them", 'there is no network', 'about 1M tokens, cached ones included, and 20 minutes',
-                     'stopped and reports nothing', "don't list it again in `problems`", f'{self.head}..{head}'):
+                     'either way it reports nothing', "don't list it again in `problems`", f'{self.head}..{head}'):
             self.assertIn(text, call['stdin'])
         body = self.posts()[3]['body']
         self.assertTrue(body.startswith(f'[Codex] Cross-review of #7: the check after round 1, at {head[:7]}\n\nChecked.'))
@@ -766,11 +767,12 @@ class CrossReview(unittest.TestCase):
         self.assertEqual(result['usage'], {'input': 600000, 'cached': 300000, 'output': 0})
         body = self.posts()[3]['body']
         for text in ('The check used about 600k tokens, past its limit of 500k, and was stopped.',
-                     'with limits of 500k tokens and 20 min', '**It was stopped at its token limit**',
+                     'with limits of 500k tokens and 20 min',
+                     '**It was stopped at its token limit before it reported**',
                      '**Not verified**\n- **F1** · minor · `widget.py:2` · One\n  The check was stopped at its token '
                      'limit before it reported.'):
             self.assertIn(text, body)
-        for text in ('reached its token limit before it reported', '(stopped at its token limit)'):
+        for text in ('and was stopped at its token limit before it reported.', '(stopped at its token limit)'):
             self.assertIn(text, result['briefing'])
         self.assertFalse(Path(self.calls('codex')[1]['tmpdir']).exists())
         self.decide(('next-round', 'Once more, with less time.', 'check'))
@@ -778,6 +780,37 @@ class CrossReview(unittest.TestCase):
         result = self.review('claude', '--timeout-minutes', '0.02')
         self.assertEqual((result['check'], result['stopped'], result['turn']), (2, 'time', 'cicely'))
         self.assertIn('did not finish within 0.02 minutes', self.posts()[5]['body'])
+
+    def test_a_check_that_finishes_past_its_token_limit_reports_nothing(self):
+        # Codex found that only the running count was held to the limit, so a final one past it was accepted.
+        self.queue(review(finding('One', 'minor')))
+        self.review()
+        self.reply(('F1', 'declined', 'Not a bug.'))
+        self.decide(('next-round', 'A cheap check, then.', 'check'))
+        self.queue(check(('F1', 'verified', 'Fine.'), tokens=[200000],
+                         usage={'input': 600000, 'cached': 300000, 'output': 15000}))
+        result = self.review('claude', '--budget-tokens', '500000')
+        self.assertEqual((result['stopped'], result['verified'], result['unverified'], result['turn']),
+                         ('token', [], ['F1'], 'cicely'))
+        self.assertEqual(result['usage'], {'input': 600000, 'cached': 300000, 'output': 15000})
+        body = self.posts()[3]['body']
+        for text in ('The check finished past its token limit: it used about 615k tokens, against a limit of 500k. A '
+                     'check past its limit reports nothing, so what it found is set aside.',
+                     '**It finished past its token limit, and what it found was set aside**, so nothing it was to '
+                     'check is verified.',
+                     '**Not verified**\n- **F1** · minor · `widget.py:2` · One\n  The check finished past its token '
+                     'limit, and what it found was set aside.'):
+            self.assertIn(text, body)
+        for text in ('and finished past its token limit, and what it found was set aside.', '(past its token limit)'):
+            self.assertIn(text, result['briefing'])
+        # Without its session log, the check couldn't be held to its limit, so it isn't run on.
+        self.decide(('next-round', 'Try once more.', 'check'))
+        self.queue(check(('F1', 'verified', 'Fine.'), session='codex-check-2', noRollout=True))
+        error = self.review(ok=False)['error']
+        self.assertIn("The check was stopped before it could run past its token limit unseen: Codex's session log, "
+                      'which has its running token count, wasn\'t found under ', error)
+        self.assertIn('**Check 2 after round 1 failed** at ', self.status_comment()['body'])
+        self.assertEqual(self.script('status')['turn'], 'check')
 
     def test_claude_checks_by_reading_only_and_says_so(self):
         self.queue(review(finding('One', 'minor')))
@@ -788,7 +821,8 @@ class CrossReview(unittest.TestCase):
         self.decide(('next-round', 'Check it.', 'check'))
         # Each event of a message repeats its usage, so 600 tokens twice is 600, inside a budget of 1000.
         self.queue(check(('F1', 'not verified', "I couldn't run test_widget."),
-                         streamed={'input_tokens': 600, 'output_tokens': 0}))
+                         streamed={'input_tokens': 600, 'output_tokens': 0},
+                         usage={'input': 700, 'cached': 0, 'output': 0}))
         result = self.review('codex', '--budget-tokens', '1000')
         self.assertEqual((result['stopped'], result['unverified'], result['turn']), (None, ['F1'], 'cicely'))
         call = self.calls('claude')[1]
@@ -803,11 +837,20 @@ class CrossReview(unittest.TestCase):
         self.queue(check(('F1', 'verified', 'Fine.'), streamed={'input_tokens': 600, 'output_tokens': 0}, sleep=30))
         result = self.review('codex', '--budget-tokens', '500')
         self.assertEqual((result['check'], result['stopped'], result['usage']['input']), (2, 'token', 600))
+        # Claude's final count can be more than its messages showed as it went; the final one decides.
+        self.decide(('next-round', 'Once more.', 'check'))
+        self.queue(check(('F1', 'verified', 'Fine.'), streamed={'input_tokens': 600, 'output_tokens': 0},
+                         usage={'input': 2000, 'cached': 0, 'output': 0}))
+        result = self.review('codex', '--budget-tokens', '1000')
+        self.assertEqual((result['check'], result['stopped'], result['verified'], result['unverified']),
+                         (3, 'token', [], ['F1']))
+        self.assertIn('The check finished past its token limit: it used about 2k tokens, against a limit of 1k.',
+                      self.posts()[7]['body'])
 
     def test_a_round_after_a_check_starts_afresh_and_past_the_limit_raises_it(self):
         self.queue(review(finding('One', detail='It breaks on Sundays.')))
         self.review('claude', '--max-rounds', '1')
-        self.push_fix()
+        fix = self.push_fix()
         self.reply(('F1', 'fixed', 'Handles Sundays now.'))
         self.decide(('next-round', 'Check the Sunday fix.', 'check'))
         self.queue(check(('F1', 'not verified', 'No Sunday in the tests.')))
@@ -823,12 +866,42 @@ class CrossReview(unittest.TestCase):
         call = self.calls('codex')[2]
         self.assertNotIn('resume', call['args'])
         self.assertIn('sandbox_mode="read-only"', call['args'])
+        # Codex found the round read only what came after the check, not everything since round 1.
         for text in ('You are Codex', "a focused check of Claude's answers ran in another session",
                      "The check couldn't verify it: No Sunday in the tests.", 'Claude fixed it: Handles Sundays now.',
-                     'This is round 2'):
+                     'This is round 2', f'moved from {self.head} to {fix}', f'{self.head}..{fix}',
+                     f'the changes since {self.head} introduced'):
             self.assertIn(text, call['stdin'])
+        since = re.search(r'`git diff \S+ \S+`, are in `([^`]+)`', call['stdin']).group(1)
+        self.assertIn('+    return a + b', Path(since).read_text(encoding='utf-8'))
         status = self.script('status')
         self.assertEqual((status['rounds'], status['checks'], status['unverified']), (2, 1, []))
+
+    def test_a_ledger_from_before_the_questions_were_listed_keeps_them(self):
+        # Codex found that a version 1 ledger's question, kept in the round's answers, was lost on loading.
+        self.queue(review(finding('No test', 'minor')))
+        self.review()
+        self.push_fix()
+        self.reply(('F1', 'fixed', 'Added one.'))
+        path = next(self.ledger().glob('*.json'))
+
+        def as_version_1(choice=None):
+            state = json.loads(path.read_text(encoding='utf-8'))
+            last = state['rounds'][-1]
+            asked = last.pop('checkpoints')[-1]
+            last['answers']['checkpoint'] = {'id': 'next-round', 'title': asked['title'], 'decision': asked['decision'],
+                                             'choice': choice or asked['choice']}
+            path.write_text(json.dumps(dict(state, version=1)), encoding='utf-8')
+
+        as_version_1()
+        status = self.script('status')
+        self.assertEqual((status['turn'], [item['id'] for item in status['pending']]), ('cicely', ['next-round']))
+        self.assertIn('#### Another round after round 1?', status['briefing'])
+        self.assertEqual(self.decide(('next-round', 'No, leave it.', 'stop'))['turn'], 'stopped')
+        self.assertEqual(json.loads(path.read_text(encoding='utf-8'))['version'], 2)
+        as_version_1('stop')
+        self.assertEqual(self.script('status')['turn'], 'stopped')
+        self.assertIn('Cicely stopped the cross-review after round 1', self.review(ok=False)['error'])
 
     def test_a_head_that_moved_is_refused(self):
         self.pr['headRefOid'] = self.base

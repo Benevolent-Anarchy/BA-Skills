@@ -5,10 +5,10 @@ BA_CROSSREVIEW_FAKE names, with its arguments, working directory and standard in
 `gh pr view` prints, and comments.json holds the comments `gh pr comment` posts and `gh api` edits. Each
 reviewer call takes the next entry of reviews.json and streams events as the real tool does: one step of
 work, then, after the entry's `sleep`, its answer and token usage. A Codex focused check, run with write
-access, first logs each of the entry's `tokens` as a running total in its session's rollout file under
-CODEX_HOME, as Codex does, and leaves the entry's `leaves` files behind. Claude reports each message's
-`streamed` usage with every event of that message, as Claude does. Git LFS counts as installed only when
-lfs-installed exists, and lfs-files.txt is what `git lfs ls-files` prints.
+access, starts its session's rollout file under CODEX_HOME, as Codex does, unless the entry has `noRollout`;
+logs each of the entry's `tokens` there as a running total; and leaves the entry's `leaves` files behind.
+Claude reports each message's `streamed` usage with every event of that message, as Claude does. Git LFS
+counts as installed only when lfs-installed exists, and lfs-files.txt is what `git lfs ls-files` prints.
 """
 import json
 import os
@@ -93,9 +93,11 @@ usage = review.get('usage', {'input': 1200000, 'cached': 900000, 'output': 30000
 if tool == 'codex':
     session = args[2] if resuming else review.get('session', 'codex-thread-1')
     emit({'type': 'thread.started', 'thread_id': session})
-    if 'sandbox_mode="workspace-write"' in args:
+    if 'sandbox_mode="workspace-write"' in args and not review.get('noRollout'):
         rollout = Path(os.environ['CODEX_HOME'], 'sessions/2026/11/01', f'rollout-2026-11-01T09-00-00-{session}.jsonl')
         rollout.parent.mkdir(parents=True, exist_ok=True)
+        with open(rollout, 'a', encoding='utf-8') as stream:
+            stream.write(json.dumps({'type': 'session_meta', 'payload': {'id': session}}) + '\n')
         for total in review.get('tokens', []):
             with open(rollout, 'a', encoding='utf-8') as stream:
                 stream.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'token_count', 'info': {
@@ -103,6 +105,7 @@ if tool == 'codex':
                                           'output_tokens': 0}}}}) + '\n')
             emit({'type': 'item.started', 'item': {'type': 'command_execution',
                                                    'command': "/bin/bash -lc 'python3 -m unittest'"}})
+    if 'sandbox_mode="workspace-write"' in args:
         for name in review.get('leaves', []):
             for folder in (os.getcwd(), os.environ['TMPDIR']):
                 Path(folder, name).write_text('Left by the tests.\n', encoding='utf-8')
