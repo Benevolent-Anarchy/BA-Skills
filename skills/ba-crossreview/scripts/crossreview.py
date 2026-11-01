@@ -42,7 +42,12 @@ VERDICTS = {'verified': 'resolved', 'problem': 'open', 'not verified': 'unverifi
 TALLIES = {'verified': 'verified', 'problem': 'with a problem', 'not verified': 'not verified'}
 FOUND = {'verified': 'The check verified it', 'problem': 'The check found a problem',
          'not verified': "The check couldn't verify it"}
-SMALL_ANSWERS = 200  # Answers to only minor or nit findings that change fewer lines make the script ask first.
+# Answers to only minor or nit findings, or new commits that answer no finding, that change fewer lines make the
+# script ask Cicely before another round, and such commits can have a focused check of their own.
+SMALL_CHANGE = 200
+COMMITS_LISTED = 10  # At most this many unreviewed commits are listed for Cicely; the rest are counted.
+# Stopping leaves the commits a question lists unreviewed, and only those: what is pushed later isn't skipped.
+LATER_COMMITS = 'Anything pushed after them is reviewed, or put to you first, together with them.'
 STATUS_SECONDS = 120  # At most this often, the status comment shows what a running reviewer is doing.
 DEFAULT_MAX_ROUNDS = 3
 DEFAULT_TIMEOUT_MINUTES = 90
@@ -178,8 +183,8 @@ You reviewed this pull request before, in a session that can no longer be resume
 """
 
 AFTER_CHECK = """
-You reviewed this pull request before. Since then a focused check of {author}'s answers ran in another session, \
-so this review starts afresh. Where it stands is below.
+You reviewed this pull request before. Since then a focused check ran in another session, so this review starts \
+afresh. Where it stands is below.
 
 """
 
@@ -209,6 +214,34 @@ a new problem that one of these fixes, or the commits since {previous_head}, int
 You have about {budget} tokens, cached ones included, and {minutes} minutes. A check that runs past either is \
 stopped and reports nothing, so check the answers that matter most first, and answer while you have room to: mark \
 what you didn't reach `not verified`. Don't commit, push or post anything: your answer is only the JSON.
+"""
+
+CHECK_COMMITS = """You are {reviewer}. {author} wrote pull request #{number} in {repository}, "{title}", and you \
+reviewed it up to {previous_head}. Since then, commits that answer no finding have been pushed. Cicely, who owns \
+the project, chose a focused check of those commits instead of another full review, and this is that check. It \
+runs in a fresh session, so what you need is here.
+
+Your working directory is a detached checkout of the pull request's head, {head}. The commits since \
+{previous_head}, `git log --first-parent --stat {previous_head}..{head}`, are in `{since_commits}`, and their \
+changes, `git diff {previous_head} {head}`, are in `{since}`. `{change}` holds the whole change against \
+{base_branch}. Read the project's AGENTS.md or CLAUDE.md where it bears on these commits.
+
+The pull request's description:
+
+{body}{said}
+
+Review only these commits. In `problems`, list each problem they introduce: a bug, behaviour the description \
+promises that they break, a missing or wrong test for what they change, documentation they make untrue, or \
+something the project's notes require that they skip. Check each suspicion against the code before you report \
+it, and in `detail` cite files and lines, and the tests you ran and what they showed. Leave out everything else, \
+points on code you reviewed before among them, and leave `verdicts` empty. If the commits hold up, report no \
+problems and say so in `summary`.
+
+{tools}
+
+You have about {budget} tokens, cached ones included, and {minutes} minutes. A check that runs past either is \
+stopped and reports nothing, so look at what matters most first, and answer while you have room to. Don't \
+commit, push or post anything: your answer is only the JSON.
 """
 
 
@@ -899,7 +932,9 @@ def turn(state: dict | None, head: str | None = None) -> str:
         return 'stopped'
     if asked and asked.get('choice') == 'check':
         return 'check'
-    if last['answers'] is None and not unverified(last) and (not head or head == last['head']):
+    # A check stopped at its limit reviewed nothing, so it never ends the cross-review.
+    if last['answers'] is None and not unverified(last) and not last.get('stopped') \
+            and (not head or head == last['head']):
         return 'done'
     return 'limit' if reviews(state) >= state['maxRounds'] else 'review'
 
@@ -942,20 +977,24 @@ def answer_to(state: dict, identifier: str) -> dict | None:
 def checkpoint(round: dict) -> dict | None:
     """The latest question to Cicely whether to have another round, a focused check or neither after this one.
     `reply` asks it after answers to only minor findings, after answers to the last round and after answers to a
-    check; `review` asks it after a check that left findings unverified, and when the rounds are used up and new
-    commits are left unreviewed. Earlier ones stay in the list."""
+    check; `review` asks it after a check that left findings unverified or was stopped, when the rounds are used up
+    and new commits are left unreviewed, and before it reviews a few new commits that answer no finding. Earlier ones
+    stay in the list."""
     return (round.get('checkpoints') or [None])[-1]
 
 
-def ask_next_round(state: dict, reason: str, head: str) -> dict:
+def ask_next_round(state: dict, reason: str, head: str, commits: dict | None = None) -> dict:
     """Puts the question what follows to Cicely: `small` after answers to only minor findings, `limit` when the
-    rounds are used up, `check` after a focused check. `head` is what another round would review."""
+    rounds are used up, `check` after a focused check, `commits` before a few new commits that answer no finding are
+    reviewed. `head` is what another round would review, and `commits`, as `unreviewed` gives them, what the
+    question lists as unreviewed."""
     last = state['rounds'][-1]
     titles = {'small': f'Another round after {label(last)}?',
               'limit': f'Another round after {label(last)}, past the limit of {state["maxRounds"]}?',
-              'check': f'What follows {label(last)}?'}
+              'check': f'What follows {label(last)}?',
+              'commits': f'Review the commits pushed since {label(reviewed(state))}?'}
     item = dict({'id': CHECKPOINT, 'reason': reason}, **step_of(last), head=head, title=titles[reason], decision=None,
-                choice=None)
+                choice=None, **({'commits': commits} if commits else {}))
     last.setdefault('checkpoints', []).append(item)
     return item
 
@@ -1118,13 +1157,17 @@ def check_comment(state: dict, round: dict) -> str:
     lines = [f'[{reviewer}] Cross-review of #{state["pullRequest"]}: {label(round)}, at {round["head"][:7]}', '']
     if round['summary']:
         lines += [round['summary'], '']
-    limits = round['limits']
-    lines.append(f'Cicely chose this focused check of the answers instead of another round. It ran in a fresh session '
+    limits, commits = round['limits'], round.get('commits')
+    what = (f'{counted(len(commits["list"]), "commit")} pushed since `{commits["since"][:7]}`' if commits
+            else 'the answers')
+    lines.append(f'Cicely chose this focused check of {what} instead of another round. It ran in a fresh session '
                  f'with limits of {amount(limits["tokens"])} tokens and {limits["minutes"]:g} min, and took '
                  f'{cost(round) or "no time to speak of"}. ' + tested(state['reviewer'], True))
+    if commits:
+        lines += ['', *commit_lines(commits)]
     if round.get('stopped'):
-        lines += ['', f'**It was stopped at its {round["stopped"]} limit** before it reported, so nothing it was to '
-                      'check is verified.']
+        lines += ['', f'**It was stopped at its {round["stopped"]} limit** before it reported, so '
+                      + ('those commits stay unreviewed.' if commits else 'nothing it was to check is verified.')]
     if round.get('overran'):
         lines += ['', f'**It finished past its token limit,** at about {amount(tokens(round["usage"]))} tokens: the '
                       'running count lags by a step, so it wasn\'t stopped in time. What it found is kept.']
@@ -1139,6 +1182,8 @@ def check_comment(state: dict, round: dict) -> str:
             new = ' *(new)*' if finding['new'] else ''
             lines.append(f'- **{finding["id"]}** · {finding["severity"]} · `{location(finding)}` · {finding["title"]}{new}')
             lines += indented(finding['detail'] if finding['new'] else finding['reply'])
+    if commits and not round.get('stopped') and not round['findings']:
+        add_block(lines, 'It found no problems in them.')
     return '\n'.join(lines) + '\n'
 
 
@@ -1177,7 +1222,10 @@ def decisions_comment(state: dict, record: dict) -> str:
             lines += ['', f'**{author}\'s view, given with it:**', *quoted(decision['view'])]
         lines += ['', '**Her answer:**', *quoted(decision['decision'])]
         if decision.get('choice'):
-            lines += ['', f'**So:** {CHOICES[decision["choice"]]}.']
+            # With no answers or unverified findings to check, a check is of the new commits.
+            so = ('a focused check of the new commits' if decision['choice'] == 'check' and not checkable(state)
+                  else CHOICES[decision['choice']])
+            lines += ['', f'**So:** {so}.']
     return '\n'.join(lines) + '\n'
 
 
@@ -1240,6 +1288,30 @@ def last_review(state: dict) -> dict:
     return next(round for round in reversed(state['rounds']) if not round.get('check'))
 
 
+def reviewed(state: dict) -> dict:
+    """The latest round or check that ran to the end. A check stopped at its limit reviewed nothing, so what came
+    after the step before it is still unreviewed."""
+    return next(round for round in reversed(state['rounds']) if not round.get('stopped'))
+
+
+def counted(number: int, noun: str) -> str:
+    return f'{number} {noun}' + ('' if number == 1 else 's')
+
+
+def commit_lines(commits: dict) -> list[str]:
+    """Commits that nobody has reviewed, as `unreviewed` gives them, listed by short hash and subject."""
+    listed = commits['list'][:COMMITS_LISTED]
+    more = len(commits['list']) - len(listed)
+    return ([f'- `{commit["sha"][:7]}` {commit["subject"]}' for commit in listed]
+            + ([f'- and {more} more'] if more else []))
+
+
+def few_commits(commits: dict | None) -> dict | None:
+    """The unreviewed commits, as `unreviewed` gives them, when they change little enough for a focused check of
+    their own."""
+    return commits if commits and commits['list'] and commits['changedLines'] < SMALL_CHANGE else None
+
+
 def link(text: str, url: str | None) -> str:
     return f'[{text}]({url})' if url else text
 
@@ -1248,7 +1320,8 @@ def item_lines(state: dict, item: dict) -> list[str]:
     """One thing waiting for Cicely, told so that she can decide it without having followed the review."""
     reviewer, author = AGENTS[state['reviewer']], AGENTS[state['author']]
     if item['id'] == CHECKPOINT:
-        return {'limit': limit_lines, 'small': checkpoint_lines, 'check': after_check_lines}[item['reason']](state, item)
+        return {'limit': limit_lines, 'small': checkpoint_lines, 'check': after_check_lines,
+                'commits': commits_lines}[item['reason']](state, item)
     lines = [f'#### {item["id"]} · {item["title"]}']
     if 'note' in item:
         who = author
@@ -1270,12 +1343,19 @@ def numbered(options: list[str]) -> list[str]:
     return [f'{number}. {option}' for number, option in enumerate(options, 1)]
 
 
-def check_option(state: dict, found: dict) -> str:
-    """A focused check of what is left, as one of Cicely's options."""
-    return (f'**A focused check** of {", ".join(sorted(found, key=number_of))}: {AGENTS[state["reviewer"]]} checks '
-            f'only {"that" if len(found) == 1 else "those"}, in a fresh session, within {amount(DEFAULT_CHECK_TOKENS)} tokens and {DEFAULT_CHECK_MINUTES} '
-            f'min unless you set other limits. {tested(state["reviewer"], False)} It doesn\'t count as a round, and '
-            'what it can\'t verify comes back to you.')
+def check_option(state: dict, found: dict, commits: dict | None = None) -> str:
+    """A focused check of what is left, as one of Cicely's options: of the findings to look at again, or, when there
+    are none, of the few new `commits` listed above it."""
+    reviewer = AGENTS[state['reviewer']]
+    limits = (f'in a fresh session, within {amount(DEFAULT_CHECK_TOKENS)} tokens and {DEFAULT_CHECK_MINUTES} min '
+              f'unless you set other limits. {tested(state["reviewer"], False)} It doesn\'t count as a round')
+    if found:
+        return (f'**A focused check** of {", ".join(sorted(found, key=number_of))}: {reviewer} checks only '
+                f'{"that" if len(found) == 1 else "those"}, {limits}, and what it can\'t verify comes back to you.')
+    one = len(commits['list']) == 1
+    return (f'**A focused check** of {"that commit" if one else "those commits"}: {reviewer} reviews only '
+            f'{"it" if one else "them"}, for problems {"it introduces" if one else "they introduce"}, {limits}. If it '
+            'finds none, the cross-review is done.')
 
 
 def limit_lines(state: dict, item: dict) -> list[str]:
@@ -1283,6 +1363,9 @@ def limit_lines(state: dict, item: dict) -> list[str]:
     reviewer, author = AGENTS[state['reviewer']], AGENTS[state['author']]
     last, review = state['rounds'][-1], last_review(state)
     step, took, answers, found = label(last), cost(review), last['answers'], checkable(state)
+    # A question asked before the commits were listed names only the head they reach.
+    commits = item.get('commits')
+    listed = bool(commits and commits['list'])
     lines = [f'#### {item["title"]}']
     if answers:
         left = f'{author}\'s answers to {step} unchecked'
@@ -1295,28 +1378,64 @@ def limit_lines(state: dict, item: dict) -> list[str]:
             if finding['id'] in notes:
                 reply = notes[finding['id']]
                 lines.append(f'  - {author} {reply["action"]} it: {short(reply["note"], 300)}')
-        if answers['head'] != item['head']:
+        if listed:
             left = f'{author}\'s answers to {step}, and the commits since, unchecked'
-            lines += ['', f'Nor has {reviewer} reviewed the commits pushed since those answers, up to '
+            lines += ['', f'Nor has {reviewer} reviewed {counted(len(commits["list"]), "commit")} pushed since those '
+                          'answers:', *commit_lines(commits)]
+        elif answers['head'] != item['head']:
+            left = f'{author}\'s answers to {step}, and the commits since, unchecked'
+            lines += ['', f'Nor has {reviewer} reviewed the commits pushed since those answers, up to and including '
                           f'`{item["head"][:7]}`.']
     else:
-        left = f'the commits since {step} unreviewed'
-        lines.append(f'All {state["maxRounds"]} rounds are used, and the commits pushed since {step}, up to '
-                     f'`{item["head"][:7]}`, haven\'t been reviewed.')
+        since = label(reviewed(state))
+        left = f'the commits since {since} unreviewed'
+        if listed:
+            lines += [f'All {state["maxRounds"]} rounds are used, and {reviewer} hasn\'t reviewed '
+                      f'{counted(len(commits["list"]), "commit")} pushed since {since}:', *commit_lines(commits)]
+        else:
+            lines.append(f'All {state["maxRounds"]} rounds are used, and the commits pushed since {since}, up to and '
+                         f'including `{item["head"][:7]}`, haven\'t been reviewed.')
     if unverified(last):
         ids = ', '.join(finding['id'] for finding in unverified(last))
         lines += ['', f'{capital(step)} couldn\'t verify {ids}.']
         left += f', and {ids} unverified'
     options = [f'**Another round** (round {reviews(state) + 1}): {reviewer} checks what is above, and may raise new '
                'points only on what changed.']
-    if found:
-        options.append(check_option(state, found))
+    if found or few_commits(commits):
+        options.append(check_option(state, found, commits))
     options.append(f'**Stop here:** the cross-review ends at `{item["head"][:7]}`. What is open stays open on the '
-                   'record; decide any of it yourself, or leave it. Marking the pull request ready stays your call.')
+                   'record; decide any of it yourself, or leave it. '
+                   + (f'The commits listed stay unreviewed. {LATER_COMMITS} ' if listed else '')
+                   + 'Marking the pull request ready stays your call.')
     return lines + ['', f'**Why it matters:** the rounds limit caps what the cross-review spends. Another round is '
                         f'another review by {reviewer}' + (f'; round {review["round"]} took {took}.' if took else '.')
                         + f' Stopping leaves {left}.',
                     '', '**Options:**', *numbered(options)]
+
+
+def commits_lines(state: dict, item: dict) -> list[str]:
+    """Whether to review a few new commits that answer no finding, pushed after a step that left nothing open: with
+    a round, with a focused check of just those commits, or not at all."""
+    reviewer, commits, review = AGENTS[state['reviewer']], item['commits'], last_review(state)
+    took, one = cost(review), len(commits['list']) == 1
+    these = 'this commit' if one else 'these commits'
+    return [f'#### {item["title"]}',
+            f'Nothing was left open after {label(reviewed(state))}, at `{commits["since"][:7]}`. Since then, '
+            f'{counted(len(commits["list"]), "commit")} {"has" if one else "have"} been pushed that '
+            f'{"answers" if one else "answer"} no finding, changing {commits["changedLines"]} lines, and {reviewer} '
+            f'hasn\'t reviewed {"it" if one else "them"}:', *commit_lines(commits),
+            '', f'The cross-review asks you before it reviews commits like these whenever they change fewer than '
+                f'{SMALL_CHANGE} lines, as a focused check of them costs less than a round.',
+            '', f'**Why it matters:** another round is a full review by {reviewer} of everything since round '
+                f'{review["round"]}' + (f'; round {review["round"]} took {took}.' if took else '.')
+                + f' A check looks only at {these}, within its limits.',
+            '', '**Options:**',
+            *numbered([f'**Another round** (round {reviews(state) + 1} of {state["maxRounds"]}): {reviewer} reviews '
+                       f'everything since round {review["round"]}, {these} included, and may raise new points only on '
+                       'what changed.',
+                       check_option(state, {}, commits),
+                       f'**Stop here:** the cross-review ends at `{item["head"][:7]}`. The commits listed stay '
+                       f'unreviewed. {LATER_COMMITS} Marking the pull request ready stays your call.'])]
 
 
 def checkpoint_lines(state: dict, item: dict) -> list[str]:
@@ -1339,7 +1458,7 @@ def checkpoint_lines(state: dict, item: dict) -> list[str]:
     return [f'#### {item["title"]}',
             f'Round {number} left only minor or nit findings to answer: {answered}. {author}\'s answers changed '
             f'{changed} lines. The cross-review asks you before another round whenever a round\'s open findings were '
-            f'all minor or nits and the answers changed fewer than {SMALL_ANSWERS} lines.',
+            f'all minor or nits and the answers changed fewer than {SMALL_CHANGE} lines.',
             '', f'**Why it matters:** another round would mostly confirm small fixes, and could turn up more small '
             f'points, for the cost of another review by {reviewer}'
             + (f': round {number} took {took}.' if took else '.') + f' Stopping leaves {author}\'s last answers '
@@ -1358,11 +1477,15 @@ def after_check_lines(state: dict, item: dict) -> list[str]:
     reviewer, author = AGENTS[state['reviewer']], AGENTS[state['author']]
     last, review, found = state['rounds'][-1], last_review(state), checkable(state)
     notes = {reply['id']: reply for reply in (last['answers'] or {}).get('replies', [])}
-    lines = [f'#### {item["title"]}',
-             f'You chose a focused check of {author}\'s answers. {capital(label(last))}, at `{last["head"][:7]}`, took '
-             f'{cost(last) or "no time to speak of"}'
-             + (f', past its token limit of {amount(last["limits"]["tokens"])}' if last.get('overran') else '')
-             + (f', and reached its {last["stopped"]} limit before it reported.' if last.get('stopped') else '.')]
+    ran = (f'{capital(label(last))}, at `{last["head"][:7]}`, took {cost(last) or "no time to speak of"}'
+           + (f', past its token limit of {amount(last["limits"]["tokens"])}' if last.get('overran') else '')
+           + (f', and reached its {last["stopped"]} limit before it reported.' if last.get('stopped') else '.'))
+    if last.get('commits'):
+        checked = last['commits']
+        lines = [f'#### {item["title"]}', f'You chose a focused check of {counted(len(checked["list"]), "commit")} '
+                 f'pushed since `{checked["since"][:7]}`:', *commit_lines(checked), '', ran]
+    else:
+        lines = [f'#### {item["title"]}', f'You chose a focused check of {author}\'s answers. {ran}']
     verified = [finding['id'] for finding in last['findings'] if finding.get('verdict') == 'verified']
     if verified:
         lines.append(f'- Verified: {", ".join(verified)}')
@@ -1381,17 +1504,22 @@ def after_check_lines(state: dict, item: dict) -> list[str]:
                 lines.append(f'    - {author} {reply["action"]} it: {short(reply["note"], 300)}')
     ids, took = ', '.join(sorted(found, key=number_of)), cost(review)
     past = reviews(state) >= state['maxRounds']
+    # A check of new commits that was stopped leaves those commits, and nothing else, to check.
+    commits = None if found else item.get('commits')
     options = [f'**Another round** (round {reviews(state) + 1}'
                + (f', past the limit of {state["maxRounds"]}' if past else f' of {state["maxRounds"]}')
-               + f'): a full review by {reviewer}, in a fresh session, of {ids} and all the commits since round '
-               f'{review["round"]}' + (f'; round {review["round"]} took {took}.' if took else '.')]
-    if found:
-        options.append(check_option(state, found))
+               + f'): a full review by {reviewer}, in a fresh session, of ' + (f'{ids} and ' if ids else '')
+               + f'all the commits since round {review["round"]}'
+               + (f'; round {review["round"]} took {took}.' if took else '.')]
+    if found or few_commits(commits):
+        options.append(check_option(state, found, commits))
     options.append(f'**Stop here:** the cross-review ends at `{item["head"][:7]}`. What is left above stays as it is on '
-                   'the record; decide any of it yourself, or leave it. Marking the pull request ready stays your call.')
+                   'the record; decide any of it yourself, or leave it. '
+                   + (f'The commits listed stay unreviewed. {LATER_COMMITS} ' if commits else '')
+                   + 'Marking the pull request ready stays your call.')
     return lines + ['', f'**Why it matters:** what is left above isn\'t settled until something checks it. Another '
-                        f'check looks only at {ids}, within its limits; a full round looks at everything again, at a '
-                        'full round\'s cost.',
+                        f'check looks only at {ids or "those commits"}, within its limits; a full round looks at '
+                        'everything again, at a full round\'s cost.',
                     '', '**Options:**', *numbered(options)]
 
 
@@ -1434,13 +1562,17 @@ def next_lines(state: dict, move: str) -> list[str]:
     if move == 'review':
         return ['', f'**Next:** {reviewer} reviews round {reviews(state) + 1} of {state["maxRounds"]}.']
     if move == 'check':
-        return ['', f'**Next:** {reviewer} runs the focused check you chose, of '
-                    f'{", ".join(sorted(checkable(state), key=number_of))}.']
+        found = checkable(state)
+        what = (', '.join(sorted(found, key=number_of)) if found
+                else f'the commits pushed since `{checkpoint(last)["commits"]["since"][:7]}`')
+        return ['', f'**Next:** {reviewer} runs the focused check you chose, of {what}.']
     if move == 'done':
         return ['', f'**Next:** nothing is open between {author} and {reviewer} at `{last["head"][:7]}`. Marking the '
                     'pull request ready is your call.']
     if move == 'stopped':
         asked, answers, step = checkpoint(last), last['answers'], label(last)
+        commits = asked.get('commits') if (asked.get('commits') or {}).get('list') else None
+        end = ':' if commits else '.'
         left = []
         if answers:
             unchecked = ', '.join(f'{reply["id"]} ({ACTIONS[reply["action"]]})' for reply in answers['replies'])
@@ -1448,12 +1580,15 @@ def next_lines(state: dict, move: str) -> list[str]:
         if unverified(last):
             left.append(f'{capital(step)} couldn\'t verify {", ".join(finding["id"] for finding in unverified(last))}.')
         if not left:
-            left.append(f'{reviewer} didn\'t review the commits since {step}.')
-        elif (answers or last)['head'] != asked['head']:
-            left.append('Nor did it review the commits pushed since them.' if answers
-                        else f'Nor did {reviewer} review the commits pushed since.')
-        return ['', f'**You stopped it** after {step}, at `{asked["head"][:7]}`. {" ".join(left)} Marking the '
-                    'pull request ready is your call.']
+            left.append(f'{reviewer} didn\'t review the commits since {label(reviewed(state))}{end}')
+        elif commits or (answers or last)['head'] != asked['head']:
+            left.append(f'Nor did it review the commits pushed since them{end}' if answers
+                        else f'Nor did {reviewer} review the commits pushed since{end}')
+        stopped, ready = f'**You stopped it** after {step}, at `{asked["head"][:7]}`. {" ".join(left)}', \
+            'Marking the pull request ready is your call.'
+        if not commits:
+            return ['', f'{stopped} {ready}']
+        return ['', stopped, *commit_lines(commits), '', f'{LATER_COMMITS} {ready}']
     # The rounds are used up, and she hasn't been asked yet.
     return ['', f'**Next:** all {state["maxRounds"]} rounds are used, and something is left that {reviewer} hasn\'t '
                 f'reviewed. Another round is your decision: {author} asks you, with what is left, before any more '
@@ -1465,15 +1600,19 @@ def rounds_table(state: dict) -> list[str]:
     for round in state['rounds']:
         new = Counter(finding['severity'] for finding in round['findings'] if finding.get('new'))
         found = ', '.join(f'{new[severity]} {severity}' for severity in SEVERITIES if new[severity]) or 'nothing new'
-        if round.get('check'):
+        if round.get('commits'):
+            # A check of new commits has only what it found in them.
+            found = ('nothing reviewed' if round.get('stopped')
+                     else f'{found} in {counted(len(round["commits"]["list"]), "commit")}')
+        elif round.get('check'):
             verdicts = Counter(finding['verdict'] for finding in round['findings'] if finding.get('verdict'))
             found = ', '.join(f'{verdicts[verdict]} {TALLIES[verdict]}' for verdict in VERDICTS if verdicts[verdict])
             found = ('; '.join(part for part in (found, f'{sum(new.values())} new' if new else '') if part)
                      or 'nothing checked')
-            if round.get('stopped'):
-                found += f' (stopped at its {round["stopped"]} limit)'
-            if round.get('overran'):
-                found += ' (past its token limit)'
+        if round.get('stopped'):
+            found += f' (stopped at its {round["stopped"]} limit)'
+        if round.get('overran'):
+            found += ' (past its token limit)'
         resolved = sum(finding['status'] == 'resolved' for finding in round['findings'])
         if resolved and not round.get('check'):
             found += f'; {resolved} resolved'
@@ -1605,8 +1744,11 @@ def later_prompt(context: dict, state: dict, fresh: str | None) -> str:
 
 
 def check_prompt(context: dict, state: dict, found: dict[str, dict], budget: int, minutes: float) -> str:
-    return CHECK.format(**dict(context, answers=history(state, found, context['author'], True) + said(state),
-                               tools=CHECK_TOOLS[state['reviewer']], budget=amount(budget), minutes=f'{minutes:g}'))
+    """A focused check's prompt: of the answers to the findings `found`, or, with none, of the new commits."""
+    limits = dict(context, tools=CHECK_TOOLS[state['reviewer']], budget=amount(budget), minutes=f'{minutes:g}')
+    if not found:
+        return CHECK_COMMITS.format(**limits, said=said(state))
+    return CHECK.format(**limits, answers=history(state, found, context['author'], True) + said(state))
 
 
 def command_review(arguments: argparse.Namespace) -> dict:
@@ -1649,41 +1791,49 @@ def command_review(arguments: argparse.Namespace) -> dict:
     if arguments.budget_tokens is not None and move != 'check':
         raise Refusal(f'--budget-tokens limits only a focused check, which Cicely hasn\'t chosen; it is the turn to '
                       f'{move}.')
-    if move == 'limit':
-        # The reviewer doesn't run: whether it should is put to Cicely.
-        ask_next_round(state, 'limit', pr['headRefOid'])
-        save(path, state)
-        move = turn(state, pr['headRefOid'])
-        warning = show_status(path, state, move)
-        return dict({'pullRequest': arguments.pull_request, 'reviewed': False, 'turn': move,
-                     'pending': [item['id'] for item in pending(state)], 'briefing': briefing(state, move)},
-                    **reported(state, [warning]))
     if move == 'stopped':
         raise Refusal(f'Cicely stopped the cross-review after {label(state["rounds"][-1])}; it reviews again only '
                       'when new commits are pushed.')
-    checking = move == 'check'
-    executable = shutil.which(reviewer)
-    if not executable:
-        raise Refusal(f'The {AGENTS[reviewer]} CLI ({reviewer}) is not on PATH.')
     head = fetch(repo, arguments.remote, f'refs/pull/{arguments.pull_request}/head')
     if head != pr['headRefOid']:
         raise Refusal(f'The pull request head moved while it was fetched ({pr["headRefOid"][:7]} on GitHub, '
                       f'{head[:7]} fetched); run again.')
+    last = state['rounds'][-1] if state['rounds'] else None
+    # Past the limit, and before a few new commits that answer no finding are reviewed, the reviewer doesn't run:
+    # what follows is put to Cicely, with the commits nobody has reviewed. Once she has chosen a round, it runs.
+    if move == 'limit' or (move == 'review' and last and not checkable(state)
+                           and (checkpoint(last) or {}).get('choice') != 'review'):
+        commits = unreviewed(repo, (last['answers'] or reviewed(state))['head'], head)
+        if move == 'limit' or few_commits(commits):
+            ask_next_round(state, 'commits' if move == 'review' else 'limit', head, commits)
+            save(path, state)
+            move = turn(state, head)
+            warning = show_status(path, state, move)
+            return dict({'pullRequest': arguments.pull_request, 'reviewed': False, 'turn': move,
+                         'pending': [item['id'] for item in pending(state)], 'briefing': briefing(state, move)},
+                        **reported(state, [warning]))
+    checking = move == 'check'
+    executable = shutil.which(reviewer)
+    if not executable:
+        raise Refusal(f'The {AGENTS[reviewer]} CLI ({reviewer}) is not on PATH.')
     base = fetch(repo, arguments.remote, f'refs/heads/{pr["baseRefName"]}')
     merge_base = git(repo, 'merge-base', base, head)
     worktree = Path(state['worktree'])
     check_out(repo, worktree, head)
     hydrate(worktree, arguments.remote)
-    last = state['rounds'][-1] if state['rounds'] else None
     context = {'reviewer': AGENTS[reviewer], 'author': AGENTS[state['author']], 'number': pr['number'],
                'repository': repository, 'title': pr['title'], 'head': head, 'base_branch': pr['baseRefName'],
                'base': base, 'merge_base': merge_base, 'body': (pr.get('body') or '').strip() or '(none)',
                'round': reviews(state) + 1, 'tools': TOOLS[reviewer]}
     expected = checkable(state) if last else {}
+    commits = None
     if last:
-        # A check reads what came after the step before it; a full round reads everything since the last full
-        # review, as a check looks only at the answers.
-        context['previous_head'] = last['head'] if checking else last_review(state)['head']
+        # A check reads what came after the last step that ran to the end; a full round reads everything since the
+        # last full review, as a check looks only at the answers, or at the new commits.
+        context['previous_head'] = reviewed(state)['head'] if checking else last_review(state)['head']
+        if checking and not expected:
+            # With no answers to check, Cicely chose a check of the commits since.
+            commits = unreviewed(repo, context['previous_head'], head)
     change = change_folder(worktree)
     write_change(repo, change, context)
     # A check is numbered after the round it follows; Cicely's limits for it apply unless she set others.
@@ -1702,7 +1852,7 @@ def command_review(arguments: argparse.Namespace) -> dict:
         next_number = max([number_of(identifier) for identifier in all_ids(state)] + [0]) + 1
         if checking:
             round = run_check(state, step, context, expected, executable, worktree, change, minutes, budget,
-                              next_number, progress)
+                              next_number, progress, commits)
             comment = check_comment(state, round)
         else:
             round = run_round(state, step, context, expected, executable, worktree, change, minutes, next_number,
@@ -1735,6 +1885,7 @@ def command_review(arguments: argparse.Namespace) -> dict:
               'pending': [item['id'] for item in pending(state)], 'maxRounds': state['maxRounds']}
     if checking:
         result.update(check=round['check'], stopped=round['stopped'], overran=round['overran'],
+                      commits=[commit['sha'] for commit in (round.get('commits') or {}).get('list', [])],
                       verified=[finding['id'] for finding in round['findings'] if finding.get('verdict') == 'verified'],
                       unverified=[finding['id'] for finding in unverified(round)])
     else:
@@ -1783,11 +1934,12 @@ def run_round(state: dict, step: dict, context: dict, expected: dict, executable
 
 
 def run_check(state: dict, step: dict, context: dict, expected: dict, executable: str, worktree: Path, change: Path,
-              minutes: float, budget: int, next_number: int, progress: Progress) -> dict:
-    """Runs the focused check Cicely chose and adds it to the record. A check stopped at its token or time limit is
-    recorded too, with nothing verified; one that finished past its token limit, which the running count can miss
-    by a step, keeps what it found, marked as having overrun. When nothing it found is for the author to answer but
-    something is left unverified, what follows goes to Cicely at once."""
+              minutes: float, budget: int, next_number: int, progress: Progress, commits: dict | None) -> dict:
+    """Runs the focused check Cicely chose and adds it to the record: of the answers to the `expected` findings, or,
+    with none, of the new `commits`, which the record keeps with it. A check stopped at its token or time limit is
+    recorded too, with nothing verified or reviewed; one that finished past its token limit, which the running count
+    can miss by a step, keeps what it found, marked as having overrun. When nothing it found is for the author to
+    answer but something is left unverified or unreviewed, what follows goes to Cicely at once."""
     scratch = scratch_folder(worktree)
     shutil.rmtree(scratch, ignore_errors=True)
     scratch.mkdir(parents=True)
@@ -1806,11 +1958,11 @@ def run_check(state: dict, step: dict, context: dict, expected: dict, executable
     round = dict(step, head=context['head'], base=context['base'], mergeBase=context['merge_base'],
                  startedAt=progress.now['startedAt'], reviewedAt=now(), usage=usage, session=session,
                  limits={'tokens': budget, 'minutes': minutes}, stopped=stopped,
-                 overran=not stopped and tokens(usage) > budget, summary=summary, findings=findings,
-                 commentUrl=None, answers=None)
+                 overran=not stopped and tokens(usage) > budget, **({'commits': commits} if commits else {}),
+                 summary=summary, findings=findings, commentUrl=None, answers=None)
     state['rounds'].append(round)
-    if not open_findings(round) and unverified(round):
-        ask_next_round(state, 'check', context['head'])
+    if not open_findings(round) and (unverified(round) or stopped):
+        ask_next_round(state, 'check', context['head'], commits)
     return round
 
 
@@ -1891,7 +2043,7 @@ def command_reply(arguments: argparse.Namespace) -> dict:
         ask_next_round(state, 'check', pr['headRefOid'])
     elif reviews(state) >= state['maxRounds']:
         ask_next_round(state, 'limit', pr['headRefOid'])
-    elif changed < SMALL_ANSWERS and all(findings[reply['id']]['severity'] in ('minor', 'nit') for reply in replies):
+    elif changed < SMALL_CHANGE and all(findings[reply['id']]['severity'] in ('minor', 'nit') for reply in replies):
         ask_next_round(state, 'small', pr['headRefOid'])
     for reply in replies:
         if reply['action'] == 'escalated':
@@ -1915,11 +2067,25 @@ def changed_lines(repo: Path, remote: str, number: int, reviewed: str, head: str
     if fetched != head:
         raise Refusal(f'The pull request head moved while it was fetched ({head[:7]} on GitHub, {fetched[:7]} '
                       'fetched); run again.')
+    return lines_between(repo, reviewed, head)
+
+
+def lines_between(repo: Path, old: str, new: str) -> int:
+    """How many lines the change from `old` to `new` adds or removes."""
     total = 0
-    for line in git(repo, 'diff', '--numstat', reviewed, head).splitlines():
+    for line in git(repo, 'diff', '--numstat', old, new).splitlines():
         # Binary files count "-" lines.
         total += sum(int(count) for count in line.split('\t')[:2] if count.isdigit())
     return total
+
+
+def unreviewed(repo: Path, since: str, head: str) -> dict:
+    """The commits after `since` up to `head`, oldest first along the branch, and the lines they change: what
+    nobody has reviewed, for Cicely to see by name."""
+    log = git(repo, 'log', '--first-parent', '--reverse', '--format=%H%x09%s', f'{since}..{head}')
+    commits = [{'sha': line.partition('\t')[0], 'subject': line.partition('\t')[2]} for line in log.splitlines()
+               if line]
+    return {'since': since, 'list': commits, 'changedLines': lines_between(repo, since, head)}
 
 
 def command_decide(arguments: argparse.Namespace) -> dict:
@@ -1946,9 +2112,11 @@ def command_decide(arguments: argparse.Namespace) -> dict:
         if decision.get('id') == CHECKPOINT and decision.get('choice') not in CHOICES:
             raise Refusal(f'Decision {CHECKPOINT} needs `choice`: "review" for another round, "check" for a focused '
                           'check of the answers, or "stop" to end the cross-review here, as Cicely chose.')
-        if decision.get('id') == CHECKPOINT and decision['choice'] == 'check' and not checkable(state):
-            raise Refusal('A focused check would have nothing to check: there are no answers since the last round, and '
-                          'nothing a check left unverified. Ask Cicely again, with "review" and "stop" as her options.')
+        if decision.get('id') == CHECKPOINT and decision['choice'] == 'check' and not checkable(state) \
+                and not few_commits((checkpoint(state['rounds'][-1]) or {}).get('commits')):
+            raise Refusal('A focused check would have nothing to check: there are no answers since the last round, '
+                          f'nothing a check left unverified, and no new commits that change fewer than {SMALL_CHANGE} '
+                          'lines. Ask Cicely again, with "review" and "stop" as her options.')
     waiting = {item['id']: item for item in pending(state)}
     ids = [decision.get('id') for decision in decisions]
     missing = [identifier for identifier in waiting if identifier not in ids]
