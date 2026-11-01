@@ -38,7 +38,7 @@ Your progress is kept in the clone's Git directory, under `ba-crossreview/`. It 
 
 A cross-review can run for half a day, and Cicely may come back to it without remembering where it was. Two things show her where it stands at any moment, from any machine or app:
 - **The status comment** on the pull request, posted when the first round starts and edited at every step. While the reviewer works, it shows for how long and what it did last, such as the file it read or the command it ran. At every other moment it holds the briefing below.
-- **`status`**, which either agent can run in its own session, even while a review is running:
+- **`status`**, which either agent can run in its own session, even while a review is running. It doesn't ask GitHub, so it knows of commits only as far as the last command saw them:
 
 ```bash
 python3 scripts/crossreview.py status --repository <clone> --pull-request <n>

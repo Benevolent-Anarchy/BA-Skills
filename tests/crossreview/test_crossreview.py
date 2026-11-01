@@ -782,7 +782,9 @@ class CrossReview(unittest.TestCase):
         self.review()
         self.decide(('next-round', 'Check it.', 'check'))
         later = self.push_fix(LARGE)
-        self.queue(check(summary='It holds up.'))
+        # Codex found that the newer head was then forgotten: GitHub failing at the end, or `status`, which doesn't
+        # ask it, reported done with `later` unreviewed.
+        self.queue(check(summary='It holds up.', viewFails=True))
         result = self.review()
         self.assertEqual((result['check'], result['head'], result['commits'], result['turn']),
                          (1, shown, [shown], 'review'))
@@ -790,6 +792,10 @@ class CrossReview(unittest.TestCase):
         self.assertIn(f'{self.head}..{shown}', call['stdin'])
         self.assertNotIn(later, call['stdin'])
         self.assertNotIn('done, with nothing open', self.status_comment()['body'])
+        (self.fixture / 'view-fails').unlink()
+        status = self.script('status')
+        self.assertEqual((status['turn'], status['head'], status['pullRequestHead']), ('review', shown, later))
+        self.assertEqual(self.script('finish')['turn'], 'review')
         self.queue(review(summary='Still fine.', session='codex-thread-2'))
         result = self.review()
         self.assertEqual((result['round'], result['head'], result['turn']), (2, later, 'done'))

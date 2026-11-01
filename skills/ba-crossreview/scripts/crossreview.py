@@ -1800,6 +1800,8 @@ def command_review(arguments: argparse.Namespace) -> dict:
     if head != pr['headRefOid']:
         raise Refusal(f'The pull request head moved while it was fetched ({pr["headRefOid"][:7]} on GitHub, '
                       f'{head[:7]} fetched); run again.')
+    # The pull request's head as last seen, which a check may not reach: `status` judges by it without asking GitHub.
+    state['pullRequestHead'] = head
     last = state['rounds'][-1] if state['rounds'] else None
     # Past the limit, and before a few new commits that answer no finding are reviewed, the reviewer doesn't run:
     # what follows is put to Cicely, with the commits nobody has reviewed. Once she has chosen a round, it runs.
@@ -1878,12 +1880,16 @@ def command_review(arguments: argparse.Namespace) -> dict:
         progress.close()
         if checking:
             warnings.append(tidy(repo, worktree, head))
-    # The head may have moved while the reviewer read; then a clean review isn't the end.
+    # The head may have moved while the reviewer read; then a clean review isn't the end. If GitHub can't say, the
+    # head fetched before the review stands, which a check of the commits Cicely was shown may not have reached.
     try:
-        current = pull_request(repository, arguments.pull_request)['headRefOid']
+        state['pullRequestHead'] = pull_request(repository, arguments.pull_request)['headRefOid']
+        save(path, state)
     except Refusal:
-        current = None
-    move = turn(state, current)
+        pass
+    except OSError as error:
+        warnings.append(f'Could not record the pull request\'s head: {error}')
+    move = turn(state, state['pullRequestHead'])
     warnings.append(show_status(path, state, move))
     result = {'pullRequest': arguments.pull_request, 'round': round['round'], 'author': state['author'],
               'reviewer': reviewer, 'head': head, 'session': round['session'], 'commentUrl': round['commentUrl'],
@@ -2036,6 +2042,7 @@ def command_reply(arguments: argparse.Namespace) -> dict:
     if any(reply['action'] == 'fixed' for reply in replies) and pr['headRefOid'] == last['head']:
         raise Refusal(f'The pull request is still at the reviewed head {last["head"][:7]}; push the fixes first.')
     changed = changed_lines(repo, arguments.remote, arguments.pull_request, last['head'], pr['headRefOid'])
+    state['pullRequestHead'] = pr['headRefOid']
     replies = [dict({'id': reply['id'], 'action': reply['action'], 'note': reply['note'].strip()},
                     **({'stakes': words(reply['stakes']), 'options': choices(reply['options']),
                         'recommendation': words(reply.get('recommendation'))} if reply['action'] == 'escalated' else {}))
@@ -2134,6 +2141,7 @@ def command_decide(arguments: argparse.Namespace) -> dict:
     pr = pull_request(repository, arguments.pull_request)
     if pr.get('state') != 'OPEN':
         raise Refusal(f'Pull request #{arguments.pull_request} is {str(pr.get("state")).lower()}, not open.')
+    state['pullRequestHead'] = pr['headRefOid']
     last = state['rounds'][-1]
     # What she was asked is kept as it was put to her, before her answers change it.
     record = {**step_of(last), 'decidedAt': now(), 'commentUrl': None,
@@ -2176,11 +2184,13 @@ def command_status(arguments: argparse.Namespace) -> dict:
     if state is None:
         return {'pullRequest': arguments.pull_request, 'rounds': 0, 'turn': 'review', 'running': running(path)}
     last = state['rounds'][-1] if state['rounds'] else None
-    move, live = turn(state), running(path)
+    # Without asking GitHub, `status` knows the pull request's head only as the last command saw it.
+    move, live = turn(state, state.get('pullRequestHead')), running(path)
     return {'pullRequest': arguments.pull_request, 'author': state['author'], 'reviewer': state['reviewer'],
             'rounds': reviews(state), 'checks': len(state['rounds']) - reviews(state), 'maxRounds': state['maxRounds'],
             'turn': move, 'running': live,
-            'head': last['head'] if last else None, 'open': open_findings(last) if last else [],
+            'head': last['head'] if last else None, 'pullRequestHead': state.get('pullRequestHead'),
+            'open': open_findings(last) if last else [],
             'unverified': unverified(last) if last else [],
             'pending': pending(state), 'escalated': state['escalated'], 'decisions': state.get('decisions', []),
             'comments': [url for round in state['rounds']
@@ -2204,7 +2214,8 @@ def command_finish(arguments: argparse.Namespace) -> dict:
         if folder.exists():
             shutil.rmtree(folder)
             removed = True
-    return {'pullRequest': arguments.pull_request, 'worktree': str(worktree), 'removed': removed, 'turn': turn(state)}
+    return {'pullRequest': arguments.pull_request, 'worktree': str(worktree), 'removed': removed,
+            'turn': turn(state, state.get('pullRequestHead'))}
 
 
 def main(argv: list[str]) -> int:
