@@ -11,6 +11,9 @@ class Integration(unittest.TestCase):
         self.repo = self.root / 'working tree [literal]'
         self.repo.mkdir()
         self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GH_REPO='wrong/repository')
+        transport=self.root/'transport-bin';transport.mkdir()
+        shutil.copy(ROOT/'tests/integrate-linux/git_transport.py',transport/'git');(transport/'git').chmod(0o755)
+        self.env.update(FIXTURE_REAL_GIT=shutil.which('git'),PATH=str(transport)+os.pathsep+self.env['PATH'])
         self.git('init', '-q', '-b', 'main')
         self.git('config', 'user.name', 'Fixture')
         self.git('config', 'user.email', 'fixture@example.invalid')
@@ -84,7 +87,7 @@ print(json.dumps(o))
         return self.git('rev-parse','HEAD')
     def local_remote(self):
         remote=self.root/'bare remote';subprocess.run(['git','init','--bare','-q',str(remote)],check=True)
-        self.github();self.git('config','url.'+str(remote)+'.insteadOf','https://github.com/test/repo.git')
+        self.github();self.env['FIXTURE_REMOTE']=str(remote)
         self.git('push','-q','origin','main','feature')
         return remote
     def test_empty_survey_and_no_ready(self):
@@ -123,6 +126,49 @@ print(json.dumps(o))
         self.call('retarget',branch='feature',base_branch='main',list=True,ok=False)
         self.git('config','--unset-all','remote.origin.pushurl');self.git('config','url.https://github.com/other/repo.git.insteadOf','https://github.com/test/repo.git')
         self.call('retarget',branch='feature',base_branch='main',list=True,ok=False)
+    def test_repository_identity_refuses_off_github_rewrites(self):
+        self.github()
+        for kind in ['insteadOf','pushInsteadOf']:
+            for destination in ['https://secret@example.invalid/test/repo.git','git@example.invalid:test/repo.git',str(self.root/'local remote')]:
+                with self.subTest(kind=kind,destination=destination):
+                    key='url.'+destination+'.'+kind
+                    self.git('config',key,'https://github.com/test/repo.git')
+                    try:
+                        d=self.call('retarget',branch='feature',base_branch='main',list=True,ok=False)
+                        self.assertIn('github.com',d['error'])
+                        self.assertNotIn('secret',d['error'])
+                    finally:self.git('config','--unset-all',key)
+    def test_repository_identity_accepts_same_github_repository_rewrite(self):
+        self.github()
+        self.git('config','url.git@github.com:Test/Repo.git.pushInsteadOf','https://github.com/test/repo.git')
+        d=self.call('retarget',branch='feature',base_branch='main',list=True)
+        self.assertEqual(d['repository'],'test/repo')
+    def test_off_github_rewrite_cannot_land(self):
+        head=self.branch('feature','feature');remote=self.local_remote()
+        decoy=self.root/'decoy remote';subprocess.run(['git','init','--bare','-q',str(decoy)],check=True)
+        self.git('push','-q',str(decoy),'main','feature')
+        self.git('config','url.'+str(decoy)+'.pushInsteadOf','https://github.com/test/repo.git')
+        self.state(pr=dict(state='OPEN',isDraft=False,headRefName='feature',headRefOid=head,baseRefName='main'))
+        try:
+            d=self.call('land',pull_request=1,branch='feature',approved_head=head,updated=head,base_branch='main',expected_base=self.base,rehearsed=head,message='fixture',timeout_seconds=0,poll_seconds=0,ok=False)
+            self.assertIn('github.com',d['error']);self.assertFalse(d['branchPushed']);self.assertFalse(d['landed'])
+        finally:
+            for destination in [remote,decoy]:
+                self.assertEqual(self.git('ls-remote',str(destination),'refs/heads/main').split()[0],self.base)
+                self.assertEqual(self.git('ls-remote',str(destination),'refs/heads/feature').split()[0],head)
+    def test_off_github_rewrite_cannot_delete(self):
+        head=self.branch('feature','feature');self.git('branch','-f','main',head);remote=self.local_remote()
+        decoy=self.root/'decoy remote';subprocess.run(['git','init','--bare','-q',str(decoy)],check=True)
+        self.git('push','-q',str(decoy),'main','feature')
+        self.git('config','url.'+str(decoy)+'.pushInsteadOf','https://github.com/test/repo.git')
+        try:
+            d=self.call('delete-branch',branch='feature',merged_tip=head,base_branch='main',ok=False)
+            self.assertIn('github.com',d['error'])
+        finally:
+            for destination in [remote,decoy]:
+                self.assertEqual(self.git('ls-remote',str(destination),'refs/heads/main').split()[0],head)
+                refs=self.git('ls-remote',str(destination),'refs/heads/feature')
+                self.assertEqual(refs.split()[0] if refs else None,head)
     def test_land_validation_then_local_landing_and_resume(self):
         h=self.branch('feature','feature');self.local_remote()
         common=dict(pull_request=1,branch='feature',approved_head=h,updated=h,base_branch='main',expected_base=self.base,rehearsed=h,message='Merge fixture',timeout_seconds=0,poll_seconds=0)
@@ -161,9 +207,9 @@ print(json.dumps(o))
         self.github()
         p=dict(number=7,title='seven',url='url',isDraft=False,isCrossRepository=False,headRefName='main',headRefOid=self.base,baseRefName='main',reviewDecision='APPROVED',mergeable='MERGEABLE',reviewThreads=dict(nodes=[{'isResolved':False}],pageInfo=dict(hasNextPage=True,endCursor='review-next')))
         self.state(graphql_pages=[{'data':{'repository':{'pullRequests':{'nodes':[p],'pageInfo':{'hasNextPage':True,'endCursor':'next'}}}}},{'data':{'repository':{'pullRequests':{'nodes':[],'pageInfo':{'hasNextPage':False}}}}},{'data':{'repository':{'pullRequest':{'reviewThreads':{'nodes':[{'isResolved':False},{'isResolved':True}],'pageInfo':{'hasNextPage':False}}}}}}])
-        # Local URL rewriting keeps fetches off the network, including unavailable PR refs.
+        # The test-only transport routes fetches locally, including unavailable PR refs.
         remote=self.root/'bare';subprocess.run(['git','init','--bare','-q',str(remote)],check=True)
-        self.git('config','url.'+str(remote)+'.insteadOf','https://github.com/test/repo.git');self.git('push','-q','origin','main')
+        self.env['FIXTURE_REMOTE']=str(remote);self.git('push','-q','origin','main')
         d=self.call('survey',base='main',github_cli=self.gh)
         self.assertEqual(d['order'],[7]);self.assertEqual(d['pullRequests'][0]['unresolvedReviewThreads'],2)
     def test_land_commit_failure_aborts_own_merge(self):
@@ -233,6 +279,15 @@ print(json.dumps(o))
                 p=subprocess.run(['bash','tools/verify.sh'],cwd=root,env=dict(self.env,CDPATH=cdpath),capture_output=True,text=True)
                 self.assertEqual(p.returncode,0,(p.stdout,p.stderr))
                 for suite in ['bootstrap','integrate','release']:self.assertIn(suite+'-fixture',p.stdout)
+    def test_direct_release_runner_does_not_run_cdpath_decoy_suite(self):
+        root=self.root/'suite fixture';decoy=self.root/'decoy'
+        for directory,body in [(root,"self.fail('intended suite executed')"),(decoy,'pass')]:
+            suite=directory/'tests/release-linux';suite.mkdir(parents=True)
+            (suite/'test_identity.py').write_text('import unittest\nclass Identity(unittest.TestCase):\n def test_identity(self): '+body+'\n')
+        shutil.copy(ROOT/'tests/release-linux/run-tests.sh',root/'tests/release-linux/run-tests.sh')
+        p=subprocess.run(['bash','tests/release-linux/run-tests.sh'],cwd=root,env=dict(self.env,CDPATH=str(decoy)+':.'),capture_output=True,text=True)
+        self.assertNotEqual(p.returncode,0,(p.stdout,p.stderr))
+        self.assertIn('intended suite executed',p.stderr)
     def test_documented_landing_message_preserves_literal_titles(self):
         skill=(ROOT/'skills/ba-integrate/SKILL.md').read_text()
         template=next(block for block in re.findall(r'```bash\n(.*?)```',skill,re.S) if 'bash scripts/land.sh' in block)

@@ -67,7 +67,9 @@ class Repo:
         if len(effective)!=1:
             raise RuntimeError('Remote has multiple destinations after URL rewriting; nothing was changed.')
         rewritten=github_url(effective[0])
-        if rewritten and rewritten.lower()!=named.lower():
+        if not rewritten:
+            raise RuntimeError(f'{remote} has a push destination outside github.com after URL rewriting; nothing was changed.')
+        if rewritten.lower()!=named.lower():
             raise RuntimeError(f'{remote} is configured as {named}, but a URL rewrite sends pushes to {rewritten}; nothing was changed.')
         return named
 

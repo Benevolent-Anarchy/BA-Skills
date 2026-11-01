@@ -1,0 +1,34 @@
+name: Windows verification
+
+on:
+  pull_request:
+    paths:
+      - '**/*.ps1'
+      - '**/*.psm1'
+      - 'tests/integrate/**'
+      - '.github/workflows/verify-windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: PowerShell gate on Windows
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          lfs: true
+      - name: Record host and tool versions
+        shell: pwsh
+        run: |
+          git rev-parse HEAD
+          $PSVersionTable.PSVersion
+          git --version
+          cargo --version
+          rustc --version
+      - name: Run the Windows gate
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/verify.ps1
