@@ -380,6 +380,8 @@ class CrossReview(unittest.TestCase):
         self.assertIn('1. **Module:** Ships now', record)
         self.assertTrue(record.endswith('**Her answer:**\n> Keep it a module for now.\n> I will plan plugins later.\n'))
         self.assertIn('Codex reviews round 2 next', self.status_comment()['body'])
+        self.assertIn('**Your decisions:** [F1, after round 1](https://github.com/fixture/repo/pull/7#issuecomment-4).',
+                      result['briefing'])
         self.queue(review(finding('Should this be a plugin?', id='F1', status='resolved'),
                           finding('One', 'minor', id='F2', status='resolved')))
         result = self.review()

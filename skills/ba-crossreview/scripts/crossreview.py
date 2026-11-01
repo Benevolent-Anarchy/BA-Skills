@@ -497,7 +497,9 @@ def codex_activity(event: dict) -> str | None:
     if event.get('type') == 'item.completed' and item.get('type') == 'reasoning' and str(item.get('text') or '').strip():
         return f'thinking: {short(str(item["text"]).strip().splitlines()[0].strip("*# "))}'
     if event.get('type') == 'item.completed' and item.get('type') == 'agent_message':
-        return 'writing up the review'
+        # Notes along the way are prose; the review itself is the JSON answer.
+        text = str(item.get('text') or '').strip()
+        return 'writing up the review' if text.startswith('{') or not text else f'noted: {short(text)}'
     return None
 
 
@@ -1039,6 +1041,10 @@ def briefing(state: dict, move: str, live: dict | None = None) -> str:
         failure = state['failure']
         lines += ['', f'**Round {failure["round"]} failed** at {clock(failure["at"])}: {failure["error"]}']
     lines += findings_lines(state)
+    decided = [link(f'{decision["id"]}, after round {record["round"]}', record.get('commentUrl'))
+               for record in state.get('decisions', []) for decision in record['decisions']]
+    if decided:
+        lines += ['', f'**Your decisions:** {"; ".join(decided)}.']
     if not live:
         lines += next_lines(state, move)
     if rounds:
