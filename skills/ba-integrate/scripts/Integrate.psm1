@@ -66,10 +66,10 @@ function Hide-UrlCredentials([string]$Text) {
     return $Text -replace '(?<=[A-Za-z][A-Za-z0-9+.-]*://)[^\s/]+@', '***@'
 }
 
-# The owner/name of a github.com URL in https, ssh or scp form, credentials allowed, or
-# $null for anything else.
+# The owner/name of a GitHub URL in https, ssh or scp form, including GitHub's SSH-over-443
+# endpoint, credentials allowed, or $null for anything else.
 function ConvertFrom-GitHubUrl([string]$Url) {
-    $match = [regex]::Match($Url, '^(?:https://(?:[^@/\s]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)(?<owner>[\w.-]+)/(?<name>[\w.-]+?)(?:\.git)?/?$')
+    $match = [regex]::Match($Url, '^(?:https://(?:[^@/\s]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/|ssh://git@ssh\.github\.com:443/)(?<owner>[\w.-]+)/(?<name>[\w.-]+?)(?:\.git)?/?$')
     if (-not $match.Success) { return $null }
     return "$($match.Groups['owner'].Value)/$($match.Groups['name'].Value)"
 }
@@ -79,8 +79,8 @@ function ConvertFrom-GitHubUrl([string]$Url) {
 # GH_REPO or its own default. It is read from the remote's configured push URL, or its URL,
 # as written, and refused unless git pushes to exactly one destination: a remote with
 # several push URLs, or several URLs, would push or delete in repositories the checks never
-# read. A rewrite (pushInsteadOf or insteadOf) that sends the push to a different GitHub
-# repository is refused for the same reason. A remote not on github.com is refused too.
+# read. A rewrite (pushInsteadOf or insteadOf) that sends the push outside github.com or
+# to a different GitHub repository is refused for the same reason.
 function Get-GitHubRepository([string]$Repository, [string]$Remote = 'origin') {
     $configured = @((Invoke-Git $Repository @('config', '--get-all', "remote.$Remote.pushurl") -Allowed 0, 1).Lines | Where-Object { $_ })
     if ($configured.Count -eq 0) { $configured = @((Invoke-Git $Repository @('config', '--get-all', "remote.$Remote.url") -Allowed 0, 1).Lines | Where-Object { $_ }) }
@@ -91,7 +91,8 @@ function Get-GitHubRepository([string]$Repository, [string]$Remote = 'origin') {
     $effective = @((Invoke-Git $Repository @('remote', 'get-url', '--push', '--all', $Remote)).Lines | Where-Object { $_ })
     if ($effective.Count -ne 1) { throw "$Remote pushes to $($effective.Count) destinations after URL rewriting, so a push or deletion would reach repositories the checks never read. Nothing was changed." }
     $rewritten = ConvertFrom-GitHubUrl $effective[0]
-    if ($rewritten -and $rewritten -ne $named) { throw "$Remote is configured as $named, but a URL rewrite sends its pushes to $rewritten, a repository the checks would not read. Nothing was changed." }
+    if (-not $rewritten) { throw "$Remote is configured as $named, but a URL rewrite sends its pushes to $(Hide-UrlCredentials $effective[0]), which is not a github.com repository. Nothing was changed." }
+    if ($rewritten -ne $named) { throw "$Remote is configured as $named, but a URL rewrite sends its pushes to $rewritten, a repository the checks would not read. Nothing was changed." }
     return $named
 }
 

@@ -10,6 +10,7 @@ $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $survey = Join-Path $root 'skills/ba-integrate/scripts/survey.ps1'
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) ('ba-integrate-tests-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $sandbox | Out-Null
+. (Join-Path $PSScriptRoot 'fixture-git.ps1')
 
 ## Fails the current test with $Message unless $Condition holds.
 function Assert($Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
@@ -32,6 +33,15 @@ function Invoke-FixtureGit([string]$Repository, [string[]]$Arguments) {
 function Write-FixtureText([string]$Path, [string]$Text) {
     New-Item -ItemType Directory -Path (Split-Path $Path -Parent) -Force | Out-Null
     [IO.File]::WriteAllText($Path, $Text, [Text.UTF8Encoding]::new($false))
+}
+
+## Writes a Git hook; Unix hosts require its executable bit, unlike Windows.
+function Write-FixtureHook([string]$Path, [string]$Text) {
+    Write-FixtureText $Path $Text
+    if (-not $IsWindows) {
+        & chmod +x -- $Path
+        if ($LASTEXITCODE -ne 0) { throw "Could not make fixture hook executable: $Path" }
+    }
 }
 
 ## A new repository on branch main whose first commit holds $Files (path to text).
@@ -75,7 +85,9 @@ function New-PullRequest([int]$Number, [string]$Head, [string]$Sha, [string]$Bas
 ## Runs one of the skill's scripts with $Parameters; returns its exit code and parsed JSON.
 function Invoke-IntegrateScript([string]$Name, [hashtable]$Parameters) {
     $scriptPath = Join-Path $root "skills/ba-integrate/scripts/$Name.ps1"
-    $output = & (Join-Path $PSHOME 'pwsh') -NoProfile -File $scriptPath @Parameters 2>&1
+    $parameterFile = Join-Path $sandbox ('parameters-' + [guid]::NewGuid().ToString('N') + '.clixml')
+    $Parameters | Export-Clixml -LiteralPath $parameterFile
+    $output = & (Join-Path $PSHOME 'pwsh') -NoProfile -File (Join-Path $PSScriptRoot 'invoke-script.ps1') -ScriptPath $scriptPath -ParametersPath $parameterFile 2>&1
     $code = $LASTEXITCODE
     try { $result = ($output -join "`n") | ConvertFrom-Json }
     catch { throw "$Name output was not JSON (exit $code): $output" }
@@ -91,17 +103,21 @@ function Invoke-Survey([string]$Repository, [object[]]$PullRequests) {
 }
 
 ## A fixture repository with a bare repository as its origin, standing in for GitHub;
-## main is pushed. The origin is configured as https://github.com/fixture/repo.git, which
-## the scripts read as its GitHub identity, and git's insteadOf sends that URL to the bare
-## repository.
+## main is pushed. Its GitHub URL remains visible to validation; the test-only git
+## function redirects only transport commands to the bare repository.
 function New-RemoteFixture([hashtable]$Files) {
     $remote = Join-Path $sandbox ('remote-' + [guid]::NewGuid().ToString('N') + '.git')
     Invoke-FixtureGit $sandbox @('init', '--quiet', '--bare', '--initial-branch=main', $remote) | Out-Null
     $repo = New-FixtureRepository $Files
     Invoke-FixtureGit $repo @('remote', 'add', 'origin', 'https://github.com/fixture/repo.git') | Out-Null
-    Invoke-FixtureGit $repo @('config', "url.$($remote.Replace('\', '/')).insteadOf", 'https://github.com/fixture/repo.git') | Out-Null
+    Invoke-FixtureGit $repo @('config', 'fixture.remote', $remote) | Out-Null
     Invoke-FixtureGit $repo @('push', '--quiet', 'origin', 'main') | Out-Null
     return $repo
+}
+
+## The local bare repository used only by the fixture transport and test helpers.
+function Get-FixtureRemote([string]$Repository) {
+    return (Invoke-FixtureGit $Repository @('config', '--get', 'fixture.remote')).Trim()
 }
 
 ## The stand-in GitHub CLIs' first line: it refuses any argument holding a double quote,
@@ -144,7 +160,7 @@ function Get-OriginBranch([string]$Repository, [string]$Branch) {
 ## Pushes a new commit onto $Branch in the origin of $Repository from a separate clone,
 ## as another session would, and returns it.
 function Push-ElsewhereCommit([string]$Repository, [string]$Branch) {
-    $remote = (Invoke-FixtureGit $Repository @('remote', 'get-url', 'origin')).Trim()
+    $remote = Get-FixtureRemote $Repository
     $other = Join-Path $sandbox ('other-' + [guid]::NewGuid().ToString('N'))
     Invoke-FixtureGit $sandbox @('clone', '--quiet', '--branch', $Branch, $remote, $other) | Out-Null
     Invoke-FixtureGit $other @('config', 'user.name', 'Other') | Out-Null
@@ -164,7 +180,7 @@ function Push-ElsewhereCommit([string]$Repository, [string]$Branch) {
 ## mergeDelayCalls, fail), and $Overrides changes them from a given call on, keyed by the
 ## call's number. Returns the script and its state file.
 function New-FakePullRequest([string]$Repository, [string]$Branch, [hashtable]$State = @{}, [hashtable]$Overrides = @{}) {
-    $remote = (Invoke-FixtureGit $Repository @('remote', 'get-url', 'origin')).Trim()
+    $remote = Get-FixtureRemote $Repository
     $fields = @{
         remote = $remote; branch = $Branch; base = 'main'; headRefName = $Branch; baseRefName = 'main'
         isDraft = $false; closing = @(); neverMerge = $false; mergeDelayCalls = 0; fail = $false; warn = $false
@@ -233,7 +249,7 @@ function Invoke-Step([string]$Rehearsal, [string]$Branch, [string]$Head, [string
 function Set-PreCommitHook([string]$Repository, [string]$Command) {
     $hooks = (Invoke-FixtureGit $Repository @('rev-parse', '--git-common-dir')).Trim()
     if (-not [IO.Path]::IsPathRooted($hooks)) { $hooks = Join-Path $Repository $hooks }
-    Write-FixtureText (Join-Path $hooks 'hooks/pre-commit') "#!/bin/sh`n$Command`n"
+    Write-FixtureHook (Join-Path $hooks 'hooks/pre-commit') "#!/bin/sh`n$Command`n"
 }
 
 ## The survey's record for PR $Number.
@@ -620,8 +636,8 @@ Test 'a base push the remote rejects lands nothing and says the branch holds the
     $one = Add-FixtureCommit $repo 'one' 'main' @{ 'a.txt' = "a1`n" }
     Add-FixtureCommit $repo 'main' 'main' @{ 'b.txt' = "b1`n" } | Out-Null
     Invoke-FixtureGit $repo @('push', '--quiet', 'origin', 'main', 'one') | Out-Null
-    $remote = (Invoke-FixtureGit $repo @('remote', 'get-url', 'origin')).Trim()
-    Write-FixtureText (Join-Path $remote 'hooks/pre-receive') "#!/bin/sh`nwhile read old new ref; do`n  if [ `"`$ref`" = refs/heads/main ]; then echo 'main is protected' >&2; exit 1; fi`ndone`nexit 0`n"
+    $remote = Get-FixtureRemote $repo
+    Write-FixtureHook (Join-Path $remote 'hooks/pre-receive') "#!/bin/sh`nwhile read old new ref; do`n  if [ `"`$ref`" = refs/heads/main ]; then echo 'main is protected' >&2; exit 1; fi`ndone`nexit 0`n"
     $base = Get-FixtureRef $repo 'main'
     $rehearsal = New-Rehearsal $repo $base
     $step = Add-RehearsalStep $rehearsal $one
@@ -676,7 +692,8 @@ Test 'a base moved back after the checks is not restored' {
     $f = New-LandingFixture -Behind
     $update = Invoke-IntegrateScript 'update' @{ Worktree = $f.Rehearsal; Head = $f.Head; Base = $f.Base; Rehearsed = $f.Step }
     $parent = (Invoke-FixtureGit $f.Repository @('rev-parse', "$($f.Base)~1")).Trim()
-    Set-PreCommitHook $f.Repository "git push --quiet --force origin ${parent}:refs/heads/main"
+    $remote = (Get-FixtureRemote $f.Repository).Replace('\', '/').Replace("'", "'\''")
+    Set-PreCommitHook $f.Repository "git push --quiet --force '$remote' ${parent}:refs/heads/main"
     $run = Invoke-IntegrateScript 'land' (Get-LandParameters $f.Rehearsal 'one' $f.Head $update.Result.commit $f.Base $f.Step (New-FakePullRequest $f.Repository 'one'))
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'Pushing main was refused' -and -not $run.Result.landed) "Expected the base push refused: $($run.Result | ConvertTo-Json -Compress)"
     Assert ((Get-OriginBranch $f.Repository 'main') -eq $parent) 'The discarded commit was restored to main.'
@@ -685,7 +702,8 @@ Test 'a base moved back after the checks is not restored' {
 Test 'a branch that vanishes after the checks is not recreated' {
     $f = New-LandingFixture -Behind
     $update = Invoke-IntegrateScript 'update' @{ Worktree = $f.Rehearsal; Head = $f.Head; Base = $f.Base; Rehearsed = $f.Step }
-    Set-PreCommitHook $f.Repository 'git push --quiet origin :refs/heads/one'
+    $remote = (Get-FixtureRemote $f.Repository).Replace('\', '/').Replace("'", "'\''")
+    Set-PreCommitHook $f.Repository "git push --quiet '$remote' :refs/heads/one"
     $run = Invoke-IntegrateScript 'land' (Get-LandParameters $f.Rehearsal 'one' $f.Head $update.Result.commit $f.Base $f.Step (New-FakePullRequest $f.Repository 'one'))
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'Pushing one was refused' -and -not $run.Result.branchPushed) "Expected the branch push refused: $($run.Result | ConvertTo-Json -Compress)"
     Assert (-not (Get-OriginBranch $f.Repository 'one') -and (Get-OriginBranch $f.Repository 'main') -eq $f.Base) 'The branch was recreated or main changed.'
@@ -921,7 +939,7 @@ Test 'dependents are looked up in the repository the remote names, whatever GH_R
 
 Test 'a remote that is not on GitHub is refused before anything is deleted' {
     $f = New-LandedFixture
-    $bare = (Invoke-FixtureGit $f.Repository @('remote', 'get-url', 'origin')).Trim()
+    $bare = Get-FixtureRemote $f.Repository
     Invoke-FixtureGit $f.Repository @('remote', 'set-url', 'origin', $bare) | Out-Null
     $run = Invoke-DeleteBranch $f.Repository $f.Head
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'not a github.com repository' -and (Get-OriginBranch $f.Repository 'one') -eq $f.Head) "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
@@ -962,6 +980,42 @@ Test 'a push rewrite to another GitHub repository is refused before anything is 
     $run = Invoke-DeleteBranch $f.Repository $f.Head
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'rewrite sends its pushes to mirror/repo') "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
     Assert ((Get-OriginBranch $f.Repository 'one') -eq $f.Head) 'The branch was deleted.'
+}
+
+foreach ($kind in @('insteadOf', 'pushInsteadOf')) {
+    Test "an off-GitHub $kind rewrite is refused before anything is deleted" {
+        $f = New-LandedFixture
+        $bare = Get-FixtureRemote $f.Repository
+        $main = Get-FixtureRef $bare 'refs/heads/main'
+        # The rewrite names a real local destination: missing validation would really
+        # delete its branch, without contacting a network service.
+        Invoke-FixtureGit $f.Repository @('config', "url.$($bare.Replace('\', '/')).$kind", 'https://github.com/fixture/repo.git') | Out-Null
+        $run = Invoke-DeleteBranch $f.Repository $f.Head
+        Assert ($run.Code -eq 1 -and $run.Result.error -match 'rewrite.*not a github.com repository') "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
+        Assert ((Get-FixtureRef $bare 'refs/heads/one') -eq $f.Head -and (Get-FixtureRef $bare 'refs/heads/main') -eq $main) 'Remote refs changed.'
+    }
+
+    Test "landing refuses an off-GitHub $kind rewrite without changing refs or worktree" {
+        $f = New-LandingFixture -Behind
+        $update = Invoke-IntegrateScript 'update' @{ Worktree = $f.Rehearsal; Head = $f.Head; Base = $f.Base; Rehearsed = $f.Step }
+        Assert ($update.Code -eq 0) "Fixture update failed: $($update.Result.error)"
+        $head = Get-FixtureRef $f.Rehearsal 'HEAD'
+        $bare = Get-FixtureRemote $f.Repository
+        Invoke-FixtureGit $f.Repository @('config', "url.$($bare.Replace('\', '/')).$kind", 'https://github.com/fixture/repo.git') | Out-Null
+        $run = Invoke-IntegrateScript 'land' (Get-LandParameters $f.Rehearsal 'one' $f.Head $update.Result.commit $f.Base $f.Step (New-FakePullRequest $f.Repository 'one'))
+        Assert ($run.Code -eq 1 -and $run.Result.error -match 'rewrite.*not a github.com repository' -and -not $run.Result.branchPushed -and -not $run.Result.landed) "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
+        Assert ((Get-FixtureRef $bare 'refs/heads/main') -eq $f.Base -and (Get-FixtureRef $bare 'refs/heads/one') -eq $f.Head) 'Remote refs changed.'
+        Assert ((Get-FixtureRef $f.Rehearsal 'HEAD') -eq $head -and -not (Get-FixtureRef $f.Rehearsal 'MERGE_HEAD') -and -not (Invoke-FixtureGit $f.Rehearsal @('status', '--porcelain'))) 'The rehearsal worktree changed.'
+    }
+
+    foreach ($ssh in @('git@github.com:fixture/', 'ssh://git@github.com/fixture/')) {
+        Test "a same-repository HTTPS to $ssh $kind rewrite still permits deletion" {
+            $f = New-LandedFixture
+            Invoke-FixtureGit $f.Repository @('config', "url.$ssh.$kind", 'https://github.com/fixture/') | Out-Null
+            $run = Invoke-DeleteBranch $f.Repository $f.Head
+            Assert ($run.Code -eq 0 -and $run.Result.outcome -eq 'deleted' -and -not (Get-FixtureRef (Get-FixtureRemote $f.Repository) 'refs/heads/one')) "Expected deletion: $($run.Result | ConvertTo-Json -Compress)"
+        }
+    }
 }
 
 Test 'landing refuses a remote with two push destinations, pushing nothing' {
@@ -1029,6 +1083,30 @@ function New-GitHubCheckout {
     $repo = New-FixtureRepository @{ 'a.txt' = "a`n" }
     Invoke-FixtureGit $repo @('remote', 'add', 'origin', 'https://github.com/fixture/repo.git') | Out-Null
     return $repo
+}
+
+foreach ($form in @('direct', 'insteadOf', 'pushInsteadOf')) {
+    Test "GitHub SSH over port 443 is accepted in a $form remote" {
+        $repo = New-GitHubCheckout
+        if ($form -eq 'direct') {
+            Invoke-FixtureGit $repo @('remote', 'set-url', 'origin', 'ssh://git@ssh.github.com:443/fixture/repo.git') | Out-Null
+        } else {
+            Invoke-FixtureGit $repo @('config', "url.ssh://git@ssh.github.com:443/fixture/.$form", 'https://github.com/fixture/') | Out-Null
+        }
+        $run = Invoke-IntegrateScript 'retarget' @{ Repository = $repo; Branch = 'one'; BaseBranch = 'main'; List = $true; GitHubCli = (New-FakeDependents @() 2).Path }
+        Assert ($run.Code -eq 0 -and $run.Result.repository -eq 'fixture/repo' -and @($run.Result.targeting).Count -eq 0) "Expected the GitHub repository: $($run.Result | ConvertTo-Json -Compress)"
+    }
+
+    foreach ($untrusted in @('ssh.github.com.evil.example:443', 'ssh.github.com:22')) {
+        Test "an untrusted SSH endpoint $untrusted is refused in a $form remote" {
+            $repo = New-GitHubCheckout
+            $url = "ssh://git@$untrusted/fixture/repo.git"
+            if ($form -eq 'direct') { Invoke-FixtureGit $repo @('remote', 'set-url', 'origin', $url) | Out-Null }
+            else { Invoke-FixtureGit $repo @('config', "url.$url.$form", 'https://github.com/fixture/repo.git') | Out-Null }
+            $run = Invoke-IntegrateScript 'retarget' @{ Repository = $repo; Branch = 'one'; BaseBranch = 'main'; List = $true; GitHubCli = (New-FakeDependents @() 2).Path }
+            Assert ($run.Code -eq 1 -and $run.Result.error -match 'not a github.com repository') "Expected a refusal: $($run.Result | ConvertTo-Json -Compress)"
+        }
+    }
 }
 
 ## The commits every test's pull request has unless it says otherwise: the base it
@@ -1511,6 +1589,16 @@ Test 'a credential in a refused remote URL never reaches the output' {
     $run = Invoke-IntegrateScript 'check-issues' @{ Repository = $repo; PullRequest = 7; GitHubCli = (New-FakeGitHubCli @{}) }
     $text = $run.Result | ConvertTo-Json -Compress
     Assert ($run.Code -eq 1 -and $run.Result.error -match 'not a github.com repository' -and $text -match '\*\*\*@gitlab.example' -and $text -notmatch 'REVIEW_SENTINEL|NOT_A_CREDENTIAL') "The secret leaked or the refusal is unclear: $text"
+}
+
+foreach ($kind in @('insteadOf', 'pushInsteadOf')) {
+    Test "an off-GitHub $kind rewrite redacts credentials in its refusal" {
+        $repo = New-GitHubCheckout
+        Invoke-FixtureGit $repo @('config', "url.https://user:REVIEW_SENTINEL@NOT_A_CREDENTIAL@gitlab.example/fixture/repo.git.$kind", 'https://github.com/fixture/repo.git') | Out-Null
+        $run = Invoke-IntegrateScript 'check-issues' @{ Repository = $repo; PullRequest = 7; GitHubCli = (New-FakeGitHubCli @{}) }
+        $text = $run.Result | ConvertTo-Json -Compress
+        Assert ($run.Code -eq 1 -and $run.Result.error -match 'rewrite.*not a github.com repository' -and $text -match '\*\*\*@gitlab.example' -and $text -notmatch 'REVIEW_SENTINEL|NOT_A_CREDENTIAL') "The secret leaked or the refusal is unclear: $text"
+    }
 }
 
 Test 'a credential in a GitHub remote URL is accepted and never reaches the output' {

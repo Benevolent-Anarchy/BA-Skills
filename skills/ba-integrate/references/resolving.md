@@ -39,7 +39,7 @@ The gate catches only what it tests, so a clean gate does not settle a semantic 
 
 ## Corrections the checks find
 
-A correction belongs to the rehearsal only when the step had that path in conflict, because the merge step replays exactly the conflicted paths from the step's commit. Make it part of the step's resolution and its commit, show it in the plan, and redo every later step. Any other correction goes into a follow-up draft pull request after the run. Including it would leave a tree that `update.ps1` cannot reproduce, and it reports the mismatch.
+A correction belongs to the rehearsal only when the step had that path in conflict, because the merge step replays exactly the conflicted paths from the step's commit. Make it part of the step's resolution and its commit, show it in the plan, and redo every later step. Any other correction goes into a follow-up draft pull request after the run. Including it would leave a tree that `update.sh` (`update.ps1` on Windows) cannot reproduce, and it reports the mismatch.
 
 For example, #1 renames `Campaign.reading` to `Campaign.page`, and #2 adds a `NEXT.md` bullet citing `Campaign.reading`. They merge cleanly, so `NEXT.md` was in no conflict, and only the re-read after the last step finds the stale citation. The fix goes into a follow-up draft pull request. Had `NEXT.md` been in conflict at #2's step, the corrected bullet would have been part of that step's resolution.
 
