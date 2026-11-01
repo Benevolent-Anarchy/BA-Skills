@@ -359,7 +359,7 @@ def check_issues(a,r,out):
                     seen.add(oid)
                     c=gh.query(query,owner=owner,name=name,oid=oid)['repository']['object']
                     if not c or not c.get('oid'):raise RuntimeError('GitHub returned no landed commit; audit would be incomplete.')
-                    assoc=c['associatedPullRequests'];introduced=any(p['number']==a.pull_request and p['repository']['nameWithOwner']==here for p in assoc['nodes'])
+                    assoc=c['associatedPullRequests'];introduced=any(p['number']==a.pull_request and p['repository']['nameWithOwner'].lower()==here.lower() for p in assoc['nodes'])
                     if len(c['parents']['nodes'])!=c['parents']['totalCount'] or (not introduced and len(assoc['nodes'])!=assoc['totalCount']):raise RuntimeError('GitHub returned a partial landed commit record; audit would be incomplete.')
                     if not introduced:
                         if oid==merge['oid']:raise RuntimeError('GitHub does not record the pull request as introducing its merge commit; which messages landed is unknown.')
@@ -395,7 +395,7 @@ def check_issues(a,r,out):
         if issue['state']=='CLOSED':continue
         if pr['state']!='MERGED':findings.append(f"#{a.pull_request} has not merged; it is {pr['state']}.")
         elif pr['baseRefName']!=default:findings.append(f"#{a.pull_request} merged into {pr['baseRefName']}, not the default branch {default}, and GitHub closes issues only for pull requests merged into the default branch.")
-        if e['repository']!=here:findings.append(f"It lives in {e['repository']}, not {here}.")
+        if e['repository'].lower()!=here.lower():findings.append(f"It lives in {e['repository']}, not {here}.")
         if pr['state']=='MERGED' and merged_at:
             events=[];page=1
             while True:

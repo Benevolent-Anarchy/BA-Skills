@@ -1,5 +1,5 @@
 """Behavior tests: every Git write is confined to temporary local repositories."""
-import json, os, pathlib, shutil, subprocess, tempfile, unittest
+import json, os, pathlib, re, shutil, subprocess, tempfile, unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / 'skills/ba-integrate/scripts'
 
@@ -190,6 +190,28 @@ print(json.dumps(o))
     def test_issue_merged_without_sources_is_not_empty_success(self):
         self.github();self.state(pr=dict(state='MERGED',mergedAt='2020-01-01T00:00:00Z',baseRefName='main',url='url'))
         self.call('check-issues',pull_request=1,ok=False)
+    def test_issue_landed_commit_identity_ignores_repository_case(self):
+        self.github();head='a'*40;one='b'*40;two='c'*40;parent='d'*40
+        def obj(oid,parents,introduced):
+            return dict(oid=oid,message='landed',parents=dict(totalCount=len(parents),nodes=[{'oid':x} for x in parents]),associatedPullRequests=dict(totalCount=int(introduced),nodes=[{'number':1,'repository':{'nameWithOwner':'Test/Repo'}}] if introduced else []))
+        for landing,merge,listed,objects in [
+            ('squash',one,[head],{one:obj(one,[parent],True),parent:obj(parent,[],False)}),
+            ('rebase',two,[head,'e'*40],{two:obj(two,[one],True),one:obj(one,[parent],True),parent:obj(parent,[],False)}),
+        ]:
+            with self.subTest(landing=landing):
+                self.state(pr=dict(state='MERGED',mergedAt='2020-01-01T00:00:00Z',baseRefName='main',url='url'),head=head,merge={'oid':merge,'message':'landed','parents':{'totalCount':1}},commits=[{'oid':x,'message':'original'} for x in listed],compare='diverged',objects=objects)
+                d=self.call('check-issues',pull_request=1)
+                self.assertEqual(d['landing'],landing)
+    def test_issue_repository_case_does_not_hide_unexplained_open_issue(self):
+        self.github();head='a'*40;merge='b'*40
+        for repository,cross_repository in [('Test/Repo',False),('other/repo',True)]:
+            with self.subTest(repository=repository):
+                self.state(pr=dict(state='MERGED',mergedAt='2020-01-01T00:00:00Z',baseRefName='main',url='url'),head=head,merge={'oid':merge,'message':'Merge','parents':{'totalCount':2}},commits=[{'oid':head,'message':'work'}],closing=[dict(url='https://github.com/'+repository+'/issues/9',number=9,repository={'nameWithOwner':repository})],issue={'state':'OPEN','closedAt':None})
+                d=self.call('check-issues',pull_request=1)
+                self.assertFalse(d['allClosed'])
+                findings=d['issues'][0]['findings']
+                self.assertEqual(any('It lives in' in x for x in findings),cross_repository)
+                self.assertEqual(any('No cause found' in x for x in findings),not cross_repository)
     def test_installer_check_only_makes_no_directories(self):
         home=self.root/'fresh home';p=subprocess.run(['bash',str(ROOT/'install.sh'),'--home',str(home),'--check-only'],capture_output=True,text=True)
         self.assertEqual(p.returncode,0,p.stderr);self.assertFalse(home.exists())
@@ -198,6 +220,35 @@ print(json.dumps(o))
         for suite,code in [('bootstrap',0),('integrate',17),('release',0)]:
             path=root/'tests'/(suite+'-linux');path.mkdir(parents=True);(path/'run-tests.sh').write_text('#!/bin/sh\necho '+suite+'\nexit '+str(code)+'\n')
         p=subprocess.run(['bash',str(root/'tools/verify.sh')],capture_output=True,text=True);self.assertEqual(p.returncode,1);self.assertIn('release',p.stdout);self.assertNotIn('Verification passed',p.stdout)
+    def test_aggregate_gate_ignores_cdpath_for_relative_invocation(self):
+        root=self.root/'gate fixture';decoy=self.root/'decoy'
+        (root/'tools').mkdir(parents=True);(decoy/'tools').mkdir(parents=True)
+        shutil.copy(ROOT/'tools/verify.sh',root/'tools/verify.sh')
+        for directory,code in [(root,0),(decoy,77)]:
+            for suite in ['bootstrap','integrate','release']:
+                path=directory/'tests'/(suite+'-linux');path.mkdir(parents=True)
+                (path/'run-tests.sh').write_text('#!/bin/sh\necho '+suite+'-fixture\nexit '+str(code)+'\n')
+        for cdpath in ['.:',str(decoy)+':.']:
+            with self.subTest(cdpath=cdpath):
+                p=subprocess.run(['bash','tools/verify.sh'],cwd=root,env=dict(self.env,CDPATH=cdpath),capture_output=True,text=True)
+                self.assertEqual(p.returncode,0,(p.stdout,p.stderr))
+                for suite in ['bootstrap','integrate','release']:self.assertIn(suite+'-fixture',p.stdout)
+    def test_documented_landing_message_preserves_literal_titles(self):
+        skill=(ROOT/'skills/ba-integrate/SKILL.md').read_text()
+        template=next(block for block in re.findall(r'```bash\n(.*?)```',skill,re.S) if 'bash scripts/land.sh' in block)
+        scripts=self.root/'scripts';scripts.mkdir()
+        (scripts/'land.sh').write_text('python3 -c \'import json,sys; print(json.dumps(sys.argv[1:]))\' "$@"\n')
+        gh=self.root/'gh';gh.write_text('#!/usr/bin/env python3\nimport os,sys\nassert sys.argv[1:]==["pr","view","1","--repo","test/repo","--json","title","--jq",".title"]\nprint(os.environ["FIXTURE_TITLE"])\n');gh.chmod(0o755)
+        for title in ["Keep Cicely's notes","Don't drop Cicely's notes",r'Parse C:\temp paths',"x'; touch injected; echo '",'$(touch injected) `touch injected` "quoted"']:
+            with self.subTest(title=title):
+                (self.root/'injected').unlink(missing_ok=True)
+                command=template
+                for key,value in {'<n>':'1','<owner>':'test','<repo>':'repo','<branch>':'feature','<title>':title,'<rehearsal>':'worktree',"<update's commit>":'updated','<base>':'main','<approved head>':'head','<expected base>':'base','<step commit>':'rehearsed'}.items():command=command.replace(key,value)
+                p=subprocess.run(['bash','-c',command],cwd=self.root,env=dict(self.env,PATH=str(self.root)+os.pathsep+self.env['PATH'],FIXTURE_TITLE=title),capture_output=True,text=True)
+                self.assertFalse((self.root/'injected').exists(),'title executed as shell code')
+                self.assertEqual(p.returncode,0,p.stderr)
+                args=json.loads(p.stdout)
+                self.assertEqual(args[args.index('--message')+1],'Merge pull request #1 from test/feature\n\n'+title)
 
     def test_partial_graphql_page_is_never_empty_success(self):
         self.github();self.state(graphql_pages=[{'data':{'repository':{'pullRequests':{'nodes':[],'pageInfo':{}}}}}])

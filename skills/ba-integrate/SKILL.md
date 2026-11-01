@@ -25,6 +25,10 @@ Read the project's `AGENTS.md` (or `CLAUDE.md`) and its `## Integrating pull req
 bash scripts/survey.sh --repository '/home/cee/Dev/<project>'
 ```
 
+```powershell
+pwsh -NoProfile -File scripts/survey.ps1 -Repository 'C:\Users\cicel\Dev\<project>'
+```
+
 It fetches and reads every open pull request, across all of GitHub's pages. It skips drafts, forks and anything targeting neither the base nor another ready pull request. For each ready one it reports its head commit, files, commits, how far it is behind the base, conflicts with the base, review decision and unresolved review threads. It also reports which pairs conflict and in which files, which pull requests build on others, and an order: those it builds on first, then the fewest conflicts, oldest first. The order is a starting point: change it when the content says so, such as one pull request's decision relying on another's, and say why in the plan.
 
 A ready pull request built on one that is not ready would land that work too. The survey names it in `includesUnready`, with why it was skipped and how many unmerged commits they share. It counts shared history, so it also catches a draft that moved on after the ready branch forked from it. It may also flag a draft built on the ready pull request that targets the base rather than the ready branch. In that case, look at which pull request the shared commits belong to. Leave such a pull request out of the run unless Cicely explicitly approves including that work, and put both, prominently, in the plan. `uncheckedSkipped` lists skipped pull requests whose heads could not be fetched, so nothing was checked against them. Say so in the plan if it is not empty.
@@ -50,6 +54,11 @@ Inspect every tracked `.gitattributes` in each checkout for `filter=lfs`, run `g
    git -C <rehearsal> checkout integration/<yyyymmdd>
    ```
 
+   ```powershell
+   pwsh -NoProfile -File scripts/update.ps1 -Worktree <rehearsal> -Head <head sha> -Base <previous step commit> -Rehearsed <step commit>
+   git -C <rehearsal> checkout integration/<yyyymmdd>
+   ```
+
    It merges the base into the head and takes every conflicted path from the step's commit, whatever kind of conflict it was. It must report `matches: true`. A mismatch means the step changed a path no conflict touched, which the merge step cannot reproduce. Take that change out of the step and keep it for a follow-up draft pull request.
 4. Check for the conflicts text cannot show, as resolving.md describes, then run the project's gate. Every step becomes the base at some point, so each one has to pass, unless the project's notes allow gating only the last. A failing gate is a finding for the plan, not something to fix silently.
 
@@ -67,7 +76,7 @@ Present the plan and wait for Cicely's approval:
 - questions only she can answer, such as two decisions that contradict each other, a resolution that needs new code, or a semantic doubt
 - follow-up corrections found on re-reading, which go into a new draft pull request after the run
 - what will happen to each pull request: a merge commit bringing it up to date where it is behind, a merge commit on the base, a comment recording any resolutions, and deletion of its branch if the project's notes ask for it
-- every open pull request that targets a branch this run merges, drafts and stacked ones included, each retargeted to the base once that branch merges. List them for each branch with `bash scripts/retarget.sh --repository <root> --branch <branch> --base-branch <base> --list`, which reads every page.
+- every open pull request that targets a branch this run merges, drafts and stacked ones included, each retargeted to the base once that branch merges. List them for each branch with `bash scripts/retarget.sh --repository <root> --branch <branch> --base-branch <base> --list` on Linux, or `pwsh -NoProfile -File scripts/retarget.ps1 -Repository <root> -Branch <branch> -BaseBranch <base> -List` on Windows. Both read every page.
 
 If her answers change a resolution, redo the rehearsal from that step. Reset the rehearsal branch to the previous step's commit, merge again, and take earlier resolutions from the old step commits where they still apply. Show what changed.
 
@@ -82,11 +91,27 @@ The expected base starts as the rehearsal's base commit and becomes each landing
    bash scripts/update.sh --worktree <rehearsal> --head <approved head> --base <expected base> --rehearsed <step commit> --message 'Merge <base> into <branch> for integration'
    ```
 
+   ```powershell
+   pwsh -NoProfile -File scripts/update.ps1 -Worktree <rehearsal> -Head <approved head> -Base <expected base> -Rehearsed <step commit> -Message 'Merge <base> into <branch> for integration'
+   ```
+
 3. Land it:
 
    ```bash
-   bash scripts/land.sh --worktree <rehearsal> --pull-request <n> --branch <branch> --approved-head <approved head> --updated <update's commit> --base-branch <base> --expected-base <expected base> --rehearsed <step commit> --message $'Merge pull request #<n> from <owner>/<branch>\n\n<title>'
+   title=$(gh pr view <n> --repo <owner>/<repo> --json title --jq .title) || { printf '%s\n' 'Could not read the pull request title.' >&2; exit 1; }
+   printf -v message 'Merge pull request #%s from %s/%s\n\n%s' '<n>' '<owner>' '<branch>' "$title"
+   bash scripts/land.sh --worktree <rehearsal> --pull-request <n> --branch <branch> --approved-head <approved head> --updated <update's commit> --base-branch <base> --expected-base <expected base> --rehearsed <step commit> --message "$message"
    ```
+
+   ```powershell
+   $title = gh pr view <n> --repo <owner>/<repo> --json title --jq .title
+   if ($LASTEXITCODE -ne 0) { throw 'Could not read the pull request title.' }
+   $message = "Merge pull request #<n> from <owner>/<branch>`n`n$title"
+   & ./scripts/land.ps1 -Worktree <rehearsal> -PullRequest <n> -Branch <branch> -ApprovedHead <approved head> -Updated <update's commit> -BaseBranch <base> -ExpectedBase <expected base> -Rehearsed <step commit> -Message $message
+   ```
+
+   Read the title as data and pass the message variable as one argument. Apostrophes, backslashes, quotes and shell expressions in a title stay literal; never paste the title into shell source or evaluate it as code.
+   Run the Windows block in a PowerShell 7.2+ session. Its in-process script call keeps embedded quotes intact even on PowerShell 7.2, whose native argument passing can alter quotes when starting another `pwsh` process.
 
    It refuses before pushing anything unless all of these hold:
    - the update holds the rehearsed tree
@@ -101,11 +126,19 @@ The expected base starts as the rehearsal's base commit and becomes each landing
    bash scripts/retarget.sh --repository <root> --branch <branch> --base-branch <base> --approved '<n>,<m>'
    ```
 
-   Pass `--approved none` when the plan listed none.
+   ```powershell
+   pwsh -NoProfile -File scripts/retarget.ps1 -Repository <root> -Branch <branch> -BaseBranch <base> -Approved '<n>,<m>'
+   ```
+
+   Pass `--approved none` (`-Approved none` on Windows) when the plan listed none.
 6. If the project's notes say merged branches are deleted, delete it. The script deletes only while the branch is still at the merged tip and no open pull request targets it. It reports a branch someone has pushed to since as `moved`, and refuses, naming them, while pull requests still target it:
 
    ```bash
    bash scripts/delete-branch.sh --repository <root> --branch <branch> --merged-tip <land's branchTip> --base-branch <base>
+   ```
+
+   ```powershell
+   pwsh -NoProfile -File scripts/delete-branch.ps1 -Repository <root> -Branch <branch> -MergedTip <land's branchTip> -BaseBranch <base>
    ```
 
    Leave local branches: one may be checked out in a session's worktree.
@@ -128,6 +161,10 @@ Check each merged pull request's issues:
 
 ```bash
 bash scripts/check-issues.sh --repository <root> --pull-request <n>
+```
+
+```powershell
+pwsh -NoProfile -File scripts/check-issues.ps1 -Repository <root> -PullRequest <n>
 ```
 
 Which issues a pull request should close is GitHub's reading, not the script's. It takes the issues GitHub lists as closing the pull request, from the description's keywords or a link made by hand, and reads no description itself. A commit message closes issues only once its commit reaches the default branch, so the script counts only the messages that landed. When GitHub's comparison finds the pull request's head among the merge commit's ancestors, every listed commit landed, along with the merge commit, whichever pull request first brought a commit into the repository. Otherwise the script walks back from the merge commit while GitHub records the pull request as having introduced each commit, which finds a rebase's copies or a squash alone. The merge commit's own message always counts, and carries the title when landing made it. Its `landing` says which kind it found. Where GitHub's record cannot show what landed, as for a merged pull request whose branch was rewritten, it fails rather than guess. GitHub lists no closures from commit messages, so the script has GitHub render each of those messages. GitHub decides which repository each reference names, whether that issue exists, and whether it is an issue at all, and it leaves code alone. A reference it resolves to an issue counts when one of GitHub's closing keywords comes right before it. The script reads every commit, and fails rather than report a partial audit. Each issue is identified by its URL, since it can live in another repository. For an issue still open, its `findings` say why, from what it could establish:

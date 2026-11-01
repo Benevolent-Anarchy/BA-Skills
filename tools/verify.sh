@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Native aggregate gate. Never mask a failing suite with logging or a pipeline.
 set -uo pipefail
-root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || exit 1
 failed=0
 for suite in bootstrap integrate release; do
   printf '\nRunning %s Linux tests\n' "$suite"

@@ -20,3 +20,5 @@ The PowerShell spelling is PascalCase with one hyphen (`-ApprovedHead`); Linux u
 The skill's rehearsal and gate sequence is unchanged: merge each surveyed head into the scratch branch, resolve and commit, replay with `update.sh`, return to the scratch branch, then run the project's gate at every step. Gate failure is a plan finding. The scripts never mark a PR ready or create a PR. Any follow-up PR created by an agent must use `gh pr create --draft` and remain a draft.
 
 Run `bash tests/integrate-linux/run-tests.sh` from the BA-Skills root. It exercises actual temporary Git repositories and bare remotes, and substitutes only GitHub's service boundary. It never writes real remote refs or a real home directory. `bash tools/verify.sh` runs the bootstrap, integration and release Linux suites and fails if any suite fails.
+
+The Linux gate neither parses nor exercises `.ps1` or `.psm1` sources. Windows support requires the separate Windows gate, `pwsh -NoProfile -File tools/verify.ps1`; a Linux pass alone does not verify the PowerShell implementation.
