@@ -630,6 +630,18 @@ class CrossReview(unittest.TestCase):
         self.queue(review(summary='Still fine.'))
         self.assertEqual(self.review()['round'], 2)
 
+    def test_a_stop_after_a_clean_last_round_is_reported_as_stopped(self):
+        # Codex's focused verification found `status` reporting this as done.
+        self.queue(review(summary='Fine.'))
+        self.review('claude', '--max-rounds', '1')
+        head = self.push_fix()
+        self.review()
+        self.assertEqual(self.decide(('next-round', 'No, leave them.', 'stop'))['turn'], 'stopped')
+        status = self.script('status')
+        self.assertEqual(status['turn'], 'stopped')
+        self.assertIn(f"**You stopped it** after round 1, at `{head[:7]}`. Codex didn't review the commits since "
+                      'round 1.', status['briefing'])
+
     def test_a_head_that_moved_is_refused(self):
         self.pr['headRefOid'] = self.base
         self.write_pr()

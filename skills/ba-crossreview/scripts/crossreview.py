@@ -668,11 +668,12 @@ def turn(state: dict | None, head: str | None = None) -> str:
     last = state['rounds'][-1]
     if last['answers'] is None and open_findings(last):
         return 'reply'
-    if last['answers'] is None and (not head or head == last['head']):
-        return 'done'
+    # Her stop comes first: after a clean last round, she may have stopped before commits pushed since.
     asked = checkpoint(last)
     if asked and asked.get('choice') == 'stop' and (not head or head == asked['head']):
         return 'stopped'
+    if last['answers'] is None and (not head or head == last['head']):
+        return 'done'
     return 'limit' if len(state['rounds']) >= state['maxRounds'] else 'review'
 
 
