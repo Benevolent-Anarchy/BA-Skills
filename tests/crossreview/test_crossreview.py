@@ -594,15 +594,19 @@ class CrossReview(unittest.TestCase):
     def test_another_round_past_the_limit_is_cicelys_recorded_decision(self):
         self.queue(review(finding('One', detail='It breaks on Sundays.')))
         self.review('claude', '--max-rounds', '1')
-        self.push_fix()
+        fix = self.push_fix()
         result = self.reply(('F1', 'fixed', 'Handles Sundays now.'))
         self.assertEqual((result['turn'], result['pending']), ('cicely', ['next-round']))
         self.assertIn('Round 1 was the last of 1, so the cross-review pauses for Cicely', self.posts()[1]['body'])
+        # Codex found that the question `reply` asks named none of the commits the answers came in.
         for text in ('#### Another round after round 1, past the limit of 1?',
                      "All 1 rounds are used, and Codex hasn't checked Claude's answers to round 1:",
                      '- **F1** · major · One', '  - Codex: It breaks on Sundays.',
                      '  - Claude fixed it: Handles Sundays now.', 'round 1 took 0 min and about 1.2M tokens',
-                     "Stopping leaves Claude's answers to round 1 unchecked.", '1. **Another round** (round 2)',
+                     f'Nor has Codex reviewed 1 commit pushed since round 1:\n- `{fix[:7]}` Fix it',
+                     "Stopping leaves Claude's answers to round 1 unchecked, and the commits listed unreviewed.",
+                     'The commits listed stay unreviewed. Anything pushed after them is reviewed',
+                     '1. **Another round** (round 2)',
                      '2. **A focused check** of F1: Codex checks only that', '3. **Stop here:** the cross-review ends at'):
             self.assertIn(text, result['briefing'])
         self.assertIn(result['briefing'], self.status_comment()['body'])
@@ -633,8 +637,8 @@ class CrossReview(unittest.TestCase):
         self.assertEqual(len(self.calls('codex')), 1)
         for text in ("All 1 rounds are used, and Codex hasn't checked Claude's answers to round 1:",
                      '  - Claude declined it: Not a bug.',
-                     f'Nor has Codex reviewed 1 commit pushed since those answers:\n- `{head[:7]}` Fix it',
-                     "Stopping leaves Claude's answers to round 1, and the commits since, unchecked.",
+                     f'Nor has Codex reviewed 1 commit pushed since round 1:\n- `{head[:7]}` Fix it',
+                     "Stopping leaves Claude's answers to round 1 unchecked, and the commits listed unreviewed.",
                      'The commits listed stay unreviewed. Anything pushed after them is reviewed, or put to you first, '
                      'together with them.'):
             self.assertIn(text, result['briefing'])
@@ -643,7 +647,7 @@ class CrossReview(unittest.TestCase):
         result = self.decide(('next-round', 'Still no.', 'stop'))
         self.assertEqual(result['turn'], 'stopped')
         self.assertIn(f"**You stopped it** after round 1, at `{head[:7]}`. Codex didn't check Claude's last answers: "
-                      f'F1 (declined). Nor did it review the commits pushed since them:\n- `{head[:7]}` Fix it\n\n'
+                      f'F1 (declined). Nor did it review the commits pushed since round 1:\n- `{head[:7]}` Fix it\n\n'
                       'Anything pushed after them is reviewed, or put to you first, together with them. Marking the '
                       'pull request ready is your call.', result['briefing'])
         self.assertIn('Cicely stopped the cross-review after round 1', self.review(ok=False)['error'])
@@ -769,6 +773,26 @@ class CrossReview(unittest.TestCase):
         result = self.review()
         self.assertEqual((result['round'], result['resumed'], result['turn']), (2, False, 'done'))
         self.assertIn(f'from {self.head} to {third}', self.calls('codex')[2]['stdin'])
+
+    def test_a_check_of_new_commits_reviews_only_those_cicely_was_shown(self):
+        # Codex found that commits pushed after her choice went into the check too, past the size it allows.
+        self.queue(review(summary='Fine.'))
+        self.review()
+        shown = self.push_fix()
+        self.review()
+        self.decide(('next-round', 'Check it.', 'check'))
+        later = self.push_fix(LARGE)
+        self.queue(check(summary='It holds up.'))
+        result = self.review()
+        self.assertEqual((result['check'], result['head'], result['commits'], result['turn']),
+                         (1, shown, [shown], 'review'))
+        call = self.calls('codex')[1]
+        self.assertIn(f'{self.head}..{shown}', call['stdin'])
+        self.assertNotIn(later, call['stdin'])
+        self.assertNotIn('done, with nothing open', self.status_comment()['body'])
+        self.queue(review(summary='Still fine.', session='codex-thread-2'))
+        result = self.review()
+        self.assertEqual((result['round'], result['head'], result['turn']), (2, later, 'done'))
 
     def test_a_check_of_new_commits_stopped_at_its_limit_leaves_them_unreviewed(self):
         self.queue(review(summary='Fine.'))

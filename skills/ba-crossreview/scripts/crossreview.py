@@ -1379,9 +1379,9 @@ def limit_lines(state: dict, item: dict) -> list[str]:
                 reply = notes[finding['id']]
                 lines.append(f'  - {author} {reply["action"]} it: {short(reply["note"], 300)}')
         if listed:
-            left = f'{author}\'s answers to {step}, and the commits since, unchecked'
-            lines += ['', f'Nor has {reviewer} reviewed {counted(len(commits["list"]), "commit")} pushed since those '
-                          'answers:', *commit_lines(commits)]
+            left = f'{author}\'s answers to {step} unchecked, and the commits listed unreviewed'
+            lines += ['', f'Nor has {reviewer} reviewed {counted(len(commits["list"]), "commit")} pushed since {step}:',
+                      *commit_lines(commits)]
         elif answers['head'] != item['head']:
             left = f'{author}\'s answers to {step}, and the commits since, unchecked'
             lines += ['', f'Nor has {reviewer} reviewed the commits pushed since those answers, up to and including '
@@ -1572,18 +1572,20 @@ def next_lines(state: dict, move: str) -> list[str]:
     if move == 'stopped':
         asked, answers, step = checkpoint(last), last['answers'], label(last)
         commits = asked.get('commits') if (asked.get('commits') or {}).get('list') else None
-        end = ':' if commits else '.'
         left = []
         if answers:
             unchecked = ', '.join(f'{reply["id"]} ({ACTIONS[reply["action"]]})' for reply in answers['replies'])
             left.append(f'{reviewer} didn\'t check {author}\'s last answers: {unchecked}.')
         if unverified(last):
             left.append(f'{capital(step)} couldn\'t verify {", ".join(finding["id"] for finding in unverified(last))}.')
+        since = label(reviewed(state))
         if not left:
-            left.append(f'{reviewer} didn\'t review the commits since {label(reviewed(state))}{end}')
-        elif commits or (answers or last)['head'] != asked['head']:
-            left.append(f'Nor did it review the commits pushed since them{end}' if answers
-                        else f'Nor did {reviewer} review the commits pushed since{end}')
+            left.append(f'{reviewer} didn\'t review the commits since {since}' + (':' if commits else '.'))
+        elif commits:
+            left.append(f'Nor did {"it" if answers else reviewer} review the commits pushed since {since}:')
+        elif (answers or last)['head'] != asked['head']:
+            left.append('Nor did it review the commits pushed since them.' if answers
+                        else f'Nor did {reviewer} review the commits pushed since.')
         stopped, ready = f'**You stopped it** after {step}, at `{asked["head"][:7]}`. {" ".join(left)}', \
             'Marking the pull request ready is your call.'
         if not commits:
@@ -1803,7 +1805,7 @@ def command_review(arguments: argparse.Namespace) -> dict:
     # what follows is put to Cicely, with the commits nobody has reviewed. Once she has chosen a round, it runs.
     if move == 'limit' or (move == 'review' and last and not checkable(state)
                            and (checkpoint(last) or {}).get('choice') != 'review'):
-        commits = unreviewed(repo, (last['answers'] or reviewed(state))['head'], head)
+        commits = unreviewed(repo, reviewed(state)['head'], head)
         if move == 'limit' or few_commits(commits):
             ask_next_round(state, 'commits' if move == 'review' else 'limit', head, commits)
             save(path, state)
@@ -1813,6 +1815,10 @@ def command_review(arguments: argparse.Namespace) -> dict:
                          'pending': [item['id'] for item in pending(state)], 'briefing': briefing(state, move)},
                         **reported(state, [warning]))
     checking = move == 'check'
+    if checking and not checkable(state):
+        # A check of new commits reviews the ones Cicely was shown, up to the head she was asked at. Any pushed since
+        # come after the check, and are reviewed or put to her as usual: never added to a check she didn't choose.
+        head = checkpoint(last)['head']
     executable = shutil.which(reviewer)
     if not executable:
         raise Refusal(f'The {AGENTS[reviewer]} CLI ({reviewer}) is not on PATH.')
@@ -2042,7 +2048,7 @@ def command_reply(arguments: argparse.Namespace) -> dict:
     if last.get('check'):
         ask_next_round(state, 'check', pr['headRefOid'])
     elif reviews(state) >= state['maxRounds']:
-        ask_next_round(state, 'limit', pr['headRefOid'])
+        ask_next_round(state, 'limit', pr['headRefOid'], unreviewed(repo, last['head'], pr['headRefOid']))
     elif changed < SMALL_CHANGE and all(findings[reply['id']]['severity'] in ('minor', 'nit') for reply in replies):
         ask_next_round(state, 'small', pr['headRefOid'])
     for reply in replies:
