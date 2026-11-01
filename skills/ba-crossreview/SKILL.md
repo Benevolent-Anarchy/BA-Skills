@@ -109,11 +109,14 @@ Codex checks in a sandbox where it may run the project's tests: it can write onl
 
 When a command reports the turn `cicely`, the cross-review is paused: the reviewer asked a question only she can answer, you escalated a finding, another round may not be worth it, the rounds are used up, or a check she chose has run. Stop and call for her attention: use your harness's notification tool if it has one. Then give her the command's `briefing` as it is, since it is written for her, and add your own view where you have one. Don't run another round, and don't guess her answer. Wait for her.
 
+She decides with your view in front of her, so it goes on the record with her answer: put it, word for word as you gave it to her, in that item's `view`.
+
 Record her answers exactly as she wrote them: don't summarize, tidy or translate them. A decision that later proves wrong has to be traceable to what she was told and what she said. The record is the real pull request. When the cross-review runs against a test or a faked GitHub, her answers land only in that fixture: tell her so at the time, and copy them, with what she was asked, to the real pull request or an Issue before the fixture goes. One answer for each item waiting for her, in a JSON file:
 
 ```json
 [{"id": "F3", "decision": "Keep it a module for now; I'll plan plugins separately."},
- {"id": "next-round", "decision": "Stop there, the rest is polish.", "choice": "stop"}]
+ {"id": "next-round", "decision": "Stop there, the rest is polish.", "choice": "stop",
+  "view": "I'd stop: both answers are one-line fixes, and the tests cover them."}]
 ```
 
 For `next-round`, also give `choice`: `review` for another round, `check` for a focused check, or `stop` to end the cross-review. Past the limit, `review` raises it by one round. If she sets limits for a check, note them for the `review` that runs it. If her answer leaves any of that unclear, ask her again.
@@ -122,7 +125,7 @@ For `next-round`, also give `choice`: `review` for another round, `check` for a 
 python3 scripts/crossreview.py decide --repository <clone> --pull-request <n> --decisions <file>
 ```
 
-It refuses unless every item waiting for her has exactly one decision. It posts them on the pull request under the tag `[Cee, via the skill]`, each with what she was asked: the question, why it mattered, the options and the recommendations. A question she answered comes back to you as an open finding carrying her decision, to answer in step 3. A finding you escalated goes back to the reviewer with her decision in the next round. When she chooses another round or a focused check, the reviewer gets her words too, since what she says there can settle a finding. Act on what she decided before that round: push any change she asked for.
+It refuses unless every item waiting for her has exactly one decision. It posts them on the pull request under the tag `[Cee, via the skill]`, each with what she was asked: the question, why it mattered, the options and the recommendations, and your view, labelled as yours. A question she answered comes back to you as an open finding carrying her decision, to answer in step 3. A finding you escalated goes back to the reviewer with her decision in the next round. When she chooses another round or a focused check, the reviewer gets her words too, since what she says there can settle a finding. Wherever you gave a view, the reviewer gets it with her answer, marked as yours, as her answer may lean on it. Act on what she decided before that round: push any change she asked for.
 
 ## 5. Repeat until it settles
 

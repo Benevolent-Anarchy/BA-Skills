@@ -181,10 +181,11 @@ class CrossReview(unittest.TestCase):
         return self.script('reply', '--replies', str(path), ok=ok)
 
     def decide(self, *decisions, ok=True):
-        """Records (id, decision) or (id, decision, choice) tuples."""
+        """Records (id, decision), (id, decision, choice) or (id, decision, choice, view) tuples; a choice of None is
+        left out."""
         path = self.root / 'decisions.json'
-        path.write_text(json.dumps([dict(zip(('id', 'decision', 'choice'), decision)) for decision in decisions]),
-                        encoding='utf-8')
+        path.write_text(json.dumps([{key: value for key, value in zip(('id', 'decision', 'choice', 'view'), decision)
+                                     if value is not None} for decision in decisions]), encoding='utf-8')
         return self.script('decide', '--decisions', str(path), ok=ok)
 
     def option(self, args, flag):
@@ -386,14 +387,21 @@ class CrossReview(unittest.TestCase):
         self.assertIn('Undecided: F1', self.decide(ok=False)['error'])
         self.assertIn('Not waiting or repeated: F2', self.decide(('F1', 'Leave it.'), ('F2', 'No.'), ok=False)['error'])
         self.assertIn("needs Cicely's answer", self.decide(('F1', ' '), ok=False)['error'])
-        result = self.decide(('F1', 'Keep it a module for now.\nI will plan plugins later.'))
+        self.assertIn('Decision F1 has an empty `view`', self.decide(('F1', 'Leave it.', None, ' '), ok=False)['error'])
+        # The view Claude gave her with the question goes on the record with her answer.
+        result = self.decide(('F1', 'Keep it a module for now.\nI will plan plugins later.', None,
+                              "I'd keep it a module: it ships now."))
         self.assertEqual(result['turn'], 'review')
         record = self.posts()[2]['body']
         self.assertTrue(record.startswith('[Cee, via the skill] Decisions on the cross-review of #7, after round 1\n\n'
-                                          'Claude paused the cross-review to ask her.'))
+                                          'Claude paused the cross-review to ask her. What she was asked is below, '
+                                          "each with her answer word for word, and with Claude's own view where Claude "
+                                          'gave her one.'))
         self.assertIn("**Claude's question:** Cicely decides the architecture.", record)
         self.assertIn('1. **Module:** Ships now', record)
-        self.assertTrue(record.endswith('**Her answer:**\n> Keep it a module for now.\n> I will plan plugins later.\n'))
+        self.assertTrue(record.endswith("**Claude's view, given with it:**\n> I'd keep it a module: it ships now.\n\n"
+                                        '**Her answer:**\n> Keep it a module for now.\n> I will plan plugins later.\n'))
+        self.assertEqual(result['decisions'][0]['view'], "I'd keep it a module: it ships now.")
         self.assertIn('Codex reviews round 2 next', self.status_comment()['body'])
         self.assertIn('**Your decisions:** [F1, after round 1](https://github.com/fixture/repo/pull/7#issuecomment-4).',
                       result['briefing'])
@@ -403,7 +411,9 @@ class CrossReview(unittest.TestCase):
         self.assertEqual((result['open'], result['resolved'], result['turn']), ([], ['F1', 'F2'], 'done'))
         prompt = self.calls('codex')[1]['stdin']
         for text in ('Claude took it to Cicely: Cicely decides the architecture.',
-                     'Cicely decided: Keep it a module for now.', 'Claude declined it: Not a bug.', 'her decisions settle'):
+                     "Claude's view, which she read before deciding: I'd keep it a module: it ships now.\n"
+                     '  Cicely decided: Keep it a module for now.', 'Claude declined it: Not a bug.',
+                     'her decisions settle'):
             self.assertIn(text, prompt)
         status = self.script('status')
         self.assertEqual((status['pending'], status['escalated'][0]['note']), ([], 'Cicely decides the architecture.'))
@@ -659,9 +669,12 @@ class CrossReview(unittest.TestCase):
         self.review()
         head = self.push_fix()
         self.reply(('F1', 'fixed', 'Added one.'), ('F2', 'declined', "The name is the project's."))
-        result = self.decide(('next-round', 'Just check those two, quickly.', 'check'))
+        result = self.decide(('next-round', 'Just check those two, quickly.', 'check',
+                              'A check is enough for two small answers.'))
         self.assertEqual(result['turn'], 'check')
-        self.assertIn('**So:** a focused check of the answers.', self.posts()[2]['body'])
+        self.assertIn("**Claude's view, given with it:**\n> A check is enough for two small answers.\n\n**Her "
+                      'answer:**\n> Just check those two, quickly.\n\n**So:** a focused check of the answers.',
+                      self.posts()[2]['body'])
         self.assertIn('**Next:** Codex runs the focused check you chose, of F1, F2.', result['briefing'])
         self.assertEqual(self.script('status')['turn'], 'check')
         self.queue({'exit': 3, 'stderr': 'model overloaded'})
@@ -692,8 +705,10 @@ class CrossReview(unittest.TestCase):
                      'Claude fixed it: Added one.', "Claude declined it: The name is the project's.",
                      "the project's tests among them", 'there is no network', 'about 1M tokens, cached ones included, and 20 minutes',
                      'stopped and reports nothing', "don't list it again in `problems`", f'{self.head}..{head}',
-                     "When Cicely chose this, she said, word for word:\n\n> Just check those two, quickly.\n\nWhat she "
-                     'says there settles what it covers.'):
+                     'Claude gave her this view with the question, and she read it before she chose:\n\n> A check '
+                     'is enough for two small answers.\n\nWhen Cicely chose this, she said, word for word:\n\n> Just '
+                     "check those two, quickly.\n\nWhat she says there settles what it covers; Claude's view settles "
+                     'nothing unless she takes it up.'):
             self.assertIn(text, call['stdin'])
         body = self.posts()[3]['body']
         self.assertTrue(body.startswith(f'[Codex] Cross-review of #7: the check after round 1, at {head[:7]}\n\nChecked.'))

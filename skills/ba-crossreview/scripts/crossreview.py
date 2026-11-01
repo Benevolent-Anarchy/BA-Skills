@@ -925,7 +925,8 @@ def checkable(state: dict) -> dict[str, dict]:
              if finding['id'] in answered or finding['status'] == 'unverified'}
     for finding in state['escalated']:
         if same_step(finding, last) and finding['id'] in found:
-            found[finding['id']] = dict(found[finding['id']], decision=finding.get('decision'))
+            found[finding['id']] = dict(found[finding['id']], decision=finding.get('decision'),
+                                        view=finding.get('view'))
     return found
 
 
@@ -1163,11 +1164,16 @@ def considerations(item: dict, recommends: str) -> str:
 
 
 def decisions_comment(state: dict, record: dict) -> str:
+    author = AGENTS[state['author']]
+    views = any(decision.get('view') for decision in record['decisions'])
     lines = [f'{CICELY} Decisions on the cross-review of #{state["pullRequest"]}, after {label(record)}', '',
-             f'{AGENTS[state["author"]]} paused the cross-review to ask her. What she was asked is below, each with her '
-             'answer word for word.']
+             f'{author} paused the cross-review to ask her. What she was asked is below, each with her answer word for '
+             'word' + (f', and with {author}\'s own view where {author} gave her one.' if views else '.')]
     for decision in record['decisions']:
-        lines += ['', *decision['asked'], '', '**Her answer:**', *quoted(decision['decision'])]
+        lines += ['', *decision['asked']]
+        if decision.get('view'):
+            lines += ['', f'**{author}\'s view, given with it:**', *quoted(decision['view'])]
+        lines += ['', '**Her answer:**', *quoted(decision['decision'])]
         if decision.get('choice'):
             lines += ['', f'**So:** {CHOICES[decision["choice"]]}.']
     return '\n'.join(lines) + '\n'
@@ -1562,6 +1568,8 @@ def history(state: dict, found: dict[str, dict], author: str, fresh: bool) -> st
         reply = answer_to(state, finding['id'])
         if reply and reply['action'] == 'escalated':
             lines.append(f'  {author} took it to Cicely: {reply["note"]}')
+        if finding.get('view'):
+            lines.append(f'  {author}\'s view, which she read before deciding: {finding["view"]}')
         if finding.get('decision'):
             lines.append(f'  Cicely decided: {finding["decision"]}')
         if reply and reply['action'] != 'escalated':
@@ -1575,8 +1583,12 @@ def said(state: dict) -> str:
     asked = checkpoint(state['rounds'][-1])
     if not asked or asked.get('choice') in (None, 'stop') or not asked.get('decision'):
         return ''
-    return ('\n\nWhen Cicely chose this, she said, word for word:\n\n' + '\n'.join(quoted(asked['decision']))
-            + '\n\nWhat she says there settles what it covers.')
+    author = AGENTS[state['author']]
+    view = ('\n\n' + f'{author} gave her this view with the question, and she read it before she chose:\n\n'
+            + '\n'.join(quoted(asked['view']))) if asked.get('view') else ''
+    return (view + '\n\nWhen Cicely chose this, she said, word for word:\n\n' + '\n'.join(quoted(asked['decision']))
+            + '\n\nWhat she says there settles what it covers'
+            + (f'; {author}\'s view settles nothing unless she takes it up.' if view else '.'))
 
 
 def later_prompt(context: dict, state: dict, fresh: str | None) -> str:
@@ -1921,10 +1933,14 @@ def command_decide(arguments: argparse.Namespace) -> dict:
     except (OSError, ValueError) as error:
         raise Refusal(f'Could not read the decisions: {error}')
     if not isinstance(decisions, list) or not all(isinstance(decision, dict) for decision in decisions):
-        raise Refusal('The decisions must be a JSON array of {"id", "decision"} objects.')
+        raise Refusal('The decisions must be a JSON array of {"id", "decision"} objects, each with "choice" for '
+                      f'{CHECKPOINT} and "view" where you gave her one.')
     for decision in decisions:
         if not isinstance(decision.get('decision'), str) or not decision['decision'].strip():
             raise Refusal(f'Decision {decision.get("id")} needs Cicely\'s answer.')
+        if 'view' in decision and (not isinstance(decision['view'], str) or not decision['view'].strip()):
+            raise Refusal(f'Decision {decision.get("id")} has an empty `view`: give the view you gave her, word for '
+                          'word, or leave `view` out.')
         if decision.get('id') == CHECKPOINT and decision.get('choice') not in CHOICES:
             raise Refusal(f'Decision {CHECKPOINT} needs `choice`: "review" for another round, "check" for a focused '
                           'check of the answers, or "stop" to end the cross-review here, as Cicely chose.')
@@ -1948,11 +1964,14 @@ def command_decide(arguments: argparse.Namespace) -> dict:
               'decisions': [dict({'id': decision['id'], 'title': waiting[decision['id']]['title'],
                                   'decision': decision['decision'].strip(),
                                   'asked': item_lines(state, waiting[decision['id']])},
-                                 **({'choice': decision['choice']} if decision['id'] == CHECKPOINT else {}))
+                                 **({'choice': decision['choice']} if decision['id'] == CHECKPOINT else {}),
+                                 **({'view': decision['view'].strip()} if 'view' in decision else {}))
                             for decision in decisions]}
     for decision in record['decisions']:
         item = waiting[decision['id']]
         item['decision'] = decision['decision']
+        if decision.get('view'):
+            item['view'] = decision['view']
         if decision['id'] == CHECKPOINT:
             item['choice'] = decision['choice']
             # Past the limit, her choice of another round raises it by one.
@@ -2035,7 +2054,8 @@ def main(argv: list[str]) -> int:
                                  'an escalation "stakes", "options" and "recommendation"')
         if name == 'decide':
             command.add_argument('--decisions', required=True, help='JSON array of {"id", "decision"}, her words '
-                                 f'exactly; {CHECKPOINT} also takes "choice": review, check or stop')
+                                 f'exactly; {CHECKPOINT} also takes "choice": review, check or stop, and any '
+                                 'takes "view", the view you gave her with it')
     arguments = parser.parse_args(argv)
     handler = {'review': command_review, 'reply': command_reply, 'decide': command_decide,
                'status': command_status, 'finish': command_finish}[arguments.command]
