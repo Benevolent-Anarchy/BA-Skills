@@ -75,7 +75,7 @@ class Repo:
 
 
 def github_url(url):
-    m=re.fullmatch(r'(?:https://(?:[^@/\s]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+)/([\w.-]+?)(?:\.git)?/?',url)
+    m=re.fullmatch(r'(?:https://(?:[^@/\s]+@)?github\.com/|git@github\.com:|ssh://git@(?:github\.com/|ssh\.github\.com:443/))([\w.-]+)/([\w.-]+?)(?:\.git)?/?',url)
     return '/'.join(m.groups()) if m else None
 
 

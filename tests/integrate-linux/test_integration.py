@@ -129,7 +129,7 @@ print(json.dumps(o))
     def test_repository_identity_refuses_off_github_rewrites(self):
         self.github()
         for kind in ['insteadOf','pushInsteadOf']:
-            for destination in ['https://secret@example.invalid/test/repo.git','git@example.invalid:test/repo.git',str(self.root/'local remote')]:
+            for destination in ['https://secret@example.invalid/test/repo.git','git@example.invalid:test/repo.git',str(self.root/'local remote'),'ssh://git@ssh.github.com.evil:443/test/repo.git','ssh://git@ssh.github.com:444/test/repo.git']:
                 with self.subTest(kind=kind,destination=destination):
                     key='url.'+destination+'.'+kind
                     self.git('config',key,'https://github.com/test/repo.git')
@@ -143,6 +143,17 @@ print(json.dumps(o))
         self.git('config','url.git@github.com:Test/Repo.git.pushInsteadOf','https://github.com/test/repo.git')
         d=self.call('retarget',branch='feature',base_branch='main',list=True)
         self.assertEqual(d['repository'],'test/repo')
+    def test_repository_identity_accepts_github_ssh_over_443(self):
+        self.github()
+        self.git('remote','set-url','origin','ssh://git@ssh.github.com:443/test/repo.git')
+        self.assertEqual(self.call('retarget',branch='feature',base_branch='main',list=True)['repository'],'test/repo')
+        self.git('remote','set-url','origin','https://github.com/test/repo.git')
+        for kind in ['insteadOf','pushInsteadOf']:
+            with self.subTest(kind=kind):
+                key='url.ssh://git@ssh.github.com:443/.'+kind
+                self.git('config',key,'https://github.com/')
+                try:self.assertEqual(self.call('retarget',branch='feature',base_branch='main',list=True)['repository'],'test/repo')
+                finally:self.git('config','--unset-all',key)
     def test_off_github_rewrite_cannot_land(self):
         head=self.branch('feature','feature');remote=self.local_remote()
         decoy=self.root/'decoy remote';subprocess.run(['git','init','--bare','-q',str(decoy)],check=True)

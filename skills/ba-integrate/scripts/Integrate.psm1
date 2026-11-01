@@ -66,10 +66,10 @@ function Hide-UrlCredentials([string]$Text) {
     return $Text -replace '(?<=[A-Za-z][A-Za-z0-9+.-]*://)[^\s/]+@', '***@'
 }
 
-# The owner/name of a github.com URL in https, ssh or scp form, credentials allowed, or
-# $null for anything else.
+# The owner/name of a GitHub URL in https, ssh or scp form, including GitHub's SSH-over-443
+# endpoint, credentials allowed, or $null for anything else.
 function ConvertFrom-GitHubUrl([string]$Url) {
-    $match = [regex]::Match($Url, '^(?:https://(?:[^@/\s]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)(?<owner>[\w.-]+)/(?<name>[\w.-]+?)(?:\.git)?/?$')
+    $match = [regex]::Match($Url, '^(?:https://(?:[^@/\s]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/|ssh://git@ssh\.github\.com:443/)(?<owner>[\w.-]+)/(?<name>[\w.-]+?)(?:\.git)?/?$')
     if (-not $match.Success) { return $null }
     return "$($match.Groups['owner'].Value)/$($match.Groups['name'].Value)"
 }

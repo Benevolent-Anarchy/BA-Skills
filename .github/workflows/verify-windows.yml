@@ -2,11 +2,15 @@ name: Windows verification
 
 on:
   pull_request:
-    paths:
-      - '**/*.ps1'
-      - '**/*.psm1'
-      - 'tests/integrate/**'
-      - '.github/workflows/verify-windows.yml'
+  push:
+    branches:
+      - 'codex/windows-verify/**'
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: 'Pushed commit, branch or tag to verify (empty uses the selected workflow ref)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -19,8 +23,44 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.revision || github.sha }}
           fetch-depth: 0
           lfs: true
+      - name: Configure Git for fixture repositories
+        shell: pwsh
+        run: |
+          git config --global user.name 'BA-Skills CI'
+          git config --global user.email 'ci@ba-skills.invalid'
+          git config --global core.longpaths true
+      - name: Install Godot 4.7
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'godot-4.7-win64.zip'
+          $directory = Join-Path $env:RUNNER_TEMP 'godot-4.7'
+          Invoke-WebRequest 'https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_win64.exe.zip' -OutFile $archive
+          $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($digest -ne '02a5312236f4e0209c78bcb2f52135b1963e6b8888c873c9cee81459e60bcd71') { throw 'Godot archive digest does not match the pinned release.' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $directory
+          $godot = @(Get-ChildItem -LiteralPath $directory -Recurse -File -Filter '*_console.exe')
+          if ($godot.Count -ne 1) { throw 'Expected one Godot console executable.' }
+          "GODOT=$($godot[0].FullName)" >> $env:GITHUB_ENV
+      - name: Provision WSL for shared-state path tests
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'ubuntu-jammy-wsl.rootfs.tar.gz'
+          $directory = Join-Path $env:RUNNER_TEMP 'ba-wsl'
+          Invoke-WebRequest 'https://cloud-images.ubuntu.com/wsl/releases/jammy/20240304/ubuntu-jammy-wsl-amd64-wsl.rootfs.tar.gz' -OutFile $archive
+          $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($digest -ne 'de9f6149da07b90350a3ccd94b4858b82fef71f0ec2982acb93de583c4c87585') { throw 'Ubuntu rootfs digest does not match the pinned image.' }
+          New-Item -ItemType Directory -Path $directory -Force | Out-Null
+          wsl.exe --import BA-Verify $directory $archive --version 1
+          if ($LASTEXITCODE -ne 0) { throw 'WSL import failed.' }
+          wsl.exe --set-default BA-Verify
+          if ($LASTEXITCODE -ne 0) { throw 'Setting the default WSL distribution failed.' }
+          wsl.exe --exec wslpath -a -u $env:LOCALAPPDATA
+          if ($LASTEXITCODE -ne 0) { throw 'WSL path translation failed.' }
+          wsl.exe --exec sh -lc 'command -v cat && command -v sh'
+          if ($LASTEXITCODE -ne 0) { throw 'Required WSL commands are unavailable.' }
       - name: Record host and tool versions
         shell: pwsh
         run: |
@@ -29,6 +69,7 @@ jobs:
           git --version
           cargo --version
           rustc --version
+          & $env:GODOT --version
       - name: Run the Windows gate
         shell: pwsh
         run: pwsh -NoProfile -File tools/verify.ps1
