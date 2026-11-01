@@ -690,7 +690,7 @@ class CrossReview(unittest.TestCase):
         for text in ('Cicely, who owns the project, chose a focused check', 'F1 (minor, widget.py:2): No test',
                      'Claude fixed it: Added one.', "Claude declined it: The name is the project's.",
                      "the project's tests among them", 'there is no network', 'about 1M tokens, cached ones included, and 20 minutes',
-                     'stopped and reports nothing', f'{self.head}..{head}'):
+                     'stopped and reports nothing', "don't list it again in `problems`", f'{self.head}..{head}'):
             self.assertIn(text, call['stdin'])
         body = self.posts()[3]['body']
         self.assertTrue(body.startswith(f'[Codex] Cross-review of #7: the check after round 1, at {head[:7]}\n\nChecked.'))

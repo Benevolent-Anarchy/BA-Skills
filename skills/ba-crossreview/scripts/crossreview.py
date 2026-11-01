@@ -199,9 +199,10 @@ The findings, and {author}'s answers:
 Check only these. Give each its id and a verdict: `verified` when the fix is in {head} and is right, or the \
 answer shows the finding was wrong; `problem` when it isn't, saying why; `not verified` when you couldn't tell. \
 Cicely's decisions settle what they cover, and a minor or nit finding declined with a reason is settled unless the \
-reason is wrong on the facts. In `evidence`, cite files and lines, and the tests you ran and what they showed. List \
-a problem in `problems` only if one of these fixes, or the commits since {previous_head}, introduced it, and leave \
-everything else out.
+reason is wrong on the facts. In `evidence`, cite files and lines, and the tests you ran and what they showed.
+
+A fix that is missing or wrong is that finding's `problem` verdict: don't list it again in `problems`. List there only \
+a new problem that one of these fixes, or the commits since {previous_head}, introduced, and leave everything else out.
 
 {tools}
 
