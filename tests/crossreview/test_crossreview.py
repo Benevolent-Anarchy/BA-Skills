@@ -4,6 +4,7 @@ Each test builds a local origin and clone whose configured remote names a GitHub
 the local origin for fetches. Fake gh, codex and claude commands stand in for GitHub and the reviewers,
 so no test touches the network or a real agent.
 """
+import fcntl
 import json
 import os
 import shutil
@@ -37,19 +38,16 @@ class CrossReview(unittest.TestCase):
         self.repo = self.root / 'clone [literal]'
         self.fixture = self.root / 'fixture'
         self.temp = self.root / 'temp'
+        self.codex_home = self.root / 'codex home'
         bin = self.root / 'bin'
-        for path in (self.repo, self.fixture, self.temp, bin):
+        for path in (self.repo, self.fixture, self.temp, self.codex_home, bin):
             path.mkdir()
+        self.bin = bin
         for tool in ('gh', 'codex', 'claude'):
-            if os.name == 'nt':
-                (bin / f'{tool}.cmd').write_text(f'@"{sys.executable}" "{FAKE}" {tool} %*\r\n', encoding='utf-8')
-            else:
-                wrapper = bin / tool
-                wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE}" {tool} "$@"\n', encoding='utf-8')
-                wrapper.chmod(0o755)
+            self.fake(tool)
         self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GH_REPO='wrong/repository',
                         PYTHONDONTWRITEBYTECODE='1', BA_CROSSREVIEW_FAKE=str(self.fixture), CLAUDECODE='1',
-                        TMPDIR=str(self.temp), TEMP=str(self.temp), TMP=str(self.temp),
+                        TMPDIR=str(self.temp), TEMP=str(self.temp), TMP=str(self.temp), CODEX_HOME=str(self.codex_home),
                         PATH=str(bin) + os.pathsep + os.environ.get('PATH', ''))
         subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.origin)], env=self.env, check=True)
         self.git('init', '-q', '-b', 'main')
@@ -73,6 +71,11 @@ class CrossReview(unittest.TestCase):
                    'url': 'https://github.com/fixture/repo/pull/7'}
         self.write_pr()
         self.queue()
+
+    def fake(self, tool):
+        wrapper = self.bin / tool
+        wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE}" {tool} "$@"\n', encoding='utf-8')
+        wrapper.chmod(0o755)
 
     def remove(self):
         def writable(function, path, _):
@@ -137,8 +140,16 @@ class CrossReview(unittest.TestCase):
                         encoding='utf-8')
         return self.script('reply', '--replies', str(path), ok=ok)
 
+    def decide(self, *decisions, ok=True):
+        path = self.root / 'decisions.json'
+        path.write_text(json.dumps([{'id': id, 'decision': decision} for id, decision in decisions]), encoding='utf-8')
+        return self.script('decide', '--decisions', str(path), ok=ok)
+
     def option(self, args, flag):
         return args[args.index(flag) + 1]
+
+    def ledger(self):
+        return self.repo / '.git/ba-crossreview'
 
     def test_codex_reviews_claudes_pull_request_read_only_at_the_pushed_head(self):
         self.queue(review(finding('No test for widget', 'minor', file=None, line=None, id='X-9'),
@@ -152,14 +163,21 @@ class CrossReview(unittest.TestCase):
         self.assertEqual(call['args'][0], 'exec')
         self.assertNotIn('resume', call['args'])
         self.assertIn('sandbox_mode="read-only"', call['args'])
+        self.assertIn('--ignore-user-config', call['args'])
+        self.assertIn('--ignore-rules', call['args'])
+        self.assertFalse([arg for arg in call['args'] if arg.startswith('model')])
         self.assertIn('--output-schema', call['args'])
         self.assertIn('--json', call['args'])
         worktree = Path(call['cwd'])
         self.assertFalse(worktree.samefile(self.repo))
         self.assertTrue(str(worktree.resolve()).startswith(str(self.temp.resolve())))
         self.assertEqual(self.git('rev-parse', 'HEAD', cwd=worktree), self.head)
+        change = worktree.with_name(worktree.name + '.change')
+        self.assertIn('+def widget():', (change / 'change.diff').read_text(encoding='utf-8'))
+        self.assertIn('Add the widget', (change / 'commits.txt').read_text(encoding='utf-8'))
         for text in ('You are Codex', 'pull request #7', 'fixture/repo', '"Add the widget"', 'which Claude wrote',
-                     f'git diff {self.base}...{self.head}', 'Closes #3', 'AGENTS.md'):
+                     f'git diff {self.base}...{self.head}', str(change / 'change.diff'), str(change / 'commits.txt'),
+                     'Closes #3', 'AGENTS.md', 'commands that only read', 'status` "question"'):
             self.assertIn(text, call['stdin'])
         comment, = self.comments()
         self.assertEqual(comment['repo'], 'fixture/repo')
@@ -179,15 +197,18 @@ class CrossReview(unittest.TestCase):
         self.assertEqual(args[0], '-p')
         self.assertNotIn('--resume', args)
         self.assertEqual(self.option(args, '--permission-mode'), 'dontAsk')
-        self.assertEqual(self.option(args, '--tools'), 'Read,Grep,Glob,Bash')
+        self.assertEqual(self.option(args, '--tools'), 'Read,Grep,Glob')
+        self.assertIn('--restricted', args)
+        self.assertIn('--strict-mcp-config', args)
+        self.assertFalse([arg for arg in args if 'Bash' in arg or arg.startswith('--allowed')])
         self.assertEqual(self.option(args, '--output-format'), 'json')
         self.assertEqual(json.loads(self.option(args, '--json-schema'))['required'], ['summary', 'findings'])
-        allowed = args[args.index('--allowedTools') + 1:args.index('--disallowedTools')]
-        self.assertTrue(allowed and all(tool.startswith('Bash(git ') for tool in allowed))
-        self.assertIn('Bash(git push:*)', args[args.index('--disallowedTools') + 1:])
+        change = Path(self.option(args, '--add-dir'))
+        self.assertEqual(change.name, Path(call['cwd']).name + '.change')
+        self.assertIn('+def widget():', (change / 'change.diff').read_text(encoding='utf-8'))
         self.assertIsNone(call['claudecode'])
-        self.assertIn('You are Claude', call['stdin'])
-        self.assertIn('which Codex wrote', call['stdin'])
+        for text in ('You are Claude', 'which Codex wrote', str(change / 'change.diff'), 'only the Read, Grep and Glob'):
+            self.assertIn(text, call['stdin'])
         self.assertTrue(self.comments()[0]['body'].startswith('[Claude] Cross-review of #7, round 1'))
 
     def test_answers_must_cover_exactly_the_open_findings(self):
@@ -232,14 +253,18 @@ class CrossReview(unittest.TestCase):
         self.assertIn('sandbox_mode="read-only"', call['args'])
         self.assertEqual(Path(call['cwd']), Path(first_call['cwd']))
         self.assertEqual(self.git('rev-parse', 'HEAD', cwd=Path(call['cwd'])), head)
+        change = Path(call['cwd']).with_name(Path(call['cwd']).name + '.change')
+        self.assertIn('+    return a + b', (change / 'since.diff').read_text(encoding='utf-8'))
+        self.assertIn('Fix it', (change / 'since.txt').read_text(encoding='utf-8'))
         for text in ('round 2', f'from {self.head} to {head}', 'F1 (blocker, widget.py:2)', 'Claude fixed it: Adds now.',
-                     'Claude declined it: test_widget covers it.'):
+                     'Claude declined it: test_widget covers it.', str(change / 'since.diff')):
             self.assertIn(text, call['stdin'])
         self.assertNotIn('You are Codex', call['stdin'])
         body = self.comments()[2]['body']
         self.assertIn('- **F3** · major · `widget.py:2` · The fix broke negatives *(new)*', body)
         self.assertIn("  > test_widget doesn't call add.", body)
-        self.assertIn("doesn't call add.\n\n**Resolved**\n- **F1** · Subtracts instead of adding\n  > Fixed.", body)
+        self.assertIn("doesn't call add.\n\n**Resolved**\n- **F1** · Subtracts instead of adding\n  It breaks.\n  > Fixed.",
+                      body)
         self.assertEqual(first['session'], 'codex-thread-1')
 
     def test_the_claude_reviewer_resumes_its_own_session(self):
@@ -250,7 +275,7 @@ class CrossReview(unittest.TestCase):
         result = self.review('codex')
         self.assertEqual((result['resumed'], result['turn']), (True, 'done'))
         self.assertEqual(self.option(self.calls('claude')[1]['args'], '--resume'), 'claude-session-1')
-        self.assertTrue(self.comments()[2]['body'].endswith('**Resolved**\n- **F1** · One\n\nNothing is open.\n'))
+        self.assertTrue(self.comments()[2]['body'].endswith('**Resolved**\n- **F1** · One\n  It breaks.\n\nNothing is open.\n'))
 
     def test_a_session_that_cannot_be_resumed_starts_again_with_the_history(self):
         self.queue(review(finding('One')))
@@ -284,29 +309,71 @@ class CrossReview(unittest.TestCase):
         finished = self.script('finish')
         self.assertTrue(finished['removed'])
         self.assertFalse(worktree.exists())
+        self.assertFalse(worktree.with_name(worktree.name + '.change').exists())
         self.assertNotIn(worktree.name, self.git('worktree', 'list'))
         self.assertEqual(self.script('status')['turn'], 'done')
 
-    def test_escalated_findings_go_to_cicely_and_leave_the_loop(self):
+    def test_an_escalated_finding_pauses_for_cicely_and_her_decision_goes_to_the_reviewer(self):
         self.queue(review(finding('Should this be a plugin?'), finding('One', 'minor')))
         self.review()
         result = self.reply(('F1', 'escalated', 'Cicely decides the architecture.'), ('F2', 'declined', 'Not a bug.'))
-        self.assertEqual((result['escalated'], result['turn']), (['F1'], 'review'))
-        self.queue(review(finding('Should this be a plugin?', id='F1'), finding('One', 'minor', id='F2', status='resolved')))
+        self.assertEqual((result['pending'], result['turn']), (['F1'], 'cicely'))
+        self.assertIn('for Cicely', self.comments()[1]['body'])
+        self.assertIn('Cicely has to decide F1 first', self.review(ok=False)['error'])
+        self.assertEqual(len(self.calls('codex')), 1)
+        self.assertIn('Undecided: F1', self.decide(ok=False)['error'])
+        self.assertIn('Not waiting or repeated: F2', self.decide(('F1', 'Leave it.'), ('F2', 'No.'), ok=False)['error'])
+        self.assertIn("needs Cicely's answer", self.decide(('F1', ' '), ok=False)['error'])
+        result = self.decide(('F1', 'Keep it a module for now.\nI will plan plugins later.'))
+        self.assertEqual(result['turn'], 'review')
+        self.assertEqual(self.comments()[2]['body'], "[Claude] Cicely's decisions on the cross-review, after round 1\n\n"
+                         '- **F1** · Should this be a plugin?\n  > Keep it a module for now.\n  > I will plan plugins later.\n')
+        self.queue(review(finding('Should this be a plugin?', id='F1', status='resolved'),
+                          finding('One', 'minor', id='F2', status='resolved')))
         result = self.review()
-        self.assertEqual((result['open'], result['resolved'], result['escalated'], result['turn']),
-                         ([], ['F2'], ['F1'], 'done'))
+        self.assertEqual((result['open'], result['resolved'], result['turn']), ([], ['F1', 'F2'], 'done'))
         prompt = self.calls('codex')[1]['stdin']
-        self.assertIn('taken these to Cicely, so leave them out:\n- F1: Should this be a plugin?', prompt)
-        self.assertNotIn('Claude escalated it', prompt)
+        for text in ('Claude took it to Cicely: Cicely decides the architecture.',
+                     'Cicely decided: Keep it a module for now.', 'Claude declined it: Not a bug.', 'her decisions settle'):
+            self.assertIn(text, prompt)
         status = self.script('status')
-        self.assertEqual(status['escalated'][0]['note'], 'Cicely decides the architecture.')
+        self.assertEqual((status['pending'], status['escalated'][0]['note']), ([], 'Cicely decides the architecture.'))
+        self.assertEqual(status['decisions'][0]['decisions'][0]['id'], 'F1')
+        self.assertEqual(len(status['comments']), 4)
 
-    def test_escalating_everything_ends_the_loop(self):
+    def test_escalating_everything_still_pauses_for_cicely(self):
         self.queue(review(finding('Should this be a plugin?')))
         self.review()
-        self.assertEqual(self.reply(('F1', 'escalated', 'For Cicely.'))['turn'], 'done')
-        self.assertIn('for Cicely', self.comments()[1]['body'])
+        self.assertEqual(self.reply(('F1', 'escalated', 'For Cicely.'))['turn'], 'cicely')
+        self.assertEqual(self.script('status')['turn'], 'cicely')
+        self.assertEqual(self.decide(('F1', 'Leave it.'))['turn'], 'review')
+
+    def test_a_question_from_the_reviewer_pauses_for_cicely_before_the_author_answers(self):
+        self.queue(review(finding('One', 'minor'), finding('Is the widget meant to be public?', status='question',
+                                                           detail='Only Cicely knows who calls it.')))
+        result = self.review()
+        self.assertEqual(result['turn'], 'cicely')
+        self.assertEqual([(item['id'], item['status']) for item in result['questions']], [('F1', 'question')])
+        self.assertEqual([item['id'] for item in result['open']], ['F2'])
+        self.assertIn('**For Cicely to decide**\n- **F1** · `widget.py:2` · Is the widget meant to be public?\n'
+                      '  Only Cicely knows who calls it.', self.comments()[0]['body'])
+        self.assertIn('Cicely has to decide F1 first', self.reply(('F2', 'declined', 'No.'), ok=False)['error'])
+        result = self.decide(('F1', 'Yes, keep it public.'))
+        self.assertEqual(result['turn'], 'reply')
+        self.assertEqual([(item['id'], item.get('decision')) for item in result['open']],
+                         [('F1', 'Yes, keep it public.'), ('F2', None)])
+        self.assertIn('Unanswered: F1', self.reply(('F2', 'declined', 'No.'), ok=False)['error'])
+        self.reply(('F1', 'declined', 'Cicely wants it public, so nothing changes.'), ('F2', 'declined', 'No.'))
+        self.queue(review(finding('Is the widget meant to be public?', id='F1', status='resolved'),
+                          finding('One', 'minor', id='F2', status='resolved')))
+        self.assertEqual(self.review()['turn'], 'done')
+        prompt = self.calls('codex')[1]['stdin']
+        self.assertIn('Cicely decided: Yes, keep it public.\n  Claude declined it: Cicely wants it public', prompt)
+
+    def test_decide_is_refused_when_nothing_waits_for_cicely(self):
+        self.queue(review(finding('One')))
+        self.review()
+        self.assertIn('Nothing is waiting for Cicely', self.decide(('F1', 'Fine.'), ok=False)['error'])
 
     def test_findings_the_reviewer_leaves_out_stay_open(self):
         self.queue(review(finding('One'), finding('Two')))
@@ -372,6 +439,87 @@ class CrossReview(unittest.TestCase):
         self.queue(review(finding('One')))
         self.review('claude')
         self.assertIn('Claude as the author', self.review('codex', ok=False)['error'])
+
+    def test_new_commits_after_a_clean_review_are_reviewed_as_another_round(self):
+        self.queue(review(summary='Fine.'))
+        self.assertEqual(self.review()['turn'], 'done')
+        self.assertIn('the cross-review is done', self.review(ok=False)['error'])
+        head = self.push_fix()
+        self.assertEqual(self.script('status')['head'], self.head)
+        self.queue(review(summary='Still fine.'))
+        result = self.review()
+        self.assertEqual((result['round'], result['head'], result['turn']), (2, head, 'done'))
+        prompt = self.calls('codex')[1]['stdin']
+        self.assertIn('(None: nothing was open after your last review.)', prompt)
+        self.assertIn(f'from {self.head} to {head}', prompt)
+
+    def test_a_head_that_moves_while_the_reviewer_reads_is_due_another_review(self):
+        self.queue(review(summary='Fine.', prHead='b' * 40))
+        self.assertEqual(self.review()['turn'], 'review')
+
+    def test_a_second_command_is_refused_while_one_runs(self):
+        self.ledger().mkdir(parents=True)
+        with open(self.ledger() / 'fixture-repo-7.lock', 'a+b') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.queue(review(finding('One')))
+            self.assertIn('Another cross-review command is running', self.review(ok=False)['error'])
+            self.assertIn('Another cross-review command is running', self.script('finish', ok=False)['error'])
+        self.assertEqual((self.calls('codex'), self.comments()), ([], []))
+        self.assertEqual(self.review()['round'], 1)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root can write to a read-only folder')
+    def test_a_record_that_cannot_be_written_stops_the_command_before_it_posts(self):
+        self.queue(review(finding('One')))
+        self.review()
+        self.ledger().chmod(0o555)
+        try:
+            self.assertIn('Could not write the record', self.reply(('F1', 'declined', 'No.'), ok=False)['error'])
+        finally:
+            self.ledger().chmod(0o755)
+        self.assertEqual(len(self.comments()), 1)
+        self.assertEqual(self.script('status')['turn'], 'reply')
+
+    def test_git_lfs_objects_are_pulled_before_the_reviewer_reads(self):
+        self.fake('git-lfs')
+        (self.repo / '.gitattributes').write_text('*.bin filter=lfs diff=lfs merge=lfs -text\n', encoding='utf-8')
+        (self.repo / 'asset.bin').write_text('version https://git-lfs.github.com/spec/v1\n', encoding='utf-8')
+        self.git('add', '-A')
+        self.pr['headRefOid'] = self.commit('Add an asset')
+        self.write_pr()
+        (self.fixture / 'lfs-files.txt').write_text('0123456789 - asset.bin\n', encoding='utf-8')
+        self.queue(review(finding('One')))
+        self.assertIn('1 files as pointers, such as asset.bin', self.review(ok=False)['error'])
+        self.assertEqual((self.calls('codex'), self.comments()), ([], []))
+        (self.fixture / 'lfs-files.txt').write_text('0123456789 * asset.bin\n', encoding='utf-8')
+        self.review()
+        pull = [call for call in self.calls('git-lfs') if call['args'][:1] == ['pull']][-1]
+        self.assertEqual(pull['args'], ['pull', 'origin'])
+        self.assertEqual(Path(pull['cwd']), Path(self.calls('codex')[0]['cwd']))
+
+    def test_a_project_without_git_lfs_never_calls_it(self):
+        self.fake('git-lfs')
+        self.queue(review(finding('One')))
+        self.review()
+        self.assertEqual(self.calls('git-lfs'), [])
+
+    def test_codex_keeps_the_model_and_effort_its_configuration_names(self):
+        (self.codex_home / 'config.toml').write_text(
+            'model = "gpt-test"\nmodel_reasoning_effort = "xhigh"  # deep\n\n[profiles.fast]\nmodel = "other"\n',
+            encoding='utf-8')
+        self.queue(review(finding('One')))
+        self.review()
+        args = self.calls('codex')[0]['args']
+        self.assertIn('model="gpt-test"', args)
+        self.assertIn('model_reasoning_effort="xhigh"', args)
+        self.assertNotIn('model="other"', args)
+
+    def test_github_ssh_over_443_is_accepted(self):
+        url = 'ssh://git@ssh.github.com:443/fixture/repo.git'
+        self.git('config', 'remote.origin.url', url)
+        self.git('config', f'url.{self.origin}.insteadOf', url)
+        self.queue(review(finding('One')))
+        self.review()
+        self.assertEqual(self.comments()[0]['repo'], 'fixture/repo')
 
 
 if __name__ == '__main__':

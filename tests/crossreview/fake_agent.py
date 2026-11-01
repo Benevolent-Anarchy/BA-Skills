@@ -1,8 +1,9 @@
-"""Stands in for gh, codex and claude in the cross-review tests.
+"""Stands in for gh, codex, claude and git-lfs in the cross-review tests.
 
 The first argument names the tool being faked. Every call is logged to calls.jsonl in the directory
 BA_CROSSREVIEW_FAKE names, with its arguments, working directory and standard input. pr.json is what
-`gh pr view` prints; each reviewer call takes the next entry of reviews.json.
+`gh pr view` prints; each reviewer call takes the next entry of reviews.json. lfs-files.txt is what
+`git lfs ls-files` prints.
 """
 import json
 import os
@@ -48,7 +49,17 @@ if tool == 'gh':
         sys.exit(f'fixture: unexpected gh arguments {args!r}')
     sys.exit(0)
 
+if tool == 'git-lfs':
+    if args[:1] == ['ls-files']:
+        path = fixture / 'lfs-files.txt'
+        print(path.read_text(encoding='utf-8') if path.exists() else '', end='')
+    sys.exit(0)
+
 review = next_review()
+if review.get('prHead'):
+    # The pull request moves on while the reviewer reads.
+    pr = json.loads((fixture / 'pr.json').read_text(encoding='utf-8'))
+    (fixture / 'pr.json').write_text(json.dumps(dict(pr, headRefOid=review['prHead'])), encoding='utf-8')
 time.sleep(review.get('sleep', 0))
 resuming = (tool == 'codex' and args[1:2] == ['resume']) or (tool == 'claude' and '--resume' in args)
 if review.get('exit') or (resuming and review.get('resumeFails')):

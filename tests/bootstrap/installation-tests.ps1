@@ -53,7 +53,6 @@ Test 'bootstrap installation root selects skills and preflights the entire selec
     Write-FixtureText "$repo/skills/ba-release/SKILL.md" 'Fixture release skill'
     Write-FixtureText "$repo/skills/ba-bootstrap/SKILL.md" 'Fixture bootstrap skill'
     Write-FixtureText "$repo/skills/ba-integrate/SKILL.md" 'Fixture integrate skill'
-    Write-FixtureText "$repo/skills/ba-crossreview/SKILL.md" 'Fixture cross-review skill'
     Write-FixtureText "$repo/install.ps1" ([IO.File]::ReadAllText("$root/install.ps1"))
     $moduleText=[IO.File]::ReadAllText("$root/skills/ba-release/scripts/Install.psm1")
     $discovery=@'
