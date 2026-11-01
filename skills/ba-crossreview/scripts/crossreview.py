@@ -1026,8 +1026,10 @@ def normalize(output: object, expected: dict[str, dict], next_number: int,
         finding = finding_from(raw)
         if not first and finding['id'] in expected and finding['id'] not in seen:
             seen.add(finding['id'])
-            if expected[finding['id']].get('decision'):
-                finding['decision'] = expected[finding['id']]['decision']
+            # Cicely's decision, and the author's view she read with it, stay with the finding while it is open.
+            for key in ('decision', 'view'):
+                if expected[finding['id']].get(key):
+                    finding[key] = expected[finding['id']][key]
             findings.append(finding)
         elif finding['status'] != 'resolved':
             new.append(dict(finding, new=True, reply=None))

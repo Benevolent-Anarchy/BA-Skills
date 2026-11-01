@@ -442,18 +442,25 @@ class CrossReview(unittest.TestCase):
                      '- Asked of you: F1', '- Open, for Claude to answer: F2'):
             self.assertIn(text, result['briefing'])
         self.assertIn('Cicely has to decide F1 first', self.reply(('F2', 'declined', 'No.'), ok=False)['error'])
-        result = self.decide(('F1', 'Yes, keep it public.'))
+        result = self.decide(('F1', 'Yes, keep it public.', None, 'Keeping it public costs nothing now.'))
         self.assertIn('Codex asks you this about `widget.py:2`', self.posts()[1]['body'])
         self.assertEqual(result['turn'], 'reply')
         self.assertEqual([(item['id'], item.get('decision')) for item in result['open']],
                          [('F1', 'Yes, keep it public.'), ('F2', None)])
         self.assertIn('Unanswered: F1', self.reply(('F2', 'declined', 'No.'), ok=False)['error'])
         self.reply(('F1', 'declined', 'Cicely wants it public, so nothing changes.'), ('F2', 'declined', 'No.'))
-        self.queue(review(finding('Is the widget meant to be public?', id='F1', status='resolved'),
+        # Codex found that a finding re-listed as open kept her decision but lost the view she read with it.
+        self.queue(review(finding('Is the widget meant to be public?', id='F1', reply='The docstring says private.'),
                           finding('One', 'minor', id='F2', status='resolved')))
-        self.assertEqual(self.review()['turn'], 'done')
+        self.assertEqual(self.review()['turn'], 'reply')
         prompt = self.calls('codex')[1]['stdin']
         self.assertIn('Cicely decided: Yes, keep it public.\n  Claude declined it: Cicely wants it public', prompt)
+        self.reply(('F1', 'declined', 'The docstring is out of date, not the decision.'))
+        self.queue(review(finding('Is the widget meant to be public?', id='F1', status='resolved')))
+        self.assertEqual(self.review()['turn'], 'done')
+        prompt = self.calls('codex')[2]['stdin']
+        self.assertIn("Claude's view, which she read before deciding: Keeping it public costs nothing now.\n"
+                      '  Cicely decided: Yes, keep it public.', prompt)
 
     def test_decide_is_refused_when_nothing_waits_for_cicely(self):
         self.queue(review(finding('One')))
