@@ -921,9 +921,9 @@ def limit_lines(state: dict, item: dict) -> list[str]:
     """Whether to have another round when the rounds are used up and something is left unreviewed."""
     reviewer, author = AGENTS[state['reviewer']], AGENTS[state['author']]
     last = state['rounds'][-1]
-    number, took, answers = last['round'], cost(last), last['answers'] or {}
+    number, took, answers = last['round'], cost(last), last['answers']
     lines = [f'#### {item["title"]}']
-    if answers.get('head') == item['head']:
+    if answers:
         left = f'{author}\'s answers to round {number} unchecked'
         notes = {reply['id']: reply for reply in answers['replies']}
         lines.append(f'All {state["maxRounds"]} rounds are used, and {reviewer} hasn\'t checked {author}\'s answers to '
@@ -934,6 +934,10 @@ def limit_lines(state: dict, item: dict) -> list[str]:
             if finding['id'] in notes:
                 reply = notes[finding['id']]
                 lines.append(f'  - {author} {reply["action"]} it: {short(reply["note"], 300)}')
+        if answers['head'] != item['head']:
+            left = f'{author}\'s answers to round {number}, and the commits since, unchecked'
+            lines += ['', f'Nor has {reviewer} reviewed the commits pushed since those answers, up to '
+                          f'`{item["head"][:7]}`.']
     else:
         left = f'the commits since round {number} unreviewed'
         lines.append(f'All {state["maxRounds"]} rounds are used, and the commits pushed since round {number}, up to '
@@ -1022,10 +1026,12 @@ def next_lines(state: dict, move: str) -> list[str]:
                     'pull request ready is your call.']
     if move == 'stopped':
         asked = checkpoint(last)
-        answers = last['answers'] or {}
-        if answers.get('head') == asked['head']:
+        answers = last['answers']
+        if answers:
             unchecked = ', '.join(f'{reply["id"]} ({ACTIONS[reply["action"]]})' for reply in answers['replies'])
             left = f'{reviewer} didn\'t check {author}\'s last answers: {unchecked}.'
+            if answers['head'] != asked['head']:
+                left += ' Nor did it review the commits pushed since them.'
         else:
             left = f'{reviewer} didn\'t review the commits since round {last["round"]}.'
         return ['', f'**You stopped it** after round {last["round"]}, at `{asked["head"][:7]}`. {left} Marking the '

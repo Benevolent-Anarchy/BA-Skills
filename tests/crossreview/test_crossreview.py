@@ -602,15 +602,17 @@ class CrossReview(unittest.TestCase):
         result = self.review()
         self.assertEqual((result['reviewed'], result['turn'], result['pending']), (False, 'cicely', ['next-round']))
         self.assertEqual(len(self.calls('codex')), 1)
-        for text in (f"the commits pushed since round 1, up to `{head[:7]}`, haven't been reviewed",
-                     'Stopping leaves the commits since round 1 unreviewed.'):
+        for text in ("All 1 rounds are used, and Codex hasn't checked Claude's answers to round 1:",
+                     '  - Claude declined it: Not a bug.',
+                     f'Nor has Codex reviewed the commits pushed since those answers, up to `{head[:7]}`.',
+                     "Stopping leaves Claude's answers to round 1, and the commits since, unchecked."):
             self.assertIn(text, result['briefing'])
         self.assertIn(result['briefing'], self.status_comment()['body'])
         self.assertEqual(self.script('status')['turn'], 'cicely')
         result = self.decide(('next-round', 'Still no.', 'stop'))
         self.assertEqual(result['turn'], 'stopped')
-        self.assertIn(f"**You stopped it** after round 1, at `{head[:7]}`. Codex didn't review the commits since "
-                      'round 1.', result['briefing'])
+        self.assertIn(f"**You stopped it** after round 1, at `{head[:7]}`. Codex didn't check Claude's last answers: "
+                      'F1 (declined). Nor did it review the commits pushed since them.', result['briefing'])
         self.assertIn('Cicely stopped the cross-review after round 1', self.review(ok=False)['error'])
         self.assertEqual([record['decisions'][0]['decision'] for record in self.script('status')['decisions']],
                          ['Leave it there.', 'Still no.'])
@@ -618,8 +620,12 @@ class CrossReview(unittest.TestCase):
     def test_commits_after_a_clean_last_round_go_to_cicely(self):
         self.queue(review(summary='Fine.'))
         self.assertEqual(self.review('claude', '--max-rounds', '1')['turn'], 'done')
-        self.push_fix()
-        self.assertEqual(self.review()['pending'], ['next-round'])
+        head = self.push_fix()
+        result = self.review()
+        self.assertEqual(result['pending'], ['next-round'])
+        for text in (f"All 1 rounds are used, and the commits pushed since round 1, up to `{head[:7]}`, haven't been "
+                     'reviewed.', 'Stopping leaves the commits since round 1 unreviewed.'):
+            self.assertIn(text, result['briefing'])
         self.assertEqual(self.decide(('next-round', 'Yes, review those.', 'review'))['turn'], 'review')
         self.queue(review(summary='Still fine.'))
         self.assertEqual(self.review()['round'], 2)
