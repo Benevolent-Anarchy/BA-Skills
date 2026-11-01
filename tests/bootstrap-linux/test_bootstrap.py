@@ -67,6 +67,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertTrue(json.loads(result.stdout)['Passed'])
         self.assertFalse(list(project.rglob('__pycache__')))
+    def test_generated_contract_carries_the_privacy_policy(self):
+        project=self.root/'project'
+        self.b.write_manifest(project,self.b.foundation(self.identity,self.selection))
+        contract=(project/'AGENTS.md').read_text()
+        self.assertIn('19. Keep players\' data on their own machines. Never upload crash reports, telemetry or analytics automatically, not even anonymised ones',contract)
+        self.assertIn('the original failure always surfaces',contract)
     def test_manifest_conflicts_are_atomic_and_symlinks_refused(self):
         project = self.root / 'project'; project.mkdir()
         (project / 'z').write_text('existing')

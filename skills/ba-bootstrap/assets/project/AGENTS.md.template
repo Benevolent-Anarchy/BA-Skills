@@ -38,6 +38,8 @@ This is the canonical working process for every agent. Read docs/NEXT.md for ori
 
 18. Put exports in `dist/`. Keep generated caches, dependencies and local tooling ignored; retain required source, lockfiles, Godot UID/import sidecars and Tauri icons/capabilities in Git.
 
+19. Keep players' data on their own machines. Never upload crash reports, telemetry or analytics automatically, not even anonymised ones: write diagnostics to local files, and keep offline play unaffected. Remote reporting may only come later as something the player explicitly starts or opts into, with clear disclosure of what will be sent and only the data it needs. Code that records a failure must handle its own errors, so that the original failure always surfaces. Do not build an endpoint or an upload merely to satisfy a finding that assumes one. This is Cicely's privacy policy, decided 2026-11-01.
+
 ## Selected preset: {{PRESET_NAME}}
 
 {{PRESET_SETUP}}
