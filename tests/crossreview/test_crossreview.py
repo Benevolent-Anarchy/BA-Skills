@@ -691,7 +691,9 @@ class CrossReview(unittest.TestCase):
         for text in ('Cicely, who owns the project, chose a focused check', 'F1 (minor, widget.py:2): No test',
                      'Claude fixed it: Added one.', "Claude declined it: The name is the project's.",
                      "the project's tests among them", 'there is no network', 'about 1M tokens, cached ones included, and 20 minutes',
-                     'either way it reports nothing', "don't list it again in `problems`", f'{self.head}..{head}'):
+                     'stopped and reports nothing', "don't list it again in `problems`", f'{self.head}..{head}',
+                     "When Cicely chose this, she said, word for word:\n\n> Just check those two, quickly.\n\nWhat she "
+                     'says there settles what it covers.'):
             self.assertIn(text, call['stdin'])
         body = self.posts()[3]['body']
         self.assertTrue(body.startswith(f'[Codex] Cross-review of #7: the check after round 1, at {head[:7]}\n\nChecked.'))
@@ -768,11 +770,11 @@ class CrossReview(unittest.TestCase):
         body = self.posts()[3]['body']
         for text in ('The check used about 600k tokens, past its limit of 500k, and was stopped.',
                      'with limits of 500k tokens and 20 min',
-                     '**It was stopped at its token limit before it reported**',
+                     '**It was stopped at its token limit**',
                      '**Not verified**\n- **F1** · minor · `widget.py:2` · One\n  The check was stopped at its token '
                      'limit before it reported.'):
             self.assertIn(text, body)
-        for text in ('and was stopped at its token limit before it reported.', '(stopped at its token limit)'):
+        for text in ('reached its token limit before it reported', '(stopped at its token limit)'):
             self.assertIn(text, result['briefing'])
         self.assertFalse(Path(self.calls('codex')[1]['tmpdir']).exists())
         self.decide(('next-round', 'Once more, with less time.', 'check'))
@@ -781,31 +783,31 @@ class CrossReview(unittest.TestCase):
         self.assertEqual((result['check'], result['stopped'], result['turn']), (2, 'time', 'cicely'))
         self.assertIn('did not finish within 0.02 minutes', self.posts()[5]['body'])
 
-    def test_a_check_that_finishes_past_its_token_limit_reports_nothing(self):
-        # Codex found that only the running count was held to the limit, so a final one past it was accepted.
-        self.queue(review(finding('One', 'minor')))
+    def test_a_check_that_finishes_past_its_token_limit_keeps_what_it_found_with_a_warning(self):
+        # Codex found that a final count past the limit went unremarked; Cicely chose to keep such a result, with a
+        # warning, rather than waste it.
+        self.queue(review(finding('One', 'minor'), finding('Two', 'minor')))
         self.review()
-        self.reply(('F1', 'declined', 'Not a bug.'))
+        self.reply(('F1', 'declined', 'Not a bug.'), ('F2', 'declined', 'Nor this.'))
         self.decide(('next-round', 'A cheap check, then.', 'check'))
-        self.queue(check(('F1', 'verified', 'Fine.'), tokens=[200000],
+        self.queue(check(('F1', 'verified', 'Fine.'), ('F2', 'not verified', 'Ran out of room.'), tokens=[200000],
                          usage={'input': 600000, 'cached': 300000, 'output': 15000}))
         result = self.review('claude', '--budget-tokens', '500000')
-        self.assertEqual((result['stopped'], result['verified'], result['unverified'], result['turn']),
-                         ('token', [], ['F1'], 'cicely'))
+        self.assertEqual((result['stopped'], result['overran'], result['verified'], result['unverified']),
+                         (None, True, ['F1'], ['F2']))
+        self.assertEqual(result['turn'], 'cicely')
         self.assertEqual(result['usage'], {'input': 600000, 'cached': 300000, 'output': 15000})
         body = self.posts()[3]['body']
-        for text in ('The check finished past its token limit: it used about 615k tokens, against a limit of 500k. A '
-                     'check past its limit reports nothing, so what it found is set aside.',
-                     '**It finished past its token limit, and what it found was set aside**, so nothing it was to '
-                     'check is verified.',
-                     '**Not verified**\n- **F1** · minor · `widget.py:2` · One\n  The check finished past its token '
-                     'limit, and what it found was set aside.'):
+        for text in ('**It finished past its token limit,** at about 615k tokens: the running count lags by a step, so '
+                     "it wasn't stopped in time. What it found is kept.",
+                     '**Verified**\n- **F1** · minor · `widget.py:2` · One\n  Fine.'):
             self.assertIn(text, body)
-        for text in ('and finished past its token limit, and what it found was set aside.', '(past its token limit)'):
+        for text in ('took 0 min and about 615k tokens (300k cached), past its token limit of 500k.',
+                     '1 verified, 1 not verified (past its token limit)'):
             self.assertIn(text, result['briefing'])
         # Without its session log, the check couldn't be held to its limit, so it isn't run on.
         self.decide(('next-round', 'Try once more.', 'check'))
-        self.queue(check(('F1', 'verified', 'Fine.'), session='codex-check-2', noRollout=True))
+        self.queue(check(('F2', 'verified', 'Fine.'), session='codex-check-2', noRollout=True))
         error = self.review(ok=False)['error']
         self.assertIn("The check was stopped before it could run past its token limit unseen: Codex's session log, "
                       'which has its running token count, wasn\'t found under ', error)
@@ -842,10 +844,9 @@ class CrossReview(unittest.TestCase):
         self.queue(check(('F1', 'verified', 'Fine.'), streamed={'input_tokens': 600, 'output_tokens': 0},
                          usage={'input': 2000, 'cached': 0, 'output': 0}))
         result = self.review('codex', '--budget-tokens', '1000')
-        self.assertEqual((result['check'], result['stopped'], result['verified'], result['unverified']),
-                         (3, 'token', [], ['F1']))
-        self.assertIn('The check finished past its token limit: it used about 2k tokens, against a limit of 1k.',
-                      self.posts()[7]['body'])
+        self.assertEqual((result['check'], result['stopped'], result['overran'], result['verified'], result['turn']),
+                         (3, None, True, ['F1'], 'done'))
+        self.assertIn('**It finished past its token limit,** at about 2k tokens', self.posts()[7]['body'])
 
     def test_a_round_after_a_check_starts_afresh_and_past_the_limit_raises_it(self):
         self.queue(review(finding('One', detail='It breaks on Sundays.')))
@@ -870,7 +871,7 @@ class CrossReview(unittest.TestCase):
         for text in ('You are Codex', "a focused check of Claude's answers ran in another session",
                      "The check couldn't verify it: No Sunday in the tests.", 'Claude fixed it: Handles Sundays now.',
                      'This is round 2', f'moved from {self.head} to {fix}', f'{self.head}..{fix}',
-                     f'the changes since {self.head} introduced'):
+                     f'the changes since {self.head} introduced', 'she said, word for word:\n\n> Do a full round.'):
             self.assertIn(text, call['stdin'])
         since = re.search(r'`git diff \S+ \S+`, are in `([^`]+)`', call['stdin']).group(1)
         self.assertIn('+    return a + b', Path(since).read_text(encoding='utf-8'))

@@ -207,9 +207,8 @@ a new problem that one of these fixes, or the commits since {previous_head}, int
 {tools}
 
 You have about {budget} tokens, cached ones included, and {minutes} minutes. A check that runs past either is \
-stopped, and one that finishes past its tokens is set aside: either way it reports nothing. So check the answers \
-that matter most first, and answer while you have room to: mark what you didn't reach `not verified`. Don't \
-commit, push or post anything: your answer is only the JSON.
+stopped and reports nothing, so check the answers that matter most first, and answer while you have room to: mark \
+what you didn't reach `not verified`. Don't commit, push or post anything: your answer is only the JSON.
 """
 
 
@@ -222,12 +221,11 @@ class TimedOut(Refusal):
 
 
 class LimitReached(Refusal):
-    """A focused check ran into its token or time limit and was stopped, or `finished` past its token limit;
-    `usage` is what it had used by then."""
+    """A focused check ran into its token or time limit and was stopped; `usage` is what it had used by then."""
 
-    def __init__(self, message: str, limit: str, usage: dict, finished: bool = False) -> None:
+    def __init__(self, message: str, limit: str, usage: dict) -> None:
         super().__init__(message)
-        self.limit, self.usage, self.finished = limit, usage, finished
+        self.limit, self.usage = limit, usage
 
 
 def now() -> str:
@@ -672,24 +670,11 @@ def tokens(usage: dict) -> int:
     return usage['input'] + usage['output']
 
 
-def over_budget(budget: int | None, usage: dict, finished: bool = False) -> None:
-    """Stops a focused check that has used more than its budget, by raising inside the reader of its output, or,
-    once it has `finished`, sets aside its report if its final count is past the budget."""
-    if not budget or tokens(usage) <= budget:
-        return
-    if finished:
-        raise LimitReached(f'The check finished past its token limit: it used about {amount(tokens(usage))} tokens, '
-                           f'against a limit of {amount(budget)}. A check past its limit reports nothing, so what it '
-                           'found is set aside.', 'token', dict(usage), True)
-    raise LimitReached(f'The check used about {amount(tokens(usage))} tokens, past its limit of {amount(budget)}, '
-                       'and was stopped.', 'token', dict(usage))
-
-
-def stop_words(round: dict) -> str:
-    """How a focused check met its limit, after "The check" or "It"."""
-    if round.get('finished'):
-        return f'finished past its {round["stopped"]} limit, and what it found was set aside'
-    return f'was stopped at its {round["stopped"]} limit before it reported'
+def over_budget(budget: int | None, usage: dict) -> None:
+    """Stops a focused check that has used more than its budget, by raising inside the reader of its output."""
+    if budget and tokens(usage) > budget:
+        raise LimitReached(f'The check used about {amount(tokens(usage))} tokens, past its limit of {amount(budget)}, '
+                           'and was stopped.', 'token', dict(usage))
 
 
 def rollout_home() -> Path:
@@ -726,8 +711,8 @@ def run_codex(executable: str, worktree: Path, change: Path, prompt: str, sessio
 
         def count() -> None:
             # Codex's JSON output gives the tokens only at the end, but its session log has a running total. The
-            # budget is checked as Codex logs it, so a check can overrun it by a step; its final count is checked
-            # again when it finishes.
+            # budget is checked as Codex logs it, so a check can overrun it by a step; one that finishes past it
+            # keeps what it found, with a warning.
             if not found['log'] and found['thread']:
                 found['log'] = rollout(found['thread'])
             if not found['log']:
@@ -1135,7 +1120,11 @@ def check_comment(state: dict, round: dict) -> str:
                  f'with limits of {amount(limits["tokens"])} tokens and {limits["minutes"]:g} min, and took '
                  f'{cost(round) or "no time to speak of"}. ' + tested(state['reviewer'], True))
     if round.get('stopped'):
-        lines += ['', f'**It {stop_words(round)}**, so nothing it was to check is verified.']
+        lines += ['', f'**It was stopped at its {round["stopped"]} limit** before it reported, so nothing it was to '
+                      'check is verified.']
+    if round.get('overran'):
+        lines += ['', f'**It finished past its token limit,** at about {amount(tokens(round["usage"]))} tokens: the '
+                      'running count lags by a step, so it wasn\'t stopped in time. What it found is kept.']
     sections = [('Verified', [finding for finding in round['findings'] if finding.get('verdict') == 'verified']),
                 ('Problems', [finding for finding in round['findings']
                               if finding.get('verdict') == 'problem' or finding['new']]),
@@ -1364,7 +1353,8 @@ def after_check_lines(state: dict, item: dict) -> list[str]:
     lines = [f'#### {item["title"]}',
              f'You chose a focused check of {author}\'s answers. {capital(label(last))}, at `{last["head"][:7]}`, took '
              f'{cost(last) or "no time to speak of"}'
-             + (f', and {stop_words(last)}.' if last.get('stopped') else '.')]
+             + (f', past its token limit of {amount(last["limits"]["tokens"])}' if last.get('overran') else '')
+             + (f', and reached its {last["stopped"]} limit before it reported.' if last.get('stopped') else '.')]
     verified = [finding['id'] for finding in last['findings'] if finding.get('verdict') == 'verified']
     if verified:
         lines.append(f'- Verified: {", ".join(verified)}')
@@ -1473,7 +1463,9 @@ def rounds_table(state: dict) -> list[str]:
             found = ('; '.join(part for part in (found, f'{sum(new.values())} new' if new else '') if part)
                      or 'nothing checked')
             if round.get('stopped'):
-                found += f' ({"past" if round.get("finished") else "stopped at"} its {round["stopped"]} limit)'
+                found += f' (stopped at its {round["stopped"]} limit)'
+            if round.get('overran'):
+                found += ' (past its token limit)'
         resolved = sum(finding['status'] == 'resolved' for finding in round['findings'])
         if resolved and not round.get('check'):
             found += f'; {resolved} resolved'
@@ -1577,11 +1569,21 @@ def history(state: dict, found: dict[str, dict], author: str, fresh: bool) -> st
     return '\n'.join(lines)
 
 
+def said(state: dict) -> str:
+    """Cicely's own words when she chose the round or check about to run. What she said there about a finding, such
+    as how a fix should work, settles it as her decisions on findings do, so the reviewer reads them too."""
+    asked = checkpoint(state['rounds'][-1])
+    if not asked or asked.get('choice') in (None, 'stop') or not asked.get('decision'):
+        return ''
+    return ('\n\nWhen Cicely chose this, she said, word for word:\n\n' + '\n'.join(quoted(asked['decision']))
+            + '\n\nWhat she says there settles what it covers.')
+
+
 def later_prompt(context: dict, state: dict, fresh: str | None) -> str:
     """The prompt for a later round: to resume the reviewer's session, or, with a `fresh` start's opening, such as
     RESUME_LOST, to start a new one."""
-    answered = history(state, checkable(state), context['author'], fresh is not None) \
-        or '(None: nothing was open after your last review.)'
+    answered = (history(state, checkable(state), context['author'], fresh is not None)
+                or '(None: nothing was open after your last review.)') + said(state)
     later = LATER_ROUND.format(**context, answers=answered)
     if fresh is None:
         return later
@@ -1589,7 +1591,7 @@ def later_prompt(context: dict, state: dict, fresh: str | None) -> str:
 
 
 def check_prompt(context: dict, state: dict, found: dict[str, dict], budget: int, minutes: float) -> str:
-    return CHECK.format(**dict(context, answers=history(state, found, context['author'], True),
+    return CHECK.format(**dict(context, answers=history(state, found, context['author'], True) + said(state),
                                tools=CHECK_TOOLS[state['reviewer']], budget=amount(budget), minutes=f'{minutes:g}'))
 
 
@@ -1718,7 +1720,7 @@ def command_review(arguments: argparse.Namespace) -> dict:
               'summary': round['summary'], 'open': open_findings(round), 'usage': round['usage'], 'turn': move,
               'pending': [item['id'] for item in pending(state)], 'maxRounds': state['maxRounds']}
     if checking:
-        result.update(check=round['check'], stopped=round['stopped'],
+        result.update(check=round['check'], stopped=round['stopped'], overran=round['overran'],
                       verified=[finding['id'] for finding in round['findings'] if finding.get('verdict') == 'verified'],
                       unverified=[finding['id'] for finding in unverified(round)])
     else:
@@ -1768,32 +1770,30 @@ def run_round(state: dict, step: dict, context: dict, expected: dict, executable
 
 def run_check(state: dict, step: dict, context: dict, expected: dict, executable: str, worktree: Path, change: Path,
               minutes: float, budget: int, next_number: int, progress: Progress) -> dict:
-    """Runs the focused check Cicely chose and adds it to the record. A check stopped at its token or time limit, or
-    that finished past its token limit, is recorded too, with nothing verified. When nothing it found is for the
-    author to answer but something is left unverified, what follows goes to Cicely at once."""
+    """Runs the focused check Cicely chose and adds it to the record. A check stopped at its token or time limit is
+    recorded too, with nothing verified; one that finished past its token limit, which the running count can miss
+    by a step, keeps what it found, marked as having overrun. When nothing it found is for the author to answer but
+    something is left unverified, what follows goes to Cicely at once."""
     scratch = scratch_folder(worktree)
     shutil.rmtree(scratch, ignore_errors=True)
     scratch.mkdir(parents=True)
     stopped = session = None
-    finished = False
     try:
         session, output, usage = REVIEWERS[state['reviewer']](
             executable, worktree, change, check_prompt(context, state, expected, budget, minutes), None, minutes * 60, progress,
             {'budget': budget, 'scratch': scratch})
-        # The running count lags by a step, or may not have been readable, so the final one decides.
-        over_budget(budget, usage, finished=True)
         summary, findings = judge(output, expected, next_number)
     except LimitReached as reached:
-        stopped, usage, summary, finished = reached.limit, reached.usage, str(reached), reached.finished
-        how = stop_words({'stopped': stopped, 'finished': finished})
+        stopped, usage, summary = reached.limit, reached.usage, str(reached)
         findings = sorted((dict(finding, status='unverified', verdict='not verified', new=False,
-                                reply=f'The check {how}.')
+                                reply=f'The check was stopped at its {stopped} limit before it reported.')
                            for finding in expected.values()), key=order)
     # The check's own session is kept with it: the reviewer's review session goes on without it.
     round = dict(step, head=context['head'], base=context['base'], mergeBase=context['merge_base'],
                  startedAt=progress.now['startedAt'], reviewedAt=now(), usage=usage, session=session,
-                 limits={'tokens': budget, 'minutes': minutes}, stopped=stopped, finished=finished, summary=summary,
-                 findings=findings, commentUrl=None, answers=None)
+                 limits={'tokens': budget, 'minutes': minutes}, stopped=stopped,
+                 overran=not stopped and tokens(usage) > budget, summary=summary, findings=findings,
+                 commentUrl=None, answers=None)
     state['rounds'].append(round)
     if not open_findings(round) and unverified(round):
         ask_next_round(state, 'check', context['head'])
