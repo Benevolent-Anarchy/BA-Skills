@@ -1,2 +1,5 @@
 .test-results/
 __pycache__/
+
+# Python tooling caches
+*.py[cod]
