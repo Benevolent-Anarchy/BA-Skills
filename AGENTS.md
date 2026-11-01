@@ -1,5 +1,11 @@
 # BA-Skills agent notes
 
+## Working principles
+
+- **Mistakes and dead-ends:** the aim is the best software we can build, not being right or looking good. Record mistakes and dead-ends as plainly as successes, in the pull request, the Issue or the skill's documentation: what was tried, what went wrong, why, and what changed, so that every agent and person working here can learn from them. Never hide or soften a mistake, and don't erase its trace when you fix it.
+- **On the record:** keep Cicely's decisions and words on the record, so that a decision which later proves wrong can be traced and undone. "On the record" means somewhere durable she can see: the pull request, an Issue, or a committed file. A scratch file, a local or faked test fixture, a temporary folder or an agent's private memory is never the record. When her words land in one, for example during a test, say so plainly at the time, and copy them somewhere durable before it goes. Never delete or overwrite a record of her decisions or words; if in doubt, ask her.
+- **Privacy:** BA projects never upload crash reports, telemetry or analytics automatically, as rule 19 of the [generated project contract](skills/ba-bootstrap/assets/project/AGENTS.md.template) states. The skills here follow it too.
+
 ## Integrating pull requests
 
 When Cicely asks for the ready pull requests, the ones no longer drafts, to be merged together, use the `ba-integrate` skill from this repository. It rehearses every merge in a scratch worktree before anything lands, and merges once she approves the plan. What it needs to know about this project:
