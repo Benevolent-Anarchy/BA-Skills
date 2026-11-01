@@ -244,6 +244,27 @@ Test 'prepare resumes at the same version and publish reports partial failures p
     Add-Content (Join-Path $prepared.statePath 'notes.md') 'Changed after approval'
     Expect-Error { Invoke-ReleasePublish -StatePath $prepared.statePath -ButlerExecutable $butler } 'approval'
 }
+Test 'artifact validation accepts ordinal journal order without changing approval' {
+    $statePath = Join-Path $sandbox 'ordinal-artifact-state'
+    $directory = Join-Path $statePath 'builds/1'
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $files = @(foreach ($name in @('Z.txt','a.txt',([string][char]0x00e4+'.txt'))) {
+        $payload = Join-Path $directory $name
+        [IO.File]::WriteAllBytes($payload,[Text.Encoding]::UTF8.GetBytes($name))
+        [ordered]@{path='builds/1/'+$name;size=(Get-Item $payload).Length;sha256=(Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()}
+    })
+    $artifact = [ordered]@{preset='Linux';directory='builds/1';files=$files;sourceCommit=('a'*40)}
+    $state = @{artifacts=@($artifact);approval=@{artifactsSha256='retained-approval'}}
+    $before = $state | ConvertTo-Json -Depth 15 -Compress
+    & (Get-Module Release) {param($path,$value) Assert-ReleaseArtifacts $path $value} $statePath $state
+    Assert (($state | ConvertTo-Json -Depth 15 -Compress) -ceq $before) 'Validation rewrote the approved journal order or approval.'
+    $invalid = $before | ConvertFrom-Json -AsHashtable
+    $invalid.artifacts[0].files += $invalid.artifacts[0].files[0]
+    Expect-Error {& (Get-Module Release) {param($path,$value) Assert-ReleaseArtifacts $path $value} $statePath $invalid} 'artifact'
+    [IO.File]::WriteAllText((Join-Path $directory 'a.txt'),'tampered')
+    Expect-Error {& (Get-Module Release) {param($path,$value) Assert-ReleaseArtifacts $path $value} $statePath $state} 'artifact'
+}
+
 Test 'artifact tampering and interrupted publication cannot silently resume' {
     $repo = New-Fixture 'tamper'
     $prepared = Invoke-ReleasePrepare $repo @('itch-windows') (Join-Path $sandbox 'tamper-state') $engine

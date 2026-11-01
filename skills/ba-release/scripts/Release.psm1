@@ -485,7 +485,18 @@ function Assert-ReleaseArtifacts([string]$StatePath, $State) {
     foreach ($artifact in $State.artifacts) {
         $directory = Resolve-ReleasePath $StatePath $artifact.directory -MustExist
         $current = Get-ReleaseArtifact $StatePath $directory $artifact.preset $artifact['sourceCommit']
-        if (($current | ConvertTo-Json -Depth 15 -Compress) -cne ($artifact | ConvertTo-Json -Depth 15 -Compress)) { throw "Prepared artifact changed: $($artifact.preset)." }
+        # Native journals use ordinal path order; Sort-Object uses culture rules.
+        # Match complete file records by exact path without rewriting approval data.
+        $changed = $current.Count -ne $artifact.Count -or $current.preset -cne $artifact.preset -or $current.directory -cne $artifact.directory -or $current['sourceCommit'] -cne $artifact['sourceCommit'] -or $current.files.Count -ne $artifact.files.Count
+        $filesByPath = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+        foreach ($file in $current.files) {$filesByPath.Add($file.path,$file)}
+        foreach ($file in $artifact.files) {
+            if (-not $filesByPath.ContainsKey($file.path)) {$changed=$true; break}
+            $actual=$filesByPath[$file.path]
+            if ($actual.Count -ne $file.Count -or $actual.size -ne $file.size -or $actual.sha256 -cne $file.sha256) {$changed=$true; break}
+            $null=$filesByPath.Remove($file.path)
+        }
+        if ($changed -or $filesByPath.Count) { throw "Prepared artifact changed: $($artifact.preset)." }
     }
 }
 

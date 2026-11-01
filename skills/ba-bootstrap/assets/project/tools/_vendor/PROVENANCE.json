@@ -1,22 +1,69 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "packages": {
     "markdown-it-py": {
       "version": "4.2.0",
       "upstream": "https://github.com/executablebooks/markdown-it-py",
       "license": "MIT/Expat",
-      "source": "Kubuntu installed Python source, /usr/lib/python3/dist-packages",
-      "changes": "None; only Python runtime sources and complete packaged copyright notice retained."
+      "source": {
+        "copiedFrom": "Kubuntu installed Python source, /usr/lib/python3/dist-packages",
+        "distribution": {
+          "name": "Ubuntu",
+          "version": "26.10",
+          "package": "python3-markdown-it",
+          "packageVersion": "4.2.0-3"
+        },
+        "pypi": {
+          "metadataUrl": "https://pypi.org/pypi/markdown-it-py/4.2.0/json",
+          "artifacts": [
+            {
+              "filename": "markdown_it_py-4.2.0-py3-none-any.whl",
+              "url": "https://files.pythonhosted.org/packages/b3/81/4da04ced5a082363ecfa159c010d200ecbd959ae410c10c0264a38cac0f5/markdown_it_py-4.2.0-py3-none-any.whl",
+              "sha256": "9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a"
+            },
+            {
+              "filename": "markdown_it_py-4.2.0.tar.gz",
+              "url": "https://files.pythonhosted.org/packages/06/ff/7841249c247aa650a76b9ee4bbaeae59370dc8bfd2f6c01f3630c35eb134/markdown_it_py-4.2.0.tar.gz",
+              "sha256": "04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49"
+            }
+          ]
+        }
+      },
+      "changes": "None to Python sources; runtime sources and Debian copyright notice retained, with upstream licence files copied verbatim from the PyPI wheel."
     },
     "mdurl": {
       "version": "0.1.2",
       "upstream": "https://github.com/executablebooks/mdurl",
       "license": "MIT/Expat",
-      "source": "Kubuntu installed Python source, /usr/lib/python3/dist-packages",
-      "changes": "None; only Python runtime sources and complete packaged copyright notice retained."
+      "source": {
+        "copiedFrom": "Kubuntu installed Python source, /usr/lib/python3/dist-packages",
+        "distribution": {
+          "name": "Ubuntu",
+          "version": "26.10",
+          "package": "python3-mdurl",
+          "packageVersion": "0.1.2-1build1"
+        },
+        "pypi": {
+          "metadataUrl": "https://pypi.org/pypi/mdurl/0.1.2/json",
+          "artifacts": [
+            {
+              "filename": "mdurl-0.1.2-py3-none-any.whl",
+              "url": "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl",
+              "sha256": "84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8"
+            },
+            {
+              "filename": "mdurl-0.1.2.tar.gz",
+              "url": "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz",
+              "sha256": "bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba"
+            }
+          ]
+        }
+      },
+      "changes": "None to Python sources; runtime sources and Debian copyright notice retained, with upstream licence files copied verbatim from the PyPI wheel."
     }
   },
   "files": {
+    "README.txt": "e08e506e63cc347f261c868965e1a08c28dceabfb2c47c96c5003e60518fbd70",
     "markdown_it/__init__.py": "adbd33b1e6cd46a4fc62f727627b10a55eb46f39f7edb751ee89a3f5fa284395",
     "markdown_it/_compat.py": "5384bfdb2df380b6557cc7a71d16891415bccaa87699406e236f752c6415389f",
     "markdown_it/_punycode.py": "26f48e649e152abe7ccfbba71463342a17d3c6a1cc936c3c82097169ed90b333",
@@ -84,12 +131,15 @@
     "markdown_it/tree.py": "8f58ff2e8f13ceb4fd2ef6d0334f58ce01d984c3e8d281499c1634053038d7f9",
     "markdown_it/utils.py": "95d8a894bafee3524ea287a13d9e7e4fe41d5976180bc3474b2b62aa079969fd",
     "markdown_it-COPYRIGHT.txt": "2a32bb2fab93b2445d04ba03261efa8b44bb315e05e508068a62bb3967f95a1c",
+    "markdown_it-LICENSE.markdown-it.txt": "792c48c5a849a15fdf9e37e8bcf9e6d1dd13b32b46c642a748a0a46a9919d473",
+    "markdown_it-LICENSE.txt": "4a2260d6e2cd0f5a151a1e86dbfe7d3ed552b1e2beabf9941c1ba5c49cbce484",
     "mdurl/__init__.py": "d6fa44f3d3725e7888459342ff87fa04f9b751be1b3e7b637f2ca12d147ba295",
     "mdurl/_decode.py": "dd0fe00d0a94fff4ef0dbbbbc7e6fd2e36d5978416cb983fa85c258dcbaf37f6",
     "mdurl/_encode.py": "82824b505b75878ad564daaa9bdb75e4dc365be6c55d8404cb7691d352265afb",
     "mdurl/_format.py": "c5972dd2675e3d70341f7900ab18c6b650793bce86df90c060c1a4038e02981e",
     "mdurl/_parse.py": "7b365290cdbfe0d436671d38eec11d7091bb3584111478992bb63c20d1c5cf06",
     "mdurl/_url.py": "e6442745037603f1b8b2f2e747365c1b46dfa03f406c1ad80d7a2eb031d9df3d",
-    "mdurl-COPYRIGHT.txt": "403f103300fea86101911c04341ec71ea24c9cc857e28e5ed706dd9c4b735fbf"
+    "mdurl-COPYRIGHT.txt": "403f103300fea86101911c04341ec71ea24c9cc857e28e5ed706dd9c4b735fbf",
+    "mdurl-LICENSE.txt": "7c605df6e28667a9603118e98274f64a49ce3eed0d26fccce9534a345e0ef955"
   }
 }
