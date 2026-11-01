@@ -8,11 +8,11 @@ import sys
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--skill',choices=['all','ba-bootstrap','ba-integrate','ba-release'],default='all')
+    p.add_argument('--skill',choices=['all','ba-bootstrap','ba-integrate','ba-release','ba-crossreview'],default='all')
     p.add_argument('--home',type=Path,default=Path.home())
     p.add_argument('--check-only',action='store_true')
     a=p.parse_args();root=Path(__file__).resolve().parents[1]
-    names=['ba-bootstrap','ba-integrate','ba-release'] if a.skill=='all' else [a.skill]
+    names=['ba-bootstrap','ba-integrate','ba-release','ba-crossreview'] if a.skill=='all' else [a.skill]
     selected=[]
     for name in names:
         source=(root/'skills'/name).resolve(strict=True)

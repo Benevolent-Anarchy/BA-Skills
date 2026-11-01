@@ -212,6 +212,7 @@ print(json.dumps(o))
         p=subprocess.run(cmd,capture_output=True,text=True);self.assertNotEqual(p.returncode,0);self.assertTrue((target/'mine').exists());self.assertFalse((home/'.agents/skills/ba-bootstrap').exists())
         (target/'mine').unlink();target.rmdir();p=subprocess.run(cmd,capture_output=True,text=True);self.assertEqual(p.returncode,0,p.stderr)
         self.assertEqual((home/'.agents/skills/ba-integrate').resolve(),(ROOT/'skills/ba-integrate').resolve())
+        self.assertEqual((home/'.claude/skills/ba-crossreview').resolve(),(ROOT/'skills/ba-crossreview').resolve())
         p=subprocess.run(cmd+['--check-only'],capture_output=True,text=True);self.assertEqual(p.returncode,0,p.stderr)
 
     def test_survey_live_paginates_reviews_and_reports_all(self):
@@ -274,22 +275,22 @@ print(json.dumps(o))
         self.assertEqual(p.returncode,0,p.stderr);self.assertFalse(home.exists())
     def test_aggregate_gate_does_not_hide_a_failure(self):
         root=self.root/'gate fixture';(root/'tools').mkdir(parents=True);shutil.copy(ROOT/'tools/verify.sh',root/'tools/verify.sh')
-        for suite,code in [('bootstrap',0),('integrate',17),('release',0)]:
-            path=root/'tests'/(suite+'-linux');path.mkdir(parents=True);(path/'run-tests.sh').write_text('#!/bin/sh\necho '+suite+'\nexit '+str(code)+'\n')
-        p=subprocess.run(['bash',str(root/'tools/verify.sh')],capture_output=True,text=True);self.assertEqual(p.returncode,1);self.assertIn('release',p.stdout);self.assertNotIn('Verification passed',p.stdout)
+        for suite,code in [('bootstrap-linux',0),('integrate-linux',17),('release-linux',0),('crossreview',0)]:
+            path=root/'tests'/suite;path.mkdir(parents=True);(path/'run-tests.sh').write_text('#!/bin/sh\necho '+suite+'\nexit '+str(code)+'\n')
+        p=subprocess.run(['bash',str(root/'tools/verify.sh')],capture_output=True,text=True);self.assertEqual(p.returncode,1);self.assertIn('release',p.stdout);self.assertIn('crossreview',p.stdout);self.assertNotIn('Verification passed',p.stdout)
     def test_aggregate_gate_ignores_cdpath_for_relative_invocation(self):
         root=self.root/'gate fixture';decoy=self.root/'decoy'
         (root/'tools').mkdir(parents=True);(decoy/'tools').mkdir(parents=True)
         shutil.copy(ROOT/'tools/verify.sh',root/'tools/verify.sh')
         for directory,code in [(root,0),(decoy,77)]:
-            for suite in ['bootstrap','integrate','release']:
-                path=directory/'tests'/(suite+'-linux');path.mkdir(parents=True)
+            for suite in ['bootstrap-linux','integrate-linux','release-linux','crossreview']:
+                path=directory/'tests'/suite;path.mkdir(parents=True)
                 (path/'run-tests.sh').write_text('#!/bin/sh\necho '+suite+'-fixture\nexit '+str(code)+'\n')
         for cdpath in ['.:',str(decoy)+':.']:
             with self.subTest(cdpath=cdpath):
                 p=subprocess.run(['bash','tools/verify.sh'],cwd=root,env=dict(self.env,CDPATH=cdpath),capture_output=True,text=True)
                 self.assertEqual(p.returncode,0,(p.stdout,p.stderr))
-                for suite in ['bootstrap','integrate','release']:self.assertIn(suite+'-fixture',p.stdout)
+                for suite in ['bootstrap-linux','integrate-linux','release-linux','crossreview']:self.assertIn(suite+'-fixture',p.stdout)
     def test_direct_release_runner_does_not_run_cdpath_decoy_suite(self):
         root=self.root/'suite fixture';decoy=self.root/'decoy'
         for directory,body in [(root,"self.fail('intended suite executed')"),(decoy,'pass')]:

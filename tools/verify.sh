@@ -3,10 +3,10 @@
 set -uo pipefail
 root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || exit 1
 failed=0
-for suite in bootstrap integrate release; do
-  printf '\nRunning %s Linux tests\n' "$suite"
-  if ! bash "$root/tests/$suite-linux/run-tests.sh"; then
-    printf 'FAILED: %s Linux tests\n' "$suite" >&2
+for suite in bootstrap-linux integrate-linux release-linux crossreview; do
+  printf '\nRunning %s tests\n' "$suite"
+  if ! bash "$root/tests/$suite/run-tests.sh"; then
+    printf 'FAILED: %s tests\n' "$suite" >&2
     failed=1
   fi
 done
