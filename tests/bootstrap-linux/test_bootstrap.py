@@ -67,6 +67,15 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertTrue(json.loads(result.stdout)['Passed'])
         self.assertFalse(list(project.rglob('__pycache__')))
+    def test_generated_contract_carries_the_privacy_policy(self):
+        project=self.root/'project'
+        self.b.write_manifest(project,self.b.foundation(self.identity,self.selection))
+        contract=(project/'AGENTS.md').read_text()
+        self.assertIn('19. Keep players\' data on their own machines. Never upload crash reports, telemetry or analytics automatically, not even anonymised ones',contract)
+        self.assertIn('the original failure always surfaces',contract)
+        self.assertIn('20. Keep Cicely\'s decisions and words on the record',contract)
+        self.assertIn('The aim is the best software we can build, not being right or looking good.',contract)
+        self.assertIn('Never delete or overwrite a record of her decisions or words',contract)
     def test_manifest_conflicts_are_atomic_and_symlinks_refused(self):
         project = self.root / 'project'; project.mkdir()
         (project / 'z').write_text('existing')

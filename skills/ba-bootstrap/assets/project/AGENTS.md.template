@@ -2,6 +2,8 @@
 
 This is the canonical working process for every agent. Read docs/NEXT.md for orientation. The documentation vault is docs/; wikilinks use that root, Markdown links use the note location. No agent-specific workflow or plugin is required.
 
+The aim is the best software we can build, not being right or looking good. Record mistakes and dead-ends as plainly as successes, in the pull request, the Issue or a decision record: what was tried, what went wrong, why, and what changed, so that every agent and person working here can learn from them. Never hide or soften a mistake, and don't erase its trace when you fix it.
+
 1. Read `docs/NEXT.md` for orientation at session start and retrieve all open Issues, using pagination rather than accepting a tool's default truncated list. Labels and milestones show the kind of work and planned deliverables; dependencies and sub-issues stay with the Issues.
 
 2. Select work within the human's current direction. Inspect linked Issues and PRs before duplicating work. Record discussion and unresolved questions in Issues rather than creating a second task queue in documentation.
@@ -37,6 +39,10 @@ This is the canonical working process for every agent. Read docs/NEXT.md for ori
 17. Keep temporary execution plans in ignored scratch space or the active conversation. Promote durable conclusions to design notes, decisions or judgements, unfinished work to Issues, and orientation to `NEXT.md`.
 
 18. Put exports in `dist/`. Keep generated caches, dependencies and local tooling ignored; retain required source, lockfiles, Godot UID/import sidecars and Tauri icons/capabilities in Git.
+
+19. Keep players' data on their own machines. Never upload crash reports, telemetry or analytics automatically, not even anonymised ones: write diagnostics to local files, and keep offline play unaffected. Remote reporting may only come later as something the player explicitly starts or opts into, with clear disclosure of what will be sent and only the data it needs. Code that records a failure must handle its own errors, so that the original failure always surfaces. Do not build an endpoint or an upload merely to satisfy a finding that assumes one. This is Cicely's privacy policy, decided 2026-11-01.
+
+20. Keep Cicely's decisions and words on the record, so that a decision which later proves wrong can be traced and undone. "On the record" means somewhere durable she can see: the pull request, an Issue, or a committed decision or judgement. A scratch file, a local or faked test fixture, a temporary folder or an agent's private memory is never the record; when her words land in one, say so plainly at the time and copy them somewhere durable before it goes. Never delete or overwrite a record of her decisions or words; if in doubt, ask her.
 
 ## Selected preset: {{PRESET_NAME}}
 
