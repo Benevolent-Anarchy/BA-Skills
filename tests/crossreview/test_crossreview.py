@@ -45,6 +45,13 @@ def review(*findings, summary='Reviewed.', **extra):
     return dict({'output': {'summary': summary, 'findings': list(findings)}}, **extra)
 
 
+def check(*verdicts, problems=(), summary='Checked.', **extra):
+    """A focused check's answer, with (id, verdict, evidence) tuples."""
+    return dict({'output': {'summary': summary, 'problems': list(problems),
+                            'verdicts': [dict(zip(('id', 'verdict', 'evidence'), verdict)) for verdict in verdicts]}},
+                **extra)
+
+
 class CrossReview(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix='ba crossreview ü '))
@@ -453,7 +460,9 @@ class CrossReview(unittest.TestCase):
                      "Claude's answers changed 6 lines", 'changed fewer than 200 lines',
                      'round 1 took 0 min and about 1.2M tokens (900k cached).',
                      '1. **Another round** (round 2 of 3): Codex checks the answers to F1, F2 and the 6 changed lines',
-                     "2. **Stop here:** The cross-review ends at", "Codex won't check the fixes to F1.",
+                     '2. **A focused check** of F1, F2: Codex checks only those, in a fresh session, within 1M tokens '
+                     'and 20 min', 'Codex may run the tests, in a sandbox', "It doesn't count as a round",
+                     "3. **Stop here:** The cross-review ends at", "Codex won't check the fixes to F1.",
                      'The declines of F2 stand.'):
             self.assertIn(text, result['briefing'])
         self.assertIn('Cicely has to decide next-round first', self.review(ok=False)['error'])
@@ -574,7 +583,7 @@ class CrossReview(unittest.TestCase):
                      '- **F1** · major · One', '  - Codex: It breaks on Sundays.',
                      '  - Claude fixed it: Handles Sundays now.', 'round 1 took 0 min and about 1.2M tokens',
                      "Stopping leaves Claude's answers to round 1 unchecked.", '1. **Another round** (round 2)',
-                     '2. **Stop here:** the cross-review ends at'):
+                     '2. **A focused check** of F1: Codex checks only that', '3. **Stop here:** the cross-review ends at'):
             self.assertIn(text, result['briefing'])
         self.assertIn(result['briefing'], self.status_comment()['body'])
         self.assertIn('Cicely has to decide next-round first',
@@ -624,8 +633,10 @@ class CrossReview(unittest.TestCase):
         result = self.review()
         self.assertEqual(result['pending'], ['next-round'])
         for text in (f"All 1 rounds are used, and the commits pushed since round 1, up to `{head[:7]}`, haven't been "
-                     'reviewed.', 'Stopping leaves the commits since round 1 unreviewed.'):
+                     'reviewed.', 'Stopping leaves the commits since round 1 unreviewed.', '2. **Stop here:**'):
             self.assertIn(text, result['briefing'])
+        self.assertNotIn('A focused check', result['briefing'])
+        self.assertIn('nothing to check', self.decide(('next-round', 'Check them.', 'check'), ok=False)['error'])
         self.assertEqual(self.decide(('next-round', 'Yes, review those.', 'review'))['turn'], 'review')
         self.queue(review(summary='Still fine.'))
         self.assertEqual(self.review()['round'], 2)
@@ -641,6 +652,183 @@ class CrossReview(unittest.TestCase):
         self.assertEqual(status['turn'], 'stopped')
         self.assertIn(f"**You stopped it** after round 1, at `{head[:7]}`. Codex didn't review the commits since "
                       'round 1.', status['briefing'])
+
+    def test_cicely_can_choose_a_focused_check_which_codex_runs_in_a_sandbox(self):
+        self.queue(review(finding('No test', 'minor'), finding('Odd name', 'nit')))
+        self.review()
+        head = self.push_fix()
+        self.reply(('F1', 'fixed', 'Added one.'), ('F2', 'declined', "The name is the project's."))
+        result = self.decide(('next-round', 'Just check those two, quickly.', 'check'))
+        self.assertEqual(result['turn'], 'check')
+        self.assertIn('**So:** a focused check of the answers.', self.posts()[2]['body'])
+        self.assertIn('**Next:** Codex runs the focused check you chose, of F1, F2.', result['briefing'])
+        self.assertEqual(self.script('status')['turn'], 'check')
+        self.queue({'exit': 3, 'stderr': 'model overloaded'})
+        self.assertIn('Codex failed (exit 3)', self.review(ok=False)['error'])
+        self.assertIn('**The check after round 1 failed** at ', self.status_comment()['body'])
+        self.assertEqual(self.script('status')['turn'], 'check')
+        self.queue(check(('F1', 'verified', 'test_add passes, and fails with the fix undone.'),
+                         ('F2', 'not verified', 'Ran out of steps before the naming rules.'),
+                         tokens=[200000, 300000], leaves=['build.log'], session='codex-check-1',
+                         usage={'input': 280000, 'cached': 140000, 'output': 20000}))
+        result = self.review()
+        self.assertEqual((result['check'], result['round'], result['session'], result['turn'], result['pending']),
+                         (1, 1, 'codex-check-1', 'cicely', ['next-round']))
+        self.assertEqual((result['verified'], result['unverified'], result['stopped']), (['F1'], ['F2'], None))
+        call = self.calls('codex')[2]
+        self.assertNotIn('resume', call['args'])
+        for arg in ('sandbox_mode="workspace-write"', 'sandbox_workspace_write.network_access=false',
+                    'sandbox_workspace_write.exclude_slash_tmp=true',
+                    'sandbox_workspace_write.exclude_tmpdir_env_var=true', '--ignore-user-config', '--ignore-rules'):
+            self.assertIn(arg, call['args'])
+        worktree = Path(call['cwd'])
+        scratch = worktree.with_name(worktree.name + '.tmp')
+        self.assertEqual(call['tmpdir'], str(scratch))
+        self.assertIn(f'sandbox_workspace_write.writable_roots=[{json.dumps(str(scratch))}]', call['args'])
+        self.assertFalse(scratch.exists())
+        self.assertEqual(self.git('status', '--short', '--ignored', cwd=worktree), '')
+        for text in ('Cicely, who owns the project, chose a focused check', 'F1 (minor, widget.py:2): No test',
+                     'Claude fixed it: Added one.', "Claude declined it: The name is the project's.",
+                     "the project's tests among them", 'there is no network', 'about 1M tokens, cached ones included, and 20 minutes',
+                     'stopped and reports nothing', f'{self.head}..{head}'):
+            self.assertIn(text, call['stdin'])
+        body = self.posts()[3]['body']
+        self.assertTrue(body.startswith(f'[Codex] Cross-review of #7: the check after round 1, at {head[:7]}\n\nChecked.'))
+        for text in ('with limits of 1M tokens and 20 min', 'Codex could run the tests, in a sandbox',
+                     '**Verified**\n- **F1** · minor · `widget.py:2` · No test\n  test_add passes',
+                     '**Not verified**\n- **F2** · nit · `widget.py:2` · Odd name\n  Ran out of steps'):
+            self.assertIn(text, body)
+        for text in ('#### What follows the check after round 1?', 'You chose a focused check of Claude',
+                     'took 0 min and about 300k tokens', '- Verified: F1',
+                     '  - **F2** · nit · Odd name: Ran out of steps', '1. **Another round** (round 2 of 3)',
+                     '2. **A focused check** of F2:', '3. **Stop here:**', '- Not verified by a check: F2',
+                     '| [check after round 1](', '1 verified, 1 not verified'):
+            self.assertIn(text, result['briefing'])
+        result = self.decide(('next-round', 'Leave F2; the name is fine by me.', 'stop'))
+        self.assertEqual(result['turn'], 'stopped')
+        self.assertIn(f"**You stopped it** after the check after round 1, at `{head[:7]}`. The check after round 1 "
+                      "couldn't verify F2.", result['briefing'])
+        self.assertTrue(self.posts()[4]['body'].startswith('[Cee, via the skill] Decisions on the cross-review of #7, '
+                                                           'after the check after round 1'))
+        status = self.script('status')
+        self.assertEqual((status['rounds'], status['checks'], status['turn']), (1, 1, 'stopped'))
+        self.assertEqual([finding['id'] for finding in status['unverified']], ['F2'])
+
+    def test_a_checks_problems_go_to_the_author_and_another_check_can_settle_them(self):
+        self.queue(review(finding('Subtracts instead of adding', 'minor')))
+        self.review()
+        first = self.push_fix()
+        self.reply(('F1', 'fixed', 'Adds now.'))
+        self.decide(('next-round', 'Check it.', 'check'))
+        self.queue(check(('F1', 'problem', 'add(-1, 1) is still wrong: widget.py:2.'),
+                         problems=[finding('The fix drops the docstring', 'nit', line=1)]))
+        result = self.review()
+        self.assertEqual((result['turn'], [finding['id'] for finding in result['open']]), ('reply', ['F1', 'F2']))
+        body = self.posts()[3]['body']
+        self.assertIn('**Problems**\n- **F1** · minor · `widget.py:2` · Subtracts instead of adding\n  add(-1, 1) is '
+                      'still wrong', body)
+        self.assertIn('- **F2** · nit · `widget.py:1` · The fix drops the docstring *(new)*\n  It breaks.', body)
+        second = self.push_fix('def add(a, b):\n    """Adds."""\n    return b + a\n')
+        result = self.reply(('F1', 'fixed', 'Handles negatives now.'), ('F2', 'fixed', 'Docstring back.'))
+        self.assertEqual((result['turn'], result['pending']), ('cicely', ['next-round']))
+        answers = self.posts()[4]['body']
+        self.assertTrue(answers.startswith(f'[Claude] Answers to the check after round 1, at {second[:7]}'))
+        self.assertIn("The check was Cicely's choice", answers)
+        for text in ('#### What follows the check after round 1?', '- Problems it found, which Claude has answered:',
+                     '    - Claude fixed it: Handles negatives now.', '2. **A focused check** of F1, F2'):
+            self.assertIn(text, result['briefing'])
+        self.decide(('next-round', 'Check again.', 'check'))
+        self.queue(check(('F1', 'verified', 'add(-1, 1) is 0.'), ('F2', 'verified', 'The docstring is back.')))
+        result = self.review()
+        self.assertEqual((result['check'], result['turn']), (2, 'done'))
+        self.assertTrue(self.posts()[6]['body'].startswith(f'[Codex] Cross-review of #7: check 2 after round 1, at '
+                                                           f'{second[:7]}'))
+        call = self.calls('codex')[2]
+        self.assertNotIn('resume', call['args'])
+        for text in ('The check found a problem: add(-1, 1) is still wrong', 'Claude fixed it: Handles negatives now.',
+                     f'{first}..{second}'):
+            self.assertIn(text, call['stdin'])
+        self.assertIn('done, with nothing open', self.status_comment()['body'])
+
+    def test_a_check_is_stopped_at_its_limits_and_goes_back_to_cicely(self):
+        self.assertIn('--budget-tokens limits only a focused check',
+                      self.review('claude', '--budget-tokens', '5', ok=False)['error'])
+        self.queue(review(finding('One', 'minor')))
+        self.review()
+        self.reply(('F1', 'declined', 'Not a bug.'))
+        self.decide(('next-round', 'A cheap check, then.', 'check'))
+        self.queue(check(('F1', 'verified', 'Fine.'), tokens=[400000, 600000], sleep=30))
+        started = time.monotonic()
+        result = self.review('claude', '--budget-tokens', '500000')
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual((result['stopped'], result['unverified'], result['turn'], result['pending']),
+                         ('token', ['F1'], 'cicely', ['next-round']))
+        self.assertEqual(result['usage'], {'input': 600000, 'cached': 300000, 'output': 0})
+        body = self.posts()[3]['body']
+        for text in ('The check used about 600k tokens, past its limit of 500k, and was stopped.',
+                     'with limits of 500k tokens and 20 min', '**It was stopped at its token limit**',
+                     '**Not verified**\n- **F1** · minor · `widget.py:2` · One\n  The check was stopped at its token '
+                     'limit before it reported.'):
+            self.assertIn(text, body)
+        for text in ('reached its token limit before it reported', '(stopped at its token limit)'):
+            self.assertIn(text, result['briefing'])
+        self.assertFalse(Path(self.calls('codex')[1]['tmpdir']).exists())
+        self.decide(('next-round', 'Once more, with less time.', 'check'))
+        self.queue(check(('F1', 'verified', 'Fine.'), sleep=30))
+        result = self.review('claude', '--timeout-minutes', '0.02')
+        self.assertEqual((result['check'], result['stopped'], result['turn']), (2, 'time', 'cicely'))
+        self.assertIn('did not finish within 0.02 minutes', self.posts()[5]['body'])
+
+    def test_claude_checks_by_reading_only_and_says_so(self):
+        self.queue(review(finding('One', 'minor')))
+        self.review('codex')
+        result = self.reply(('F1', 'declined', 'Not a bug.'))
+        self.assertIn('2. **A focused check** of F1: Claude checks only that, in a fresh session, within 1M tokens and '
+                      '20 min unless you set other limits. Claude can only read, so it runs no tests', result['briefing'])
+        self.decide(('next-round', 'Check it.', 'check'))
+        # Each event of a message repeats its usage, so 600 tokens twice is 600, inside a budget of 1000.
+        self.queue(check(('F1', 'not verified', "I couldn't run test_widget."),
+                         streamed={'input_tokens': 600, 'output_tokens': 0}))
+        result = self.review('codex', '--budget-tokens', '1000')
+        self.assertEqual((result['stopped'], result['unverified'], result['turn']), (None, ['F1'], 'cicely'))
+        call = self.calls('claude')[1]
+        args = call['args']
+        self.assertNotIn('--resume', args)
+        self.assertEqual(self.option(args, '--tools'), 'Read,Grep,Glob')
+        self.assertIn('--restricted', args)
+        self.assertEqual(json.loads(self.option(args, '--json-schema'))['required'], ['summary', 'verdicts', 'problems'])
+        self.assertIn("you can't run commands or tests. Where a test would settle a finding", call['stdin'])
+        self.assertIn('Claude could only read, so it ran no tests', self.posts()[3]['body'])
+        self.decide(('next-round', 'Once more, smaller.', 'check'))
+        self.queue(check(('F1', 'verified', 'Fine.'), streamed={'input_tokens': 600, 'output_tokens': 0}, sleep=30))
+        result = self.review('codex', '--budget-tokens', '500')
+        self.assertEqual((result['check'], result['stopped'], result['usage']['input']), (2, 'token', 600))
+
+    def test_a_round_after_a_check_starts_afresh_and_past_the_limit_raises_it(self):
+        self.queue(review(finding('One', detail='It breaks on Sundays.')))
+        self.review('claude', '--max-rounds', '1')
+        self.push_fix()
+        self.reply(('F1', 'fixed', 'Handles Sundays now.'))
+        self.decide(('next-round', 'Check the Sunday fix.', 'check'))
+        self.queue(check(('F1', 'not verified', 'No Sunday in the tests.')))
+        result = self.review()
+        self.assertIn('1. **Another round** (round 2, past the limit of 1): a full review by Codex, in a fresh session, '
+                      'of F1', result['briefing'])
+        self.assertEqual(self.decide(('next-round', 'Do a full round.', 'review'))['turn'], 'review')
+        self.queue(review(session='codex-thread-2'))
+        result = self.review()
+        self.assertEqual((result['round'], result['resumed'], result['session'], result['maxRounds'], result['turn']),
+                         (2, False, 'codex-thread-2', 2, 'reply'))
+        self.assertEqual((result['unlisted'], 'verdict' in result['open'][0]), (['F1'], False))
+        call = self.calls('codex')[2]
+        self.assertNotIn('resume', call['args'])
+        self.assertIn('sandbox_mode="read-only"', call['args'])
+        for text in ('You are Codex', "a focused check of Claude's answers ran in another session",
+                     "The check couldn't verify it: No Sunday in the tests.", 'Claude fixed it: Handles Sundays now.',
+                     'This is round 2'):
+            self.assertIn(text, call['stdin'])
+        status = self.script('status')
+        self.assertEqual((status['rounds'], status['checks'], status['unverified']), (2, 1, []))
 
     def test_a_head_that_moved_is_refused(self):
         self.pr['headRefOid'] = self.base

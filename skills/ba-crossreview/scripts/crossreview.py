@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -32,14 +33,21 @@ from pathlib import Path
 AGENTS = {'claude': 'Claude', 'codex': 'Codex'}
 CICELY = '[Cee, via the skill]'  # The tag on the comments that record Cicely's decisions.
 SEVERITIES = ['blocker', 'major', 'minor', 'nit']
-STATUSES = ['open', 'question', 'resolved']
+# `unverified`: a focused check couldn't tell whether the author's answer holds; Cicely decides what follows.
+STATUSES = ['open', 'question', 'unverified', 'resolved']
 ACTIONS = {'fixed': 'fixed', 'declined': 'declined', 'escalated': 'for Cicely'}
 CHECKPOINT = 'next-round'  # The id of the question whether another round is worth it.
-CHOICES = {'review': 'another round', 'stop': 'the cross-review stops here'}
+CHOICES = {'review': 'another round', 'check': 'a focused check of the answers', 'stop': 'the cross-review stops here'}
+VERDICTS = {'verified': 'resolved', 'problem': 'open', 'not verified': 'unverified'}  # A check's verdict: the status.
+TALLIES = {'verified': 'verified', 'problem': 'with a problem', 'not verified': 'not verified'}
+FOUND = {'verified': 'The check verified it', 'problem': 'The check found a problem',
+         'not verified': "The check couldn't verify it"}
 SMALL_ANSWERS = 200  # Answers to only minor or nit findings that change fewer lines make the script ask first.
 STATUS_SECONDS = 120  # At most this often, the status comment shows what a running reviewer is doing.
 DEFAULT_MAX_ROUNDS = 3
 DEFAULT_TIMEOUT_MINUTES = 90
+DEFAULT_CHECK_TOKENS = 1_000_000  # Cicely's default limits for a focused check.
+DEFAULT_CHECK_MINUTES = 20
 STATE_VERSION = 1
 LOCKS = []  # Open lock files, held until the process ends.
 
@@ -75,6 +83,29 @@ REVIEW_SCHEMA = {
     'additionalProperties': False,
     'required': ['summary', 'findings'],
     'properties': {'summary': {'type': 'string'}, 'findings': {'type': 'array', 'items': FINDING_SCHEMA}},
+}
+CHECK_SCHEMA = {
+    'type': 'object',
+    'additionalProperties': False,
+    'required': ['summary', 'verdicts', 'problems'],
+    'properties': {
+        'summary': {'type': 'string'},
+        'verdicts': {'type': 'array', 'items': {
+            'type': 'object',
+            'additionalProperties': False,
+            'required': ['id', 'verdict', 'evidence'],
+            'properties': {'id': {'type': 'string'}, 'verdict': {'type': 'string', 'enum': list(VERDICTS)},
+                           'evidence': {'type': 'string'}},
+        }},
+        'problems': {'type': 'array', 'items': {
+            'type': 'object',
+            'additionalProperties': False,
+            'required': ['severity', 'file', 'line', 'title', 'detail'],
+            'properties': {'severity': {'type': 'string', 'enum': SEVERITIES}, 'file': {'type': ['string', 'null']},
+                           'line': {'type': ['integer', 'null']}, 'title': {'type': 'string'},
+                           'detail': {'type': 'string'}},
+        }},
+    },
 }
 
 INTRO = """You are {reviewer}, reviewing pull request #{number} in {repository}, "{title}", which {author} wrote. \
@@ -146,6 +177,39 @@ You reviewed this pull request before, in a session that can no longer be resume
 
 """
 
+AFTER_CHECK = """
+You reviewed this pull request before. Since then a focused check of {author}'s answers ran in another session, \
+so this review starts afresh. Where it stands is below.
+
+"""
+
+CHECK = """You are {reviewer}. {author} wrote pull request #{number} in {repository}, "{title}", and you reviewed \
+it. {author} has answered the findings below. Cicely, who owns the project, chose a focused check of those answers \
+instead of another full review, and this is that check. It runs in a fresh session, so what you need is here.
+
+Your working directory is a detached checkout of the pull request's head, {head}. The answers came after \
+{previous_head}: the commits since, `git log --first-parent --stat {previous_head}..{head}`, are in \
+`{since_commits}`, and their changes, `git diff {previous_head} {head}`, are in `{since}`. `{change}` holds the \
+whole change against {base_branch}. Read the project's AGENTS.md or CLAUDE.md where it bears on these answers.
+
+The findings, and {author}'s answers:
+
+{answers}
+
+Check only these. Give each its id and a verdict: `verified` when the fix is in {head} and is right, or the \
+answer shows the finding was wrong; `problem` when it isn't, saying why; `not verified` when you couldn't tell. \
+Cicely's decisions settle what they cover, and a minor or nit finding declined with a reason is settled unless the \
+reason is wrong on the facts. In `evidence`, cite files and lines, and the tests you ran and what they showed. List \
+a problem in `problems` only if one of these fixes, or the commits since {previous_head}, introduced it, and leave \
+everything else out.
+
+{tools}
+
+You have about {budget} tokens, cached ones included, and {minutes} minutes. A check that runs past either is \
+stopped and reports nothing, so check the answers that matter most first, and answer while you have room to: mark \
+what you didn't reach `not verified`. Don't commit, push or post anything: your answer is only the JSON.
+"""
+
 
 class Refusal(Exception):
     """A refusal or failure, reported as the command's `error`; nothing was posted unless it says so."""
@@ -153,6 +217,14 @@ class Refusal(Exception):
 
 class TimedOut(Refusal):
     """A command ran past its time limit and was stopped."""
+
+
+class LimitReached(Refusal):
+    """A focused check ran into its token or time limit and was stopped; `usage` is what it had used by then."""
+
+    def __init__(self, message: str, limit: str, usage: dict) -> None:
+        super().__init__(message)
+        self.limit, self.usage = limit, usage
 
 
 def now() -> str:
@@ -387,9 +459,17 @@ def listed_worktrees(repo: Path) -> list[str]:
     return [line[9:] for line in git(repo, 'worktree', 'list', '--porcelain').splitlines() if line.startswith('worktree ')]
 
 
+def scratch_folder(worktree: Path) -> Path:
+    """The private temp folder a focused check may write in, besides its checkout."""
+    return worktree.with_name(worktree.name + '.tmp')
+
+
 def check_out(repo: Path, worktree: Path, head: str) -> None:
+    """Puts the review checkout at `head`, with nothing in it that isn't in that commit, such as what a focused check's
+    tests left behind."""
     if worktree.exists() and any(same_path(worktree, listed) for listed in listed_worktrees(repo)):
         git(worktree, 'checkout', '--quiet', '--force', '--detach', head)
+        git(worktree, 'clean', '-ffdxq')
         return
     git(repo, 'worktree', 'prune')
     if worktree.exists():
@@ -471,6 +551,17 @@ TOOLS = {
     'claude': 'You have only the Read, Grep and Glob tools, limited to your working directory and the folder holding '
               'the change, so you can\'t run commands or tests.',
 }
+# Cicely's decision: a check may run tests, sandboxed. Claude Code's sandbox doesn't run headless here, so Claude
+# checks by reading only, and says so.
+CHECK_TOOLS = {
+    'codex': 'You may run commands, the project\'s tests among them, in a sandbox: you can write only in your working '
+             'directory and in the temp folder `$TMPDIR` names, Git can\'t write, and there is no network. You may '
+             'undo a fix to see whether a test catches it, but put it back. Whatever you leave in your working '
+             'directory is discarded after the check.',
+    'claude': 'You have only the Read, Grep and Glob tools, limited to your working directory and the folder holding '
+              'the change, so you can\'t run commands or tests. Where a test would settle a finding, say in '
+              '`evidence` that you couldn\'t run it.',
+}
 
 
 def event_of(line: str | None) -> dict:
@@ -525,9 +616,10 @@ class Progress:
     """What a running reviewer is doing. It's kept in a file beside the ledger, which `status` reads, and shown on
     the status comment at its first step and at most every STATUS_SECONDS after."""
 
-    def __init__(self, path: Path, round: int, head: str, publish) -> None:
+    def __init__(self, path: Path, work: dict, head: str, publish) -> None:
+        """`work` says what runs: its `round`, what it is `doing`, such as "reviewing round 2", and its `verb`."""
         self.path, self.publish, self.shown = path.with_name(path.stem + '.progress.json'), publish, None
-        self.now = {'pid': os.getpid(), 'round': round, 'head': head, 'startedAt': now(), 'latest': None, 'steps': 0}
+        self.now = dict(work, pid=os.getpid(), head=head, startedAt=now(), latest=None, steps=0)
         self.write()
 
     def write(self) -> None:
@@ -559,19 +651,70 @@ def running(path: Path) -> dict | None:
     return progress
 
 
+def tokens(usage: dict) -> int:
+    """Tokens in and out, cached ones included, as a round's cost counts them."""
+    return usage['input'] + usage['output']
+
+
+def over_budget(budget: int | None, usage: dict) -> None:
+    """Stops a focused check that has used more than its budget, by raising inside the reader of its output."""
+    if budget and tokens(usage) > budget:
+        raise LimitReached(f'The check used about {amount(tokens(usage))} tokens, past its limit of {amount(budget)}, '
+                           'and was stopped.', 'token', dict(usage))
+
+
+def rollout(thread: str) -> Path | None:
+    """The file Codex logs a session to as it runs, which has its running token count."""
+    home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
+    return next(iter(sorted(home.glob(f'sessions/*/*/*/rollout-*-{glob.escape(thread)}.jsonl'))), None)
+
+
 def run_codex(executable: str, worktree: Path, change: Path, prompt: str, session: str | None,
-              timeout: float, progress: Progress) -> tuple[str, dict, dict]:
+              timeout: float, progress: Progress, check: dict | None = None) -> tuple[str, dict, dict]:
+    """Runs Codex as the reviewer, or, given a `check` with its token `budget` and `scratch` folder, as a focused
+    check that may run tests."""
     with tempfile.TemporaryDirectory(prefix='ba-crossreview-') as scratch:
         schema, last = Path(scratch) / 'schema.json', Path(scratch) / 'review.json'
-        schema.write_text(json.dumps(REVIEW_SCHEMA), encoding='utf-8')
+        schema.write_text(json.dumps(CHECK_SCHEMA if check else REVIEW_SCHEMA), encoding='utf-8')
         # Read-only: the sandbox stops writes, and leaving out the user's configuration and rules leaves out its
         # plugins, MCP servers and command allowances, which act outside the sandbox. `exec resume` takes no
-        # --sandbox, so the sandbox is set as configuration for both.
+        # --sandbox, so the sandbox is set as configuration for both. A check may write only in its checkout and its
+        # own temp folder, never in /tmp at large, and has no network.
+        sandbox = ['-c', 'sandbox_mode="read-only"'] if not check else [
+            '-c', 'sandbox_mode="workspace-write"', '-c', 'sandbox_workspace_write.network_access=false',
+            '-c', 'sandbox_workspace_write.exclude_slash_tmp=true',
+            '-c', 'sandbox_workspace_write.exclude_tmpdir_env_var=true',
+            '-c', f'sandbox_workspace_write.writable_roots=[{json.dumps(str(check["scratch"]))}]']
         args = [executable, 'exec', *(['resume', session] if session else []),
-                '--ignore-user-config', '--ignore-rules', *codex_settings(),
-                '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"',
+                '--ignore-user-config', '--ignore-rules', *codex_settings(), *sandbox, '-c', 'approval_policy="never"',
                 '--output-schema', str(schema), '-o', str(last), '--json', '-']
-        found = {'thread': None, 'usage': {'input': 0, 'cached': 0, 'output': 0}}
+        env = dict(os.environ, TMPDIR=str(check['scratch'])) if check else None
+        found = {'thread': None, 'usage': {'input': 0, 'cached': 0, 'output': 0},
+                 'live': {'input': 0, 'cached': 0, 'output': 0}, 'log': None, 'read': 0}
+
+        def count() -> None:
+            # Codex's JSON output gives the tokens only at the end, but its session log has a running total. The
+            # budget is checked as Codex logs it, so a check can overrun it by a step.
+            if not found['log'] and found['thread']:
+                found['log'] = rollout(found['thread'])
+            if not found['log']:
+                return
+            try:
+                with open(found['log'], 'rb') as stream:
+                    stream.seek(found['read'])
+                    data = stream.read()
+            except OSError:
+                return
+            complete = data.rfind(b'\n') + 1
+            found['read'] += complete
+            for line in data[:complete].decode('utf-8', 'replace').splitlines():
+                payload = event_of(line).get('payload')
+                info = payload.get('info') if isinstance(payload, dict) and payload.get('type') == 'token_count' else None
+                total = info.get('total_token_usage') if isinstance(info, dict) else None
+                if isinstance(total, dict):
+                    found['live'] = {'input': int(total.get('input_tokens') or 0),
+                                     'cached': int(total.get('cached_input_tokens') or 0),
+                                     'output': int(total.get('output_tokens') or 0)}
 
         def on_line(line: str | None) -> None:
             event = event_of(line)
@@ -582,46 +725,78 @@ def run_codex(executable: str, worktree: Path, change: Path, prompt: str, sessio
                                   ('output', 'output_tokens')):
                     found['usage'][key] += int(event['usage'].get(name) or 0)
             progress.step(codex_activity(event))
+            if check and isinstance(found['thread'], str):
+                count()
+                over_budget(check['budget'], found['live'])
 
-        result = run_streaming(args, worktree, prompt, None, timeout, on_line)
+        try:
+            result = run_streaming(args, worktree, prompt, env, timeout, on_line)
+        except TimedOut as error:
+            if check:
+                count()
+                raise LimitReached(str(error), 'time', found['live']) from None
+            raise
         if result.returncode != 0 or not last.exists() or not found['thread']:
             raise Refusal(f'Codex failed (exit {result.returncode}): {tail(result.stderr or result.stdout)}')
         try:
-            return found['thread'], json.loads(last.read_text(encoding='utf-8')), found['usage']
+            return (found['thread'], json.loads(last.read_text(encoding='utf-8')),
+                    found['usage'] if tokens(found['usage']) or not check else found['live'])
         except ValueError:
             raise Refusal('Codex did not answer with JSON.')
 
 
+def claude_usage(usage: dict) -> dict:
+    cached = int(usage.get('cache_read_input_tokens') or 0)
+    return {'input': int(usage.get('input_tokens') or 0) + int(usage.get('cache_creation_input_tokens') or 0) + cached,
+            'cached': cached, 'output': int(usage.get('output_tokens') or 0)}
+
+
 def run_claude(executable: str, worktree: Path, change: Path, prompt: str, session: str | None,
-               timeout: float, progress: Progress) -> tuple[str, dict, dict]:
+               timeout: float, progress: Progress, check: dict | None = None) -> tuple[str, dict, dict]:
+    """Runs Claude as the reviewer, or, given a `check` with its token `budget`, as a focused check. Either way it
+    only reads."""
     # Read-only: only the reading tools exist, confined to the checkout and the change. Restricted mode ignores
     # settings that could allow more, and no MCP server or connector is loaded.
     args = [executable, '-p', *(['--resume', session] if session else []),
-            '--output-format', 'stream-json', '--verbose', '--json-schema', json.dumps(REVIEW_SCHEMA),
+            '--output-format', 'stream-json', '--verbose',
+            '--json-schema', json.dumps(CHECK_SCHEMA if check else REVIEW_SCHEMA),
             '--permission-mode', 'dontAsk', '--restricted', '--strict-mcp-config',
             '--tools', 'Read,Grep,Glob', '--add-dir', str(change)]
     # A Claude Code session's marker in the environment would make this look like a nested session.
     env = {name: value for name, value in os.environ.items() if name != 'CLAUDECODE'}
-    answer = {}
+    answer, messages = {}, {}
+
+    def used() -> dict:
+        # Each message's usage comes with every event of it, so it's counted once per message.
+        totals = [claude_usage(usage) for usage in messages.values()]
+        return {key: sum(total[key] for total in totals) for key in ('input', 'cached', 'output')}
 
     def on_line(line: str | None) -> None:
         event = event_of(line)
         if event.get('type') == 'result':
             answer.clear()
             answer.update(event)
+        message = event.get('message') if event.get('type') == 'assistant' else None
+        if isinstance(message, dict) and message.get('id') and isinstance(message.get('usage'), dict):
+            messages[str(message['id'])] = message['usage']
         progress.step(claude_activity(event, worktree))
+        if check:
+            over_budget(check['budget'], used())
 
-    result = run_streaming(args, worktree, prompt, env, timeout, on_line)
+    try:
+        result = run_streaming(args, worktree, prompt, env, timeout, on_line)
+    except TimedOut as error:
+        if check:
+            raise LimitReached(str(error), 'time', used()) from None
+        raise
     if result.returncode != 0 or answer.get('is_error') or not isinstance(answer.get('structured_output'), dict) \
             or not answer.get('session_id'):
         message = answer.get('result') if isinstance(answer.get('result'), str) else None
         raise Refusal(f'Claude failed (exit {result.returncode}): {message or tail(result.stderr or result.stdout, 5)}')
     usage = answer.get('usage') if isinstance(answer.get('usage'), dict) else {}
-    cached = int(usage.get('cache_read_input_tokens') or 0)
-    return answer['session_id'], answer['structured_output'], {
-        'input': int(usage.get('input_tokens') or 0) + int(usage.get('cache_creation_input_tokens') or 0) + cached,
-        'cached': cached, 'output': int(usage.get('output_tokens') or 0),
-        'cost': answer.get('total_cost_usd') if isinstance(answer.get('total_cost_usd'), (int, float)) else None}
+    return answer['session_id'], answer['structured_output'], dict(
+        claude_usage(usage),
+        cost=answer.get('total_cost_usd') if isinstance(answer.get('total_cost_usd'), (int, float)) else None)
 
 
 REVIEWERS = {'codex': run_codex, 'claude': run_claude}
@@ -656,11 +831,37 @@ def all_ids(state: dict) -> list[str]:
     return ids + [finding['id'] for finding in state['escalated']]
 
 
+def reviews(state: dict) -> int:
+    """How many full rounds of review there have been. Focused checks, kept in the same list, don't count."""
+    return sum('check' not in round for round in state['rounds'])
+
+
+def label(step: dict) -> str:
+    """A round, or a focused check, or a record of either, by name: "round 2", "the check after round 2"."""
+    if not step.get('check'):
+        return f'round {step["round"]}'
+    return (f'the check after round {step["round"]}' if step['check'] == 1
+            else f'check {step["check"]} after round {step["round"]}')
+
+
+def capital(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def step_of(round: dict) -> dict:
+    """What ties a record to a round or a check: the round's number, and the check's after it."""
+    return {'round': round['round'], **({'check': round['check']} if round.get('check') else {})}
+
+
+def same_step(item: dict, round: dict) -> bool:
+    return step_of(item) == step_of(round)
+
+
 def turn(state: dict | None, head: str | None = None) -> str:
-    """Whose move it is: review, reply, cicely (her decisions are needed first), done (nothing left between the
-    two at the reviewed head), stopped (she ended it rather than have another round) or limit (the rounds are used
-    up and something is left unreviewed, but she hasn't been asked yet; `review` asks her).
-    Given the pull request's head, a cross-review done or stopped at an earlier head is due another review."""
+    """Whose move it is: review, reply, cicely (her decisions are needed first), check (she chose a focused check),
+    done (nothing left between the two at the reviewed head), stopped (she ended it rather than have another round)
+    or limit (the rounds are used up and something is left unreviewed, but she hasn't been asked yet; `review` asks
+    her). Given the pull request's head, a cross-review done or stopped at an earlier head is due another review."""
     if not state or not state['rounds']:
         return 'review'
     if pending(state):
@@ -672,9 +873,11 @@ def turn(state: dict | None, head: str | None = None) -> str:
     asked = checkpoint(last)
     if asked and asked.get('choice') == 'stop' and (not head or head == asked['head']):
         return 'stopped'
-    if last['answers'] is None and (not head or head == last['head']):
+    if asked and asked.get('choice') == 'check':
+        return 'check'
+    if last['answers'] is None and not unverified(last) and (not head or head == last['head']):
         return 'done'
-    return 'limit' if len(state['rounds']) >= state['maxRounds'] else 'review'
+    return 'limit' if reviews(state) >= state['maxRounds'] else 'review'
 
 
 def open_findings(round: dict) -> list[dict]:
@@ -685,21 +888,49 @@ def questions(round: dict) -> list[dict]:
     return [finding for finding in round['findings'] if finding['status'] == 'question']
 
 
+def unverified(round: dict) -> list[dict]:
+    return [finding for finding in round['findings'] if finding['status'] == 'unverified']
+
+
+def checkable(state: dict) -> dict[str, dict]:
+    """What the next round or check looks at again: the findings the author answered since the last one, and those
+    a check couldn't verify, each with Cicely's decision where she made one."""
+    last = state['rounds'][-1]
+    answered = {reply['id'] for reply in (last['answers'] or {}).get('replies', [])}
+    found = {finding['id']: finding for finding in last['findings']
+             if finding['id'] in answered or finding['status'] == 'unverified'}
+    for finding in state['escalated']:
+        if same_step(finding, last) and finding['id'] in found:
+            found[finding['id']] = dict(found[finding['id']], decision=finding.get('decision'))
+    return found
+
+
+def answer_to(state: dict, identifier: str) -> dict | None:
+    """The author's latest answer to a finding."""
+    for round in reversed(state['rounds']):
+        for reply in (round['answers'] or {}).get('replies', []):
+            if reply['id'] == identifier:
+                return reply
+    return None
+
+
 def checkpoint(round: dict) -> dict | None:
-    """The latest question to Cicely whether to have another round after this one. `reply` asks it after answers to
-    only minor findings, and after answers to the last round; `review` asks it when the rounds are used up and new
+    """The latest question to Cicely whether to have another round, a focused check or neither after this one.
+    `reply` asks it after answers to only minor findings, after answers to the last round and after answers to a
+    check; `review` asks it after a check that left findings unverified, and when the rounds are used up and new
     commits are left unreviewed. Earlier ones stay in the list."""
     return (round.get('checkpoints') or [None])[-1]
 
 
 def ask_next_round(state: dict, reason: str, head: str) -> dict:
-    """Puts the question whether to have another round to Cicely: `small` after answers to only minor findings,
-    `limit` when the rounds are used up. `head` is what another round would review."""
+    """Puts the question what follows to Cicely: `small` after answers to only minor findings, `limit` when the
+    rounds are used up, `check` after a focused check. `head` is what another round would review."""
     last = state['rounds'][-1]
-    title = (f'Another round after round {last["round"]}, past the limit of {state["maxRounds"]}?'
-             if reason == 'limit' else f'Another round after round {last["round"]}?')
-    item = {'id': CHECKPOINT, 'reason': reason, 'round': last['round'], 'head': head, 'title': title,
-            'decision': None, 'choice': None}
+    titles = {'small': f'Another round after {label(last)}?',
+              'limit': f'Another round after {label(last)}, past the limit of {state["maxRounds"]}?',
+              'check': f'What follows {label(last)}?'}
+    item = dict({'id': CHECKPOINT, 'reason': reason}, **step_of(last), head=head, title=titles[reason], decision=None,
+                choice=None)
     last.setdefault('checkpoints', []).append(item)
     return item
 
@@ -731,6 +962,33 @@ def choices(value: object) -> list[dict]:
             if isinstance(option, dict) and words(option.get('choice'))]
 
 
+def finding_from(raw: dict) -> dict:
+    """A finding as the reviewer gave it, with what is malformed set to a safe default."""
+    return {
+        'id': raw.get('id') if isinstance(raw.get('id'), str) else None,
+        # `unverified` is only ever a check's verdict.
+        'status': raw.get('status') if raw.get('status') in ('open', 'question', 'resolved') else 'open',
+        'severity': raw.get('severity') if raw.get('severity') in SEVERITIES else 'minor',
+        'file': raw.get('file') if isinstance(raw.get('file'), str) and raw.get('file').strip() else None,
+        'line': raw.get('line') if type(raw.get('line')) is int and raw.get('line') > 0 else None,
+        'title': str(raw['title']).strip(),
+        'detail': str(raw.get('detail') or '').strip(),
+        'stakes': words(raw.get('stakes')),
+        'options': choices(raw.get('options')),
+        'recommendation': words(raw.get('recommendation')),
+        'reply': words(raw.get('reply')),
+        'new': False,
+    }
+
+
+def number_new(findings: list[dict], next_number: int) -> list[dict]:
+    """Numbers new findings most severe first, keeping the reviewer's order within a severity."""
+    for finding in sorted(findings, key=lambda finding: SEVERITIES.index(finding['severity'])):
+        finding['id'] = f'F{next_number}'
+        next_number += 1
+    return findings
+
+
 def normalize(output: object, expected: dict[str, dict], next_number: int,
               first: bool) -> tuple[str, list[dict], list[str]]:
     """Checks the reviewer's answer and gives new findings ids; an expected finding left out stays open."""
@@ -740,20 +998,7 @@ def normalize(output: object, expected: dict[str, dict], next_number: int,
     for raw in output['findings']:
         if not isinstance(raw, dict) or not str(raw.get('title') or '').strip():
             continue
-        finding = {
-            'id': raw.get('id') if isinstance(raw.get('id'), str) else None,
-            'status': raw.get('status') if raw.get('status') in STATUSES else 'open',
-            'severity': raw.get('severity') if raw.get('severity') in SEVERITIES else 'minor',
-            'file': raw.get('file') if isinstance(raw.get('file'), str) and raw.get('file').strip() else None,
-            'line': raw.get('line') if type(raw.get('line')) is int and raw.get('line') > 0 else None,
-            'title': str(raw['title']).strip(),
-            'detail': str(raw.get('detail') or '').strip(),
-            'stakes': words(raw.get('stakes')),
-            'options': choices(raw.get('options')),
-            'recommendation': words(raw.get('recommendation')),
-            'reply': words(raw.get('reply')),
-            'new': False,
-        }
+        finding = finding_from(raw)
         if not first and finding['id'] in expected and finding['id'] not in seen:
             seen.add(finding['id'])
             if expected[finding['id']].get('decision'):
@@ -761,17 +1006,47 @@ def normalize(output: object, expected: dict[str, dict], next_number: int,
             findings.append(finding)
         elif finding['status'] != 'resolved':
             new.append(dict(finding, new=True, reply=None))
-    # New findings are numbered most severe first, keeping the reviewer's order within a severity.
-    for finding in sorted(new, key=lambda finding: SEVERITIES.index(finding['severity'])):
-        finding['id'] = f'F{next_number}'
-        next_number += 1
-        findings.append(finding)
+    findings += number_new(new, next_number)
     unlisted = [identifier for identifier in expected if identifier not in seen]
     for identifier in unlisted:
-        findings.append(dict(expected[identifier], status='open', new=False,
+        # A check's verdict on it is out of date once a round has looked again.
+        kept = {key: value for key, value in expected[identifier].items() if key != 'verdict'}
+        findings.append(dict(kept, status='open', new=False,
                              reply="The reviewer didn't re-list this finding, so it stays open."))
     findings.sort(key=order)
     return str(output.get('summary') or '').strip(), findings, unlisted
+
+
+def judge(output: object, expected: dict[str, dict], next_number: int) -> tuple[str, list[dict]]:
+    """Checks a focused check's answer. Each finding it checked takes the status its verdict gives, one it left out
+    stays unverified, and the problems it found become new open findings."""
+    if not isinstance(output, dict) or not isinstance(output.get('verdicts'), list):
+        raise Refusal('The check answered without a verdicts list.')
+    findings, seen = [], set()
+    for raw in output['verdicts']:
+        identifier = raw.get('id') if isinstance(raw, dict) else None
+        if not isinstance(identifier, str) or identifier not in expected or identifier in seen \
+                or raw.get('verdict') not in VERDICTS:
+            continue
+        seen.add(identifier)
+        findings.append(dict(expected[identifier], status=VERDICTS[raw['verdict']], verdict=raw['verdict'], new=False,
+                             reply=words(raw.get('evidence')) or 'It gave no evidence.'))
+    for identifier in expected:
+        if identifier not in seen:
+            findings.append(dict(expected[identifier], status='unverified', verdict='not verified', new=False,
+                                 reply="The check didn't report on this finding."))
+    problems = output.get('problems') if isinstance(output.get('problems'), list) else []
+    findings += number_new([dict(finding_from(raw), id=None, status='open', new=True) for raw in problems
+                            if isinstance(raw, dict) and str(raw.get('title') or '').strip()], next_number)
+    findings.sort(key=order)
+    return str(output.get('summary') or '').strip(), findings
+
+
+def add_block(lines: list[str], *text: str) -> None:
+    # A blank line first, or Markdown would run the block into the list above it.
+    if lines[-1]:
+        lines.append('')
+    lines.extend(text)
 
 
 def review_comment(state: dict, round: dict) -> str:
@@ -782,14 +1057,8 @@ def review_comment(state: dict, round: dict) -> str:
     open_now, asked = open_findings(round), questions(round)
     resolved = [finding for finding in round['findings'] if finding['status'] == 'resolved']
 
-    def block(*text: str) -> None:
-        # A blank line first, or Markdown would run the block into the list above it.
-        if lines[-1]:
-            lines.append('')
-        lines.extend(text)
-
     if open_now:
-        block('**Open**')
+        add_block(lines, '**Open**')
         for finding in open_now:
             new = ' *(new)*' if finding['new'] and round['round'] > 1 else ''
             lines.append(f'- **{finding["id"]}** · {finding["severity"]} · `{location(finding)}` · {finding["title"]}{new}')
@@ -797,7 +1066,7 @@ def review_comment(state: dict, round: dict) -> str:
             if finding['reply']:
                 lines += indented(finding['reply'], '  > ')
     if asked:
-        block('**For Cicely to decide**')
+        add_block(lines, '**For Cicely to decide**')
         for finding in asked:
             new = ' *(new)*' if finding['new'] and round['round'] > 1 else ''
             lines.append(f'- **{finding["id"]}** · `{location(finding)}` · {finding["title"]}{new}')
@@ -806,15 +1075,50 @@ def review_comment(state: dict, round: dict) -> str:
             if finding['reply']:
                 lines += indented(finding['reply'], '  > ')
     if resolved:
-        block('**Resolved**')
+        add_block(lines, '**Resolved**')
         for finding in resolved:
             lines.append(f'- **{finding["id"]}** · {finding["title"]}')
             lines += indented(finding['detail'])
             if finding['reply']:
                 lines += indented(finding['reply'], '  > ')
     if not open_now and not asked:
-        block('Nothing is open.')
+        add_block(lines, 'Nothing is open.')
     return '\n'.join(lines) + '\n'
+
+
+def check_comment(state: dict, round: dict) -> str:
+    reviewer = AGENTS[state['reviewer']]
+    lines = [f'[{reviewer}] Cross-review of #{state["pullRequest"]}: {label(round)}, at {round["head"][:7]}', '']
+    if round['summary']:
+        lines += [round['summary'], '']
+    limits = round['limits']
+    lines.append(f'Cicely chose this focused check of the answers instead of another round. It ran in a fresh session '
+                 f'with limits of {amount(limits["tokens"])} tokens and {limits["minutes"]:g} min, and took '
+                 f'{cost(round) or "no time to speak of"}. ' + tested(state['reviewer'], True))
+    if round.get('stopped'):
+        lines += ['', f'**It was stopped at its {round["stopped"]} limit** before it reported, so nothing it was to '
+                      'check is verified.']
+    sections = [('Verified', [finding for finding in round['findings'] if finding.get('verdict') == 'verified']),
+                ('Problems', [finding for finding in round['findings']
+                              if finding.get('verdict') == 'problem' or finding['new']]),
+                ('Not verified', unverified(round))]
+    for title, findings in sections:
+        if findings:
+            add_block(lines, f'**{title}**')
+        for finding in findings:
+            new = ' *(new)*' if finding['new'] else ''
+            lines.append(f'- **{finding["id"]}** · {finding["severity"]} · `{location(finding)}` · {finding["title"]}{new}')
+            lines += indented(finding['detail'] if finding['new'] else finding['reply'])
+    return '\n'.join(lines) + '\n'
+
+
+def tested(reviewer: str, done: bool) -> str:
+    """What a focused check by this reviewer may do, or, once `done`, could do."""
+    if reviewer == 'codex':
+        return (f'Codex {"could" if done else "may"} run the tests, in a sandbox that writes only to its checkout and a '
+                'temp folder of its own, with no network.')
+    return (f'Claude {"could only read, so it ran" if done else "can only read, so it runs"} no tests: the skill runs '
+            'Claude read-only, as it has no sandbox for Claude that could safely let it run them.')
 
 
 def considerations(item: dict, recommends: str) -> str:
@@ -832,7 +1136,7 @@ def considerations(item: dict, recommends: str) -> str:
 
 
 def decisions_comment(state: dict, record: dict) -> str:
-    lines = [f'{CICELY} Decisions on the cross-review of #{state["pullRequest"]}, after round {record["round"]}', '',
+    lines = [f'{CICELY} Decisions on the cross-review of #{state["pullRequest"]}, after {label(record)}', '',
              f'{AGENTS[state["author"]]} paused the cross-review to ask her. What she was asked is below, each with her '
              'answer word for word.']
     for decision in record['decisions']:
@@ -848,8 +1152,8 @@ def quoted(text: str) -> list[str]:
 
 def answers_comment(state: dict, round: dict) -> str:
     answers = round['answers']
-    lines = [f'[{AGENTS[state["author"]]}] Answers to round {round["round"]} of the cross-review, '
-             f'at {answers["head"][:7]}', '']
+    lines = [f'[{AGENTS[state["author"]]}] Answers to {label(round)}'
+             + (' of the cross-review' if not round.get('check') else '') + f', at {answers["head"][:7]}', '']
     titles = {finding['id']: finding['title'] for finding in round['findings']}
     for reply in answers['replies']:
         note = reply['note'].strip().splitlines()
@@ -857,7 +1161,9 @@ def answers_comment(state: dict, round: dict) -> str:
         lines += indented('\n'.join(note[1:]))
         lines += in_item(considerations(reply, f'{AGENTS[state["author"]]} recommends'))
     asked = checkpoint(round)
-    if asked and asked['reason'] == 'limit':
+    if asked and asked['reason'] == 'check':
+        lines += ['', 'The check was Cicely\'s choice, so the cross-review pauses for her to decide what follows it.']
+    elif asked and asked['reason'] == 'limit':
         lines += ['', f'Round {round["round"]} was the last of {state["maxRounds"]}, so the cross-review pauses for '
                       'Cicely to decide whether to have another round.']
     elif asked:
@@ -876,11 +1182,13 @@ def minutes_between(start: str, end: str) -> int:
 
 
 def amount(number: float) -> str:
-    return f'{number / 1e6:.1f}M' if number >= 1e6 else f'{round(number / 1e3)}k' if number >= 1e3 else str(round(number))
+    if number >= 1e6:
+        return f'{number / 1e6:.1f}'.removesuffix('.0') + 'M'
+    return f'{round(number / 1e3)}k' if number >= 1e3 else str(round(number))
 
 
 def cost(round: dict) -> str | None:
-    """What a round's review took, such as "12 min and about 1.2M tokens (900k cached)"."""
+    """What a round or a check took, such as "12 min and about 1.2M tokens (900k cached)"."""
     parts = []
     if round.get('startedAt'):
         parts.append(f'{minutes_between(round["startedAt"], round["reviewedAt"])} min')
@@ -892,6 +1200,11 @@ def cost(round: dict) -> str | None:
     return ' and '.join(parts) or None
 
 
+def last_review(state: dict) -> dict:
+    """The latest full round, leaving out the focused checks since."""
+    return next(round for round in reversed(state['rounds']) if not round.get('check'))
+
+
 def link(text: str, url: str | None) -> str:
     return f'[{text}]({url})' if url else text
 
@@ -900,11 +1213,11 @@ def item_lines(state: dict, item: dict) -> list[str]:
     """One thing waiting for Cicely, told so that she can decide it without having followed the review."""
     reviewer, author = AGENTS[state['reviewer']], AGENTS[state['author']]
     if item['id'] == CHECKPOINT:
-        return limit_lines(state, item) if item['reason'] == 'limit' else checkpoint_lines(state, item)
+        return {'limit': limit_lines, 'small': checkpoint_lines, 'check': after_check_lines}[item['reason']](state, item)
     lines = [f'#### {item["id"]} · {item["title"]}']
     if 'note' in item:
         who = author
-        lines += [f'{reviewer} raised this {item["severity"]} finding at `{location(item)}` in round {item["round"]}, '
+        lines += [f'{reviewer} raised this {item["severity"]} finding at `{location(item)}` in {label(item)}, '
                   f'and {author} took it to you.', '', f'**{reviewer}:** {item["detail"]}']
         if item.get('reply'):
             lines += ['', f'**{reviewer}, after {author}\'s last answer:** {item["reply"]}']
@@ -912,23 +1225,35 @@ def item_lines(state: dict, item: dict) -> list[str]:
     else:
         who = reviewer
         about = f' about `{location(item)}`' if item.get('file') else ''
-        lines += [f'{reviewer} asks you this{about}, in round {state["rounds"][-1]["round"]}.', '', item['detail']]
+        lines += [f'{reviewer} asks you this{about}, in {label(state["rounds"][-1])}.', '', item['detail']]
     extra = considerations(item, f'{who} recommends')
     return lines + (extra.splitlines() if item.get('options') else
                     [*extra.splitlines(), '', f'*{who} gave no options; ask {author} to spell them out.*'])
 
 
+def numbered(options: list[str]) -> list[str]:
+    return [f'{number}. {option}' for number, option in enumerate(options, 1)]
+
+
+def check_option(state: dict, found: dict) -> str:
+    """A focused check of what is left, as one of Cicely's options."""
+    return (f'**A focused check** of {", ".join(sorted(found, key=number_of))}: {AGENTS[state["reviewer"]]} checks '
+            f'only {"that" if len(found) == 1 else "those"}, in a fresh session, within {amount(DEFAULT_CHECK_TOKENS)} tokens and {DEFAULT_CHECK_MINUTES} '
+            f'min unless you set other limits. {tested(state["reviewer"], False)} It doesn\'t count as a round, and '
+            'what it can\'t verify comes back to you.')
+
+
 def limit_lines(state: dict, item: dict) -> list[str]:
     """Whether to have another round when the rounds are used up and something is left unreviewed."""
     reviewer, author = AGENTS[state['reviewer']], AGENTS[state['author']]
-    last = state['rounds'][-1]
-    number, took, answers = last['round'], cost(last), last['answers']
+    last, review = state['rounds'][-1], last_review(state)
+    step, took, answers, found = label(last), cost(review), last['answers'], checkable(state)
     lines = [f'#### {item["title"]}']
     if answers:
-        left = f'{author}\'s answers to round {number} unchecked'
+        left = f'{author}\'s answers to {step} unchecked'
         notes = {reply['id']: reply for reply in answers['replies']}
         lines.append(f'All {state["maxRounds"]} rounds are used, and {reviewer} hasn\'t checked {author}\'s answers to '
-                     f'round {number}:')
+                     f'{step}:')
         for finding in open_findings(last):
             lines.append(f'- **{finding["id"]}** · {finding["severity"]} · {finding["title"]}')
             lines.append(f'  - {reviewer}: {short(finding.get("reply") or finding["detail"], 300)}')
@@ -936,21 +1261,27 @@ def limit_lines(state: dict, item: dict) -> list[str]:
                 reply = notes[finding['id']]
                 lines.append(f'  - {author} {reply["action"]} it: {short(reply["note"], 300)}')
         if answers['head'] != item['head']:
-            left = f'{author}\'s answers to round {number}, and the commits since, unchecked'
+            left = f'{author}\'s answers to {step}, and the commits since, unchecked'
             lines += ['', f'Nor has {reviewer} reviewed the commits pushed since those answers, up to '
                           f'`{item["head"][:7]}`.']
     else:
-        left = f'the commits since round {number} unreviewed'
-        lines.append(f'All {state["maxRounds"]} rounds are used, and the commits pushed since round {number}, up to '
+        left = f'the commits since {step} unreviewed'
+        lines.append(f'All {state["maxRounds"]} rounds are used, and the commits pushed since {step}, up to '
                      f'`{item["head"][:7]}`, haven\'t been reviewed.')
+    if unverified(last):
+        ids = ', '.join(finding['id'] for finding in unverified(last))
+        lines += ['', f'{capital(step)} couldn\'t verify {ids}.']
+        left += f', and {ids} unverified'
+    options = [f'**Another round** (round {reviews(state) + 1}): {reviewer} checks what is above, and may raise new '
+               'points only on what changed.']
+    if found:
+        options.append(check_option(state, found))
+    options.append(f'**Stop here:** the cross-review ends at `{item["head"][:7]}`. What is open stays open on the '
+                   'record; decide any of it yourself, or leave it. Marking the pull request ready stays your call.')
     return lines + ['', f'**Why it matters:** the rounds limit caps what the cross-review spends. Another round is '
-                        f'another review by {reviewer}' + (f'; round {number} took {took}.' if took else '.')
+                        f'another review by {reviewer}' + (f'; round {review["round"]} took {took}.' if took else '.')
                         + f' Stopping leaves {left}.',
-                    '', '**Options:**',
-                    f'1. **Another round** (round {number + 1}): {reviewer} checks what is above, and may raise new '
-                    'points only on what changed.',
-                    f'2. **Stop here:** the cross-review ends at `{item["head"][:7]}`. What is open stays open on the '
-                    'record; decide any of it yourself, or leave it. Marking the pull request ready stays your call.']
+                    '', '**Options:**', *numbered(options)]
 
 
 def checkpoint_lines(state: dict, item: dict) -> list[str]:
@@ -979,10 +1310,53 @@ def checkpoint_lines(state: dict, item: dict) -> list[str]:
             + (f': round {number} took {took}.' if took else '.') + f' Stopping leaves {author}\'s last answers '
             'unchecked.',
             '', '**Options:**',
-            f'1. **Another round** (round {number + 1} of {state["maxRounds"]}): {reviewer} checks the answers to '
-            f'{", ".join(reply["id"] for reply in replies)}' + (f' and the {changed} changed lines' if changed else '')
-            + ', and may raise new points only on what changed.',
-            f'2. **Stop here:** {" ".join(stop)}']
+            *numbered([f'**Another round** (round {number + 1} of {state["maxRounds"]}): {reviewer} checks the answers '
+                       f'to {", ".join(reply["id"] for reply in replies)}'
+                       + (f' and the {changed} changed lines' if changed else '')
+                       + ', and may raise new points only on what changed.',
+                       check_option(state, checkable(state)),
+                       f'**Stop here:** {" ".join(stop)}'])]
+
+
+def after_check_lines(state: dict, item: dict) -> list[str]:
+    """What follows a focused check: a full round, another check, or neither."""
+    reviewer, author = AGENTS[state['reviewer']], AGENTS[state['author']]
+    last, review, found = state['rounds'][-1], last_review(state), checkable(state)
+    notes = {reply['id']: reply for reply in (last['answers'] or {}).get('replies', [])}
+    lines = [f'#### {item["title"]}',
+             f'You chose a focused check of {author}\'s answers. {capital(label(last))}, at `{last["head"][:7]}`, took '
+             f'{cost(last) or "no time to speak of"}'
+             + (f', and reached its {last["stopped"]} limit before it reported.' if last.get('stopped') else '.')]
+    verified = [finding['id'] for finding in last['findings'] if finding.get('verdict') == 'verified']
+    if verified:
+        lines.append(f'- Verified: {", ".join(verified)}')
+    for title, findings in ((f'Problems it found, which {author} has answered:',
+                             [finding for finding in last['findings']
+                              if finding.get('verdict') == 'problem' or finding['new']]),
+                            ('Not verified:', unverified(last))):
+        if findings:
+            lines.append(f'- {title}')
+        for finding in findings:
+            new = ' *(new)*' if finding['new'] else ''
+            lines.append(f'  - **{finding["id"]}** · {finding["severity"]} · {finding["title"]}{new}: '
+                         f'{short(finding["detail"] if finding["new"] else finding["reply"], 300)}')
+            if finding['id'] in notes:
+                reply = notes[finding['id']]
+                lines.append(f'    - {author} {reply["action"]} it: {short(reply["note"], 300)}')
+    ids, took = ', '.join(sorted(found, key=number_of)), cost(review)
+    past = reviews(state) >= state['maxRounds']
+    options = [f'**Another round** (round {reviews(state) + 1}'
+               + (f', past the limit of {state["maxRounds"]}' if past else f' of {state["maxRounds"]}')
+               + f'): a full review by {reviewer}, in a fresh session, of {ids} and all the commits since round '
+               f'{review["round"]}' + (f'; round {review["round"]} took {took}.' if took else '.')]
+    if found:
+        options.append(check_option(state, found))
+    options.append(f'**Stop here:** the cross-review ends at `{item["head"][:7]}`. What is left above stays as it is on '
+                   'the record; decide any of it yourself, or leave it. Marking the pull request ready stays your call.')
+    return lines + ['', f'**Why it matters:** what is left above isn\'t settled until something checks it. Another '
+                        f'check looks only at {ids}, within its limits; a full round looks at everything again, at a '
+                        'full round\'s cost.',
+                    '', '**Options:**', *numbered(options)]
 
 
 def findings_lines(state: dict) -> list[str]:
@@ -1002,10 +1376,11 @@ def findings_lines(state: dict) -> list[str]:
                                                      if found[id]['status'] == 'open' and id in answered]),
               (f'Open, for {author} to answer', [id for id in ids
                                                  if found[id]['status'] == 'open' and id not in answered]),
-              ('Asked of you', [id for id in ids if found[id]['status'] == 'question'])]
+              ('Asked of you', [id for id in ids if found[id]['status'] == 'question']),
+              ('Not verified by a check', [id for id in ids if found[id]['status'] == 'unverified'])]
     return ['', f'**Findings:** {len(found)} in all, '
                 + ', '.join(f'{severities[severity]} {severity}' for severity in SEVERITIES if severities[severity])
-                + '.'] + [f'- {label}: {", ".join(group)}' for label, group in groups if group]
+                + '.'] + [f'- {name}: {", ".join(group)}' for name, group in groups if group]
 
 
 def next_lines(state: dict, move: str) -> list[str]:
@@ -1021,21 +1396,27 @@ def next_lines(state: dict, move: str) -> list[str]:
     if move == 'reply':
         return ['', f'**Next:** {author} answers {", ".join(finding["id"] for finding in open_findings(last))}.']
     if move == 'review':
-        return ['', f'**Next:** {reviewer} reviews round {len(rounds) + 1} of {state["maxRounds"]}.']
+        return ['', f'**Next:** {reviewer} reviews round {reviews(state) + 1} of {state["maxRounds"]}.']
+    if move == 'check':
+        return ['', f'**Next:** {reviewer} runs the focused check you chose, of '
+                    f'{", ".join(sorted(checkable(state), key=number_of))}.']
     if move == 'done':
         return ['', f'**Next:** nothing is open between {author} and {reviewer} at `{last["head"][:7]}`. Marking the '
                     'pull request ready is your call.']
     if move == 'stopped':
-        asked = checkpoint(last)
-        answers = last['answers']
+        asked, answers, step = checkpoint(last), last['answers'], label(last)
+        left = []
         if answers:
             unchecked = ', '.join(f'{reply["id"]} ({ACTIONS[reply["action"]]})' for reply in answers['replies'])
-            left = f'{reviewer} didn\'t check {author}\'s last answers: {unchecked}.'
-            if answers['head'] != asked['head']:
-                left += ' Nor did it review the commits pushed since them.'
-        else:
-            left = f'{reviewer} didn\'t review the commits since round {last["round"]}.'
-        return ['', f'**You stopped it** after round {last["round"]}, at `{asked["head"][:7]}`. {left} Marking the '
+            left.append(f'{reviewer} didn\'t check {author}\'s last answers: {unchecked}.')
+        if unverified(last):
+            left.append(f'{capital(step)} couldn\'t verify {", ".join(finding["id"] for finding in unverified(last))}.')
+        if not left:
+            left.append(f'{reviewer} didn\'t review the commits since {step}.')
+        elif (answers or last)['head'] != asked['head']:
+            left.append('Nor did it review the commits pushed since them.' if answers
+                        else f'Nor did {reviewer} review the commits pushed since.')
+        return ['', f'**You stopped it** after {step}, at `{asked["head"][:7]}`. {" ".join(left)} Marking the '
                     'pull request ready is your call.']
     # The rounds are used up, and she hasn't been asked yet.
     return ['', f'**Next:** all {state["maxRounds"]} rounds are used, and something is left that {reviewer} hasn\'t '
@@ -1044,19 +1425,27 @@ def next_lines(state: dict, move: str) -> list[str]:
 
 
 def rounds_table(state: dict) -> list[str]:
-    lines = ['| Round | Head | Review took | Found | Answers |', '|---|---|---|---|---|']
+    lines = ['| Round | Head | Took | Found | Answers |', '|---|---|---|---|---|']
     for round in state['rounds']:
         new = Counter(finding['severity'] for finding in round['findings'] if finding.get('new'))
         found = ', '.join(f'{new[severity]} {severity}' for severity in SEVERITIES if new[severity]) or 'nothing new'
+        if round.get('check'):
+            verdicts = Counter(finding['verdict'] for finding in round['findings'] if finding.get('verdict'))
+            found = ', '.join(f'{verdicts[verdict]} {TALLIES[verdict]}' for verdict in VERDICTS if verdicts[verdict])
+            found = ('; '.join(part for part in (found, f'{sum(new.values())} new' if new else '') if part)
+                     or 'nothing checked')
+            if round.get('stopped'):
+                found += f' (stopped at its {round["stopped"]} limit)'
         resolved = sum(finding['status'] == 'resolved' for finding in round['findings'])
-        if resolved:
+        if resolved and not round.get('check'):
             found += f'; {resolved} resolved'
         answers, answered = round['answers'], '—'
         if answers:
             actions = Counter(reply['action'] for reply in answers['replies'])
             answered = link(', '.join(f'{actions[action]} {ACTIONS[action]}' for action in ACTIONS if actions[action]),
                             answers.get('commentUrl'))
-        lines.append(f'| {link(str(round["round"]), round.get("commentUrl"))} | `{round["head"][:7]}` | '
+        name = str(round['round']) if not round.get('check') else label(round).removeprefix('the ')
+        lines.append(f'| {link(name, round.get("commentUrl"))} | `{round["head"][:7]}` | '
                      f'{cost(round) or "—"} | {found} | {answered} |')
     return lines
 
@@ -1065,28 +1454,30 @@ def briefing(state: dict, move: str, live: dict | None = None) -> str:
     """Where the cross-review stands and what, if anything, needs Cicely, for someone who hasn't followed it."""
     reviewer, author = AGENTS[state['reviewer']], AGENTS[state['author']]
     rounds = state['rounds']
-    count = len(rounds)
-    headlines = {'cicely': 'paused for your decision', 'reply': f'waiting for {author} to answer round {count}',
-                 'review': f'{reviewer} reviews round {count + 1} next', 'done': 'done, with nothing open',
-                 'limit': f'all {state["maxRounds"]} rounds are used',
-                 'stopped': f'stopped by you after round {count}'}
-    headline = f'{reviewer} is reviewing round {live["round"]}' if live else headlines[move]
+    step = label(rounds[-1]) if rounds else None
+    headlines = {'cicely': 'paused for your decision', 'reply': f'waiting for {author} to answer {step}',
+                 'review': f'{reviewer} reviews round {reviews(state) + 1} next',
+                 'check': f'{reviewer} runs a focused check next', 'done': 'done, with nothing open',
+                 'limit': f'all {state["maxRounds"]} rounds are used', 'stopped': f'stopped by you after {step}'}
+    headline = f'{reviewer} is {live["doing"]}' if live else headlines[move]
     about = f'{author} wrote this pull request and {reviewer} reviews it, in up to {state["maxRounds"]} rounds.'
     if rounds:
-        about += f' Round {count} reviewed `{rounds[-1]["head"][:7]}`.'
+        about += (f' {capital(step)} {"checked" if rounds[-1].get("check") else "reviewed"} '
+                  f'`{rounds[-1]["head"][:7]}`.')
     began = state.get('startedAt') or (rounds[0].get('startedAt') or rounds[0]['reviewedAt'] if rounds else None)
     if began:
         about += f' The cross-review began {clock(began)}.'
     lines = [f'### Cross-review of #{state["pullRequest"]}: {headline}', '', about]
     if live:
         latest = f' Latest: {live["latest"]}.' if live.get('latest') else ''
-        lines += ['', f'**Now:** {reviewer} has been reviewing `{live["head"][:7]}` for '
+        lines += ['', f'**Now:** {reviewer} has been {live["verb"]} `{live["head"][:7]}` for '
                       f'{minutes_between(live["startedAt"], now())} min.{latest}']
     elif state.get('failure'):
         failure = state['failure']
-        lines += ['', f'**Round {failure["round"]} failed** at {clock(failure["at"])}: {failure["error"]}']
+        lines += ['', f'**{capital(failure.get("what") or label(failure))} failed** at {clock(failure["at"])}: '
+                      f'{failure["error"]}']
     lines += findings_lines(state)
-    decided = [link(f'{decision["id"]}, after round {record["round"]}', record.get('commentUrl'))
+    decided = [link(f'{decision["id"]}, after {label(record)}', record.get('commentUrl'))
                for record in state.get('decisions', []) for decision in record['decisions']]
     if decided:
         lines += ['', f'**Your decisions:** {"; ".join(decided)}.']
@@ -1127,26 +1518,41 @@ def first_prompt(context: dict) -> str:
     return INTRO.format(**context) + LOOK.format(**context) + REPORT + FIRST_ROUND
 
 
-def later_prompt(context: dict, state: dict, fresh: bool) -> str:
-    last = state['rounds'][-1]
-    findings = {finding['id']: finding for finding in last['findings']}
-    taken = {finding['id']: finding for finding in state['escalated'] if finding['round'] == last['round']}
-    answers = []
-    for reply in (last['answers'] or {}).get('replies', []):
-        finding = findings[reply['id']]
-        answers.append(f'- {finding["id"]} ({finding["severity"]}, {location(finding)}): {finding["title"]}')
-        answers += indented(finding['detail'], '    ')
-        decision = finding.get('decision')
-        if reply['action'] == 'escalated':
-            answers.append(f'  {context["author"]} took it to Cicely: {reply["note"].strip()}')
-            decision = taken[reply['id']].get('decision')
-        if decision:
-            answers.append(f'  Cicely decided: {decision}')
-        if reply['action'] != 'escalated':
-            answers.append(f'  {context["author"]} {reply["action"]} it: {reply["note"].strip()}')
-    answered = '\n'.join(answers) or '(None: nothing was open after your last review.)'
+def history(state: dict, found: dict[str, dict], author: str, fresh: bool) -> str:
+    """The findings to look at again, each with what a check found, the author's latest answer and Cicely's decision.
+    A `fresh` session also needs the reviewer's own last word on each."""
+    lines = []
+    for finding in sorted(found.values(), key=lambda finding: number_of(finding['id'])):
+        lines.append(f'- {finding["id"]} ({finding["severity"]}, {location(finding)}): {finding["title"]}')
+        lines += indented(finding['detail'], '    ')
+        if finding.get('verdict'):
+            lines.append(f'  {FOUND[finding["verdict"]]}: {finding["reply"]}')
+        elif fresh and finding.get('reply'):
+            lines.append(f'  Your last word on it: {finding["reply"]}')
+        reply = answer_to(state, finding['id'])
+        if reply and reply['action'] == 'escalated':
+            lines.append(f'  {author} took it to Cicely: {reply["note"]}')
+        if finding.get('decision'):
+            lines.append(f'  Cicely decided: {finding["decision"]}')
+        if reply and reply['action'] != 'escalated':
+            lines.append(f'  {author} {reply["action"]} it: {reply["note"]}')
+    return '\n'.join(lines)
+
+
+def later_prompt(context: dict, state: dict, fresh: str | None) -> str:
+    """The prompt for a later round: to resume the reviewer's session, or, with a `fresh` start's opening, such as
+    RESUME_LOST, to start a new one."""
+    answered = history(state, checkable(state), context['author'], fresh is not None) \
+        or '(None: nothing was open after your last review.)'
     later = LATER_ROUND.format(**context, answers=answered)
-    return INTRO.format(**context) + LOOK.format(**context) + REPORT + RESUME_LOST + later if fresh else later
+    if fresh is None:
+        return later
+    return INTRO.format(**context) + LOOK.format(**context) + REPORT + fresh.format(**context) + later
+
+
+def check_prompt(context: dict, state: dict, found: dict[str, dict], budget: int, minutes: float) -> str:
+    return CHECK.format(**dict(context, answers=history(state, found, context['author'], True),
+                               tools=CHECK_TOOLS[state['reviewer']], budget=amount(budget), minutes=f'{minutes:g}'))
 
 
 def command_review(arguments: argparse.Namespace) -> dict:
@@ -1165,13 +1571,17 @@ def command_review(arguments: argparse.Namespace) -> dict:
                  'startedAt': now(), 'rounds': [], 'escalated': []}
     if arguments.max_rounds is not None and arguments.max_rounds < 1:
         raise Refusal('--max-rounds must be at least 1.')
+    if arguments.budget_tokens is not None and arguments.budget_tokens < 1:
+        raise Refusal('--budget-tokens must be at least 1.')
+    if arguments.timeout_minutes is not None and arguments.timeout_minutes <= 0:
+        raise Refusal('--timeout-minutes must be more than 0.')
     if turn(state) == 'cicely':
         raise Refusal(waiting_for_cicely(state))
     if turn(state) == 'reply':
-        raise Refusal(f'Round {len(state["rounds"])} has open findings; answer them with `reply` first.')
+        raise Refusal(f'{capital(label(state["rounds"][-1]))} has open findings; answer them with `reply` first.')
     if arguments.max_rounds is not None:
         # Past the limit, another round is Cicely's decision, recorded with `decide`, never the author's flag.
-        if state['rounds'] and len(state['rounds']) >= state['maxRounds'] and arguments.max_rounds > state['maxRounds']:
+        if state['rounds'] and reviews(state) >= state['maxRounds'] and arguments.max_rounds > state['maxRounds']:
             raise Refusal(f'All {state["maxRounds"]} rounds are used, so another round is Cicely\'s decision. Run '
                           '`review` without --max-rounds to put it to her, and record her answer with `decide`.')
         state['maxRounds'] = arguments.max_rounds
@@ -1182,6 +1592,9 @@ def command_review(arguments: argparse.Namespace) -> dict:
     if move == 'done':
         raise Refusal(f'Nothing is left between the author and the reviewer at {pr["headRefOid"][:7]}, the pull '
                       'request\'s head; the cross-review is done.')
+    if arguments.budget_tokens is not None and move != 'check':
+        raise Refusal(f'--budget-tokens limits only a focused check, which Cicely hasn\'t chosen; it is the turn to '
+                      f'{move}.')
     if move == 'limit':
         # The reviewer doesn't run: whether it should is put to Cicely.
         ask_next_round(state, 'limit', pr['headRefOid'])
@@ -1192,8 +1605,9 @@ def command_review(arguments: argparse.Namespace) -> dict:
                      'pending': [item['id'] for item in pending(state)], 'briefing': briefing(state, move)},
                     **reported(state, [warning]))
     if move == 'stopped':
-        raise Refusal(f'Cicely stopped the cross-review after round {len(state["rounds"])}; it reviews again only '
+        raise Refusal(f'Cicely stopped the cross-review after {label(state["rounds"][-1])}; it reviews again only '
                       'when new commits are pushed.')
+    checking = move == 'check'
     executable = shutil.which(reviewer)
     if not executable:
         raise Refusal(f'The {AGENTS[reviewer]} CLI ({reviewer}) is not on PATH.')
@@ -1206,70 +1620,52 @@ def command_review(arguments: argparse.Namespace) -> dict:
     worktree = Path(state['worktree'])
     check_out(repo, worktree, head)
     hydrate(worktree, arguments.remote)
+    last = state['rounds'][-1] if state['rounds'] else None
     context = {'reviewer': AGENTS[reviewer], 'author': AGENTS[state['author']], 'number': pr['number'],
                'repository': repository, 'title': pr['title'], 'head': head, 'base_branch': pr['baseRefName'],
                'base': base, 'merge_base': merge_base, 'body': (pr.get('body') or '').strip() or '(none)',
-               'round': len(state['rounds']) + 1, 'tools': TOOLS[reviewer]}
-    expected = {}
-    if state['rounds']:
-        last = state['rounds'][-1]
+               'round': reviews(state) + 1, 'tools': TOOLS[reviewer]}
+    expected = checkable(state) if last else {}
+    if last:
         context['previous_head'] = last['head']
-        answered = {reply['id'] for reply in (last['answers'] or {}).get('replies', [])}
-        expected = {finding['id']: finding for finding in last['findings'] if finding['id'] in answered}
-        for finding in state['escalated']:
-            if finding['round'] == last['round'] and finding['id'] in expected:
-                expected[finding['id']] = dict(expected[finding['id']], decision=finding.get('decision'))
     change = change_folder(worktree)
     write_change(repo, change, context)
-    timeout = arguments.timeout_minutes * 60
+    # A check is numbered after the round it follows; Cicely's limits for it apply unless she set others.
+    step = {'round': last['round'], 'check': last.get('check', 0) + 1} if checking else {'round': context['round']}
+    minutes = arguments.timeout_minutes or (DEFAULT_CHECK_MINUTES if checking else DEFAULT_TIMEOUT_MINUTES)
+    budget = arguments.budget_tokens or DEFAULT_CHECK_TOKENS
     warnings = []
     # Saved before anything is published, so that `status` finds the review even when the status comment fails.
     save(path, state)
-    progress = Progress(path, context['round'], head,
-                        lambda live: warnings.append(show_status(path, state, 'review', live)))
+    work = {'round': step['round'], 'doing': f'running {label(step)}' if checking else f'reviewing {label(step)}',
+            'verb': 'checking' if checking else 'reviewing'}
+    progress = Progress(path, work, head, lambda live: warnings.append(show_status(path, state, move, live)))
     progress.publish(dict(progress.now))
     before = json.loads(json.dumps(state))  # The record as it stands, to note a failure in.
     try:
-        resumed = None
-        if not state['rounds']:
-            session, output, usage = REVIEWERS[reviewer](executable, worktree, change, first_prompt(context), None,
-                                                         timeout, progress)
-        else:
-            try:
-                session, output, usage = REVIEWERS[reviewer](executable, worktree, change,
-                                                             later_prompt(context, state, False), state['session'],
-                                                             timeout, progress)
-                resumed = True
-            except TimedOut:
-                raise
-            except Refusal as lost:
-                # A session that can't be resumed is started again with the history in the prompt.
-                try:
-                    session, output, usage = REVIEWERS[reviewer](executable, worktree, change,
-                                                                 later_prompt(context, state, True), None, timeout,
-                                                                 progress)
-                except Refusal as failed:
-                    raise Refusal(f'{failed} Resuming the earlier session failed first: {lost}')
-                resumed = False
         next_number = max([number_of(identifier) for identifier in all_ids(state)] + [0]) + 1
-        summary, findings, unlisted = normalize(output, expected, next_number, not state['rounds'])
-        round = {'round': context['round'], 'head': head, 'base': base, 'mergeBase': merge_base,
-                 'startedAt': progress.now['startedAt'], 'reviewedAt': now(), 'usage': usage, 'resumed': resumed,
-                 'summary': summary, 'findings': findings, 'unlisted': unlisted, 'commentUrl': None, 'answers': None}
-        state['session'] = session
-        state['rounds'].append(round)
+        if checking:
+            round = run_check(state, step, context, expected, executable, worktree, change, minutes, budget,
+                              next_number, progress)
+            comment = check_comment(state, round)
+        else:
+            round = run_round(state, step, context, expected, executable, worktree, change, minutes, next_number,
+                              progress)
+            comment = review_comment(state, round)
         state.pop('failure', None)
-        post_and_save(path, state, round, repository, arguments.pull_request, review_comment(state, round))
+        post_and_save(path, state, round, repository, arguments.pull_request, comment)
     except Exception as error:
         # The status comment says the round failed; the record gains only that note.
-        before['failure'] = {'round': context['round'], 'at': now(),
-                             'error': str(error) if isinstance(error, Refusal) else f'{type(error).__name__}: {error}'}
+        before['failure'] = dict(step, what=label(step), at=now(),
+                                 error=str(error) if isinstance(error, Refusal) else f'{type(error).__name__}: {error}')
         with contextlib.suppress(OSError):
             save(path, before)
-        show_status(path, before, 'review')
+        show_status(path, before, move)
         raise
     finally:
         progress.close()
+        if checking:
+            warnings.append(tidy(repo, worktree, head))
     # The head may have moved while the reviewer read; then a clean review isn't the end.
     try:
         current = pull_request(repository, arguments.pull_request)['headRefOid']
@@ -1277,13 +1673,98 @@ def command_review(arguments: argparse.Namespace) -> dict:
         current = None
     move = turn(state, current)
     warnings.append(show_status(path, state, move))
-    return dict({'pullRequest': arguments.pull_request, 'round': round['round'], 'author': state['author'],
-                 'reviewer': reviewer, 'head': head, 'session': session, 'resumed': resumed,
-                 'commentUrl': round['commentUrl'], 'summary': summary, 'open': open_findings(round),
-                 'questions': questions(round),
-                 'resolved': [finding['id'] for finding in findings if finding['status'] == 'resolved'],
-                 'unlisted': unlisted, 'usage': usage, 'turn': move, 'maxRounds': state['maxRounds'],
-                 'briefing': briefing(state, move)}, **reported(state, warnings))
+    result = {'pullRequest': arguments.pull_request, 'round': round['round'], 'author': state['author'],
+              'reviewer': reviewer, 'head': head, 'session': round['session'], 'commentUrl': round['commentUrl'],
+              'summary': round['summary'], 'open': open_findings(round), 'usage': round['usage'], 'turn': move,
+              'pending': [item['id'] for item in pending(state)], 'maxRounds': state['maxRounds']}
+    if checking:
+        result.update(check=round['check'], stopped=round['stopped'],
+                      verified=[finding['id'] for finding in round['findings'] if finding.get('verdict') == 'verified'],
+                      unverified=[finding['id'] for finding in unverified(round)])
+    else:
+        result.update(resumed=round['resumed'], questions=questions(round), unlisted=round['unlisted'],
+                      resolved=[finding['id'] for finding in round['findings'] if finding['status'] == 'resolved'])
+    return dict(result, briefing=briefing(state, move), **reported(state, warnings))
+
+
+def run_round(state: dict, step: dict, context: dict, expected: dict, executable: str, worktree: Path, change: Path,
+              minutes: float, next_number: int, progress: Progress) -> dict:
+    """Runs a full round of review and adds it to the record."""
+    reviewer, timeout, last = state['reviewer'], minutes * 60, state['rounds'][-1] if state['rounds'] else None
+    resumed = None
+    if not last:
+        session, output, usage = REVIEWERS[reviewer](executable, worktree, change, first_prompt(context), None,
+                                                     timeout, progress)
+    elif last.get('check'):
+        # The reviewer's session didn't see the check, so the round after one starts afresh, with the history.
+        session, output, usage = REVIEWERS[reviewer](executable, worktree, change,
+                                                     later_prompt(context, state, AFTER_CHECK), None, timeout, progress)
+        resumed = False
+    else:
+        try:
+            session, output, usage = REVIEWERS[reviewer](executable, worktree, change,
+                                                         later_prompt(context, state, None), state['session'],
+                                                         timeout, progress)
+            resumed = True
+        except TimedOut:
+            raise
+        except Refusal as lost:
+            # A session that can't be resumed is started again with the history in the prompt.
+            try:
+                session, output, usage = REVIEWERS[reviewer](executable, worktree, change,
+                                                             later_prompt(context, state, RESUME_LOST), None, timeout,
+                                                             progress)
+            except Refusal as failed:
+                raise Refusal(f'{failed} Resuming the earlier session failed first: {lost}')
+            resumed = False
+    summary, findings, unlisted = normalize(output, expected, next_number, not last)
+    round = dict(step, head=context['head'], base=context['base'], mergeBase=context['merge_base'],
+                 startedAt=progress.now['startedAt'], reviewedAt=now(), usage=usage, session=session, resumed=resumed,
+                 summary=summary, findings=findings, unlisted=unlisted, commentUrl=None, answers=None)
+    state['session'] = session
+    state['rounds'].append(round)
+    return round
+
+
+def run_check(state: dict, step: dict, context: dict, expected: dict, executable: str, worktree: Path, change: Path,
+              minutes: float, budget: int, next_number: int, progress: Progress) -> dict:
+    """Runs the focused check Cicely chose and adds it to the record. A check stopped at its token or time limit is
+    recorded too, with nothing verified. When nothing it found is for the author to answer but something is left
+    unverified, what follows goes to Cicely at once."""
+    scratch = scratch_folder(worktree)
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True)
+    stopped = session = None
+    try:
+        session, output, usage = REVIEWERS[state['reviewer']](
+            executable, worktree, change, check_prompt(context, state, expected, budget, minutes), None, minutes * 60, progress,
+            {'budget': budget, 'scratch': scratch})
+        summary, findings = judge(output, expected, next_number)
+    except LimitReached as reached:
+        stopped, usage, summary = reached.limit, reached.usage, str(reached)
+        findings = sorted((dict(finding, status='unverified', verdict='not verified', new=False,
+                                reply=f'The check was stopped at its {stopped} limit before it reported.')
+                           for finding in expected.values()), key=order)
+    # The check's own session is kept with it: the reviewer's review session goes on without it.
+    round = dict(step, head=context['head'], base=context['base'], mergeBase=context['merge_base'],
+                 startedAt=progress.now['startedAt'], reviewedAt=now(), usage=usage, session=session,
+                 limits={'tokens': budget, 'minutes': minutes}, stopped=stopped, summary=summary, findings=findings,
+                 commentUrl=None, answers=None)
+    state['rounds'].append(round)
+    if not open_findings(round) and unverified(round):
+        ask_next_round(state, 'check', context['head'])
+    return round
+
+
+def tidy(repo: Path, worktree: Path, head: str) -> str | None:
+    """Clears what a focused check left in the review checkout, and its temp folder. A failure comes back as a
+    warning; the next round's checkout clears it again."""
+    shutil.rmtree(scratch_folder(worktree), ignore_errors=True)
+    try:
+        check_out(repo, worktree, head)
+    except (Refusal, OSError) as error:
+        return f'Could not clear what the check left in {worktree}: {error}'
+    return None
 
 
 def reported(state: dict, warnings: list) -> dict:
@@ -1346,9 +1827,11 @@ def command_reply(arguments: argparse.Namespace) -> dict:
     last['answers'] = {'head': pr['headRefOid'], 'answeredAt': now(), 'replies': replies, 'changedLines': changed,
                        'commentUrl': None}
     findings = {finding['id']: finding for finding in last['findings']}
-    # Another round is a question for Cicely after the last round, and after answers to only minor findings that
-    # change little.
-    if len(state['rounds']) >= state['maxRounds']:
+    # Another round is a question for Cicely after the last round, after answers to a check she chose, and after
+    # answers to only minor findings that change little.
+    if last.get('check'):
+        ask_next_round(state, 'check', pr['headRefOid'])
+    elif reviews(state) >= state['maxRounds']:
         ask_next_round(state, 'limit', pr['headRefOid'])
     elif changed < SMALL_ANSWERS and all(findings[reply['id']]['severity'] in ('minor', 'nit') for reply in replies):
         ask_next_round(state, 'small', pr['headRefOid'])
@@ -1356,7 +1839,7 @@ def command_reply(arguments: argparse.Namespace) -> dict:
         if reply['action'] == 'escalated':
             state['escalated'].append(dict(findings[reply['id']], note=reply['note'], stakes=reply['stakes'],
                                            options=reply['options'], recommendation=reply['recommendation'],
-                                           round=last['round'], decision=None))
+                                           **step_of(last), decision=None))
     post_and_save(path, state, last['answers'], repository, arguments.pull_request, answers_comment(state, last))
     move = turn(state, pr['headRefOid'])
     warning = show_status(path, state, move)
@@ -1399,8 +1882,11 @@ def command_decide(arguments: argparse.Namespace) -> dict:
         if not isinstance(decision.get('decision'), str) or not decision['decision'].strip():
             raise Refusal(f'Decision {decision.get("id")} needs Cicely\'s answer.')
         if decision.get('id') == CHECKPOINT and decision.get('choice') not in CHOICES:
-            raise Refusal(f'Decision {CHECKPOINT} needs `choice`: "review" for another round or "stop" to end the '
-                          'cross-review here, as Cicely chose.')
+            raise Refusal(f'Decision {CHECKPOINT} needs `choice`: "review" for another round, "check" for a focused '
+                          'check of the answers, or "stop" to end the cross-review here, as Cicely chose.')
+        if decision.get('id') == CHECKPOINT and decision['choice'] == 'check' and not checkable(state):
+            raise Refusal('A focused check would have nothing to check: there are no answers since the last round, and '
+                          'nothing a check left unverified. Ask Cicely again, with "review" and "stop" as her options.')
     waiting = {item['id']: item for item in pending(state)}
     ids = [decision.get('id') for decision in decisions]
     missing = [identifier for identifier in waiting if identifier not in ids]
@@ -1414,7 +1900,7 @@ def command_decide(arguments: argparse.Namespace) -> dict:
         raise Refusal(f'Pull request #{arguments.pull_request} is {str(pr.get("state")).lower()}, not open.')
     last = state['rounds'][-1]
     # What she was asked is kept as it was put to her, before her answers change it.
-    record = {'round': last['round'], 'decidedAt': now(), 'commentUrl': None,
+    record = {**step_of(last), 'decidedAt': now(), 'commentUrl': None,
               'decisions': [dict({'id': decision['id'], 'title': waiting[decision['id']]['title'],
                                   'decision': decision['decision'].strip(),
                                   'asked': item_lines(state, waiting[decision['id']])},
@@ -1425,8 +1911,9 @@ def command_decide(arguments: argparse.Namespace) -> dict:
         item['decision'] = decision['decision']
         if decision['id'] == CHECKPOINT:
             item['choice'] = decision['choice']
-            if item['reason'] == 'limit' and decision['choice'] == 'review':
-                state['maxRounds'] = max(state['maxRounds'], len(state['rounds']) + 1)
+            # Past the limit, her choice of another round raises it by one.
+            if decision['choice'] == 'review' and reviews(state) >= state['maxRounds']:
+                state['maxRounds'] = reviews(state) + 1
         # A question she has answered comes back to the author as an open finding carrying her decision.
         elif item['status'] == 'question':
             item['status'] = 'open'
@@ -1452,8 +1939,10 @@ def command_status(arguments: argparse.Namespace) -> dict:
     last = state['rounds'][-1] if state['rounds'] else None
     move, live = turn(state), running(path)
     return {'pullRequest': arguments.pull_request, 'author': state['author'], 'reviewer': state['reviewer'],
-            'rounds': len(state['rounds']), 'maxRounds': state['maxRounds'], 'turn': move, 'running': live,
+            'rounds': reviews(state), 'checks': len(state['rounds']) - reviews(state), 'maxRounds': state['maxRounds'],
+            'turn': move, 'running': live,
             'head': last['head'] if last else None, 'open': open_findings(last) if last else [],
+            'unverified': unverified(last) if last else [],
             'pending': pending(state), 'escalated': state['escalated'], 'decisions': state.get('decisions', []),
             'comments': [url for round in state['rounds']
                          for url in (round['commentUrl'], (round['answers'] or {}).get('commentUrl')) if url]
@@ -1472,7 +1961,7 @@ def command_finish(arguments: argparse.Namespace) -> dict:
         raise Refusal(f'There is no cross-review of #{arguments.pull_request} here.')
     worktree = Path(state['worktree'])
     removed = remove_worktree(repo, worktree)
-    for folder in (worktree, change_folder(worktree)):
+    for folder in (worktree, change_folder(worktree), scratch_folder(worktree)):
         if folder.exists():
             shutil.rmtree(folder)
             removed = True
@@ -1493,13 +1982,16 @@ def main(argv: list[str]) -> int:
         if name == 'review':
             command.add_argument('--author', choices=sorted(AGENTS), required=True, help='the agent running this')
             command.add_argument('--max-rounds', type=int, help=f'reviews in all (default {DEFAULT_MAX_ROUNDS})')
-            command.add_argument('--timeout-minutes', type=float, default=DEFAULT_TIMEOUT_MINUTES)
+            command.add_argument('--timeout-minutes', type=float, help=f'default {DEFAULT_TIMEOUT_MINUTES}, or '
+                                 f'{DEFAULT_CHECK_MINUTES} for a focused check')
+            command.add_argument('--budget-tokens', type=int, help='tokens a focused check may use, cached ones '
+                                 f'included (default {DEFAULT_CHECK_TOKENS})')
         if name == 'reply':
             command.add_argument('--replies', required=True, help='JSON array of {"id", "action", "note"}, and for '
                                  'an escalation "stakes", "options" and "recommendation"')
         if name == 'decide':
             command.add_argument('--decisions', required=True, help='JSON array of {"id", "decision"}, her words '
-                                 f'exactly; {CHECKPOINT} also takes "choice", review or stop')
+                                 f'exactly; {CHECKPOINT} also takes "choice": review, check or stop')
     arguments = parser.parse_args(argv)
     handler = {'review': command_review, 'reply': command_reply, 'decide': command_decide,
                'status': command_status, 'finish': command_finish}[arguments.command]

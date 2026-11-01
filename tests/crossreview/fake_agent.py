@@ -4,7 +4,10 @@ The first argument names the tool being faked. Every call is logged to calls.jso
 BA_CROSSREVIEW_FAKE names, with its arguments, working directory and standard input. pr.json is what
 `gh pr view` prints, and comments.json holds the comments `gh pr comment` posts and `gh api` edits. Each
 reviewer call takes the next entry of reviews.json and streams events as the real tool does: one step of
-work, then, after the entry's `sleep`, its answer and token usage. Git LFS counts as installed only when
+work, then, after the entry's `sleep`, its answer and token usage. A Codex focused check, run with write
+access, first logs each of the entry's `tokens` as a running total in its session's rollout file under
+CODEX_HOME, as Codex does, and leaves the entry's `leaves` files behind. Claude reports each message's
+`streamed` usage with every event of that message, as Claude does. Git LFS counts as installed only when
 lfs-installed exists, and lfs-files.txt is what `git lfs ls-files` prints.
 """
 import json
@@ -18,7 +21,7 @@ tool, args = sys.argv[1], sys.argv[2:]
 stdin = sys.stdin.read() if not sys.stdin.isatty() else ''
 with open(fixture / 'calls.jsonl', 'a', encoding='utf-8') as log:
     log.write(json.dumps({'tool': tool, 'args': args, 'cwd': os.getcwd(), 'stdin': stdin,
-                          'claudecode': os.environ.get('CLAUDECODE')}) + '\n')
+                          'claudecode': os.environ.get('CLAUDECODE'), 'tmpdir': os.environ.get('TMPDIR')}) + '\n')
 
 
 def value(flag):
@@ -90,6 +93,19 @@ usage = review.get('usage', {'input': 1200000, 'cached': 900000, 'output': 30000
 if tool == 'codex':
     session = args[2] if resuming else review.get('session', 'codex-thread-1')
     emit({'type': 'thread.started', 'thread_id': session})
+    if 'sandbox_mode="workspace-write"' in args:
+        rollout = Path(os.environ['CODEX_HOME'], 'sessions/2026/11/01', f'rollout-2026-11-01T09-00-00-{session}.jsonl')
+        rollout.parent.mkdir(parents=True, exist_ok=True)
+        for total in review.get('tokens', []):
+            with open(rollout, 'a', encoding='utf-8') as stream:
+                stream.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'token_count', 'info': {
+                    'total_token_usage': {'input_tokens': total, 'cached_input_tokens': total // 2,
+                                          'output_tokens': 0}}}}) + '\n')
+            emit({'type': 'item.started', 'item': {'type': 'command_execution',
+                                                   'command': "/bin/bash -lc 'python3 -m unittest'"}})
+        for name in review.get('leaves', []):
+            for folder in (os.getcwd(), os.environ['TMPDIR']):
+                Path(folder, name).write_text('Left by the tests.\n', encoding='utf-8')
     emit({'type': 'item.started', 'item': {'type': 'command_execution', 'command': "/bin/bash -lc 'git status --short'"}})
     time.sleep(review.get('sleep', 0))
     Path(value('-o')).write_text(json.dumps(review['output']), encoding='utf-8')
@@ -99,8 +115,11 @@ if tool == 'codex':
 elif tool == 'claude':
     session = value('--resume') if resuming else review.get('session', 'claude-session-1')
     emit({'type': 'system', 'subtype': 'init', 'session_id': session})
-    emit({'type': 'assistant', 'message': {'content': [
+    streamed = review.get('streamed', {'input_tokens': 10, 'output_tokens': 5})
+    emit({'type': 'assistant', 'message': {'id': 'message-1', 'usage': streamed, 'content': [
         {'type': 'tool_use', 'name': 'Read', 'input': {'file_path': os.path.join(os.getcwd(), 'widget.py')}}]}})
+    emit({'type': 'assistant', 'message': {'id': 'message-1', 'usage': streamed, 'content': [
+        {'type': 'text', 'text': 'Reading on.'}]}})
     time.sleep(review.get('sleep', 0))
     emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'session_id': session,
           'result': '', 'structured_output': review['output'], 'total_cost_usd': 1.25,

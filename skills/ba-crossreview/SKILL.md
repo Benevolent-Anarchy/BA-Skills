@@ -1,6 +1,6 @@
 ---
 name: ba-crossreview
-description: Use when a pull request Claude or Codex wrote needs the other agent's review, or Cicely asks to cross-review a pull request, have Codex (or Claude) review it, or stop relaying reviews between the two. Run as the pull request's author. It has the other agent review the pushed head headlessly and read-only, posts each review, each answer and each of Cicely's decisions on the pull request, keeps a status comment there up to date, pauses with a briefing whenever Cicely's decision is needed, including whether to have another round when one looks not worth its cost or the rounds have run out, and repeats until nothing is open or she stops it.
+description: Use when a pull request Claude or Codex wrote needs the other agent's review, or Cicely asks to cross-review a pull request, have Codex (or Claude) review it, or stop relaying reviews between the two. Run as the pull request's author. It has the other agent review the pushed head headlessly and read-only, posts each review, each answer and each of Cicely's decisions on the pull request, keeps a status comment there up to date, pauses with a briefing whenever Cicely's decision is needed, including whether to have another round, a cheaper focused check of the answers, or neither when a round looks not worth its cost or the rounds have run out, and repeats until nothing is open or she stops it.
 ---
 
 # Cross-reviewing a pull request
@@ -62,7 +62,7 @@ The script:
 1. fetches the pull request's head and checks it out in a detached worktree of its own under the system temp folder; that worktree stays put between rounds
 2. pulls the head's Git LFS objects into it if the project uses LFS, and refuses to go on while any file is still a pointer
 3. writes the change and its commits to files beside that worktree for the reviewer to read
-4. runs the reviewer there, in a fresh session in round 1 and resuming that session in later rounds, and shows its progress on the status comment
+4. runs the reviewer there, in a fresh session in round 1 and resuming that session in later rounds, except that the round after a focused check starts a fresh one, and shows its progress on the status comment
 5. posts the review on the pull request word for word, under the reviewer's `[Codex]` or `[Claude]` tag
 6. reports the findings that are open, the questions only Cicely can answer, the tokens the reviewer used, and the briefing
 
@@ -97,13 +97,17 @@ python3 scripts/crossreview.py reply --repository <clone> --pull-request <n> --r
 
 It refuses unless every open finding has exactly one answer, refuses an escalation without its stakes or without at least two options that each say what they imply, and refuses a `fixed` answer while the pull request is still at the reviewed head, since the reviewer could not see the fix. It posts your answers as your own comment.
 
-**When another round may not be worth it.** If every finding you answered was minor or a nit, and your answers changed fewer than 200 lines, the next round would mostly confirm small fixes and could turn up more small points. Then `reply` doesn't go straight on: it asks Cicely, as the decision `next-round`, whether to have another round or stop, with what the last round cost. A blocker or major finding, or bigger changes, go straight to another round.
+**When another round may not be worth it.** If every finding you answered was minor or a nit, and your answers changed fewer than 200 lines, the next round would mostly confirm small fixes and could turn up more small points. Then `reply` doesn't go straight on: it asks Cicely, as the decision `next-round`, whether to have another round, a focused check or neither, with what the last round cost. A blocker or major finding, or bigger changes, go straight to another round.
 
 **When the rounds are used up.** There are three by default. Once they are used, another round is always Cicely's decision, asked as `next-round` too, with what is left and what the last round cost: `reply` asks it when you answer the last round, and `review` asks it, without running the reviewer, when commits are pushed after the cross-review ended at the limit. `--max-rounds` can't raise the limit once it's reached; it's for when Cicely asks for more rounds before they run out.
 
+**A focused check.** Whenever `next-round` is asked and there are answers to check, or findings an earlier check couldn't verify, one of Cicely's options is a focused check instead of a round. The reviewer checks only those findings and your answers to them, in a fresh session, and gives each a verdict: `verified` resolves it, `problem` opens it again for you to answer, and `not verified` leaves it for her. It may also report a problem that those fixes, or the commits since, introduced, as a new finding. A check doesn't count as a round. It runs within limits Cicely set: 1M tokens, cached ones included, and 20 minutes by default. When she sets others for a check, pass them with `--budget-tokens` and `--timeout-minutes`. A check that reaches either limit is stopped and recorded with nothing verified.
+
+Codex checks in a sandbox where it may run the project's tests: it can write only in its checkout and a temp folder of its own, Git can't write, and it has no network. What it leaves behind is cleared afterwards. Claude checks by reading only, as in a review, because the skill has no sandbox for Claude that could safely let it run tests; its check says so. After a check, what follows is Cicely's decision again: `reply` asks her once you have answered the problems it found, and `review` asks her at once when it found none to answer but couldn't verify everything. A check that verifies everything, with nothing new, ends the cross-review as `done`. A full round after a check starts the reviewer afresh, with the history in its prompt.
+
 ## 4. Pause for Cicely
 
-When a command reports the turn `cicely`, the cross-review is paused: the reviewer asked a question only she can answer, you escalated a finding, another round may not be worth it, or the rounds are used up. Stop and call for her attention: use your harness's notification tool if it has one. Then give her the command's `briefing` as it is, since it is written for her, and add your own view where you have one. Don't run another round, and don't guess her answer. Wait for her.
+When a command reports the turn `cicely`, the cross-review is paused: the reviewer asked a question only she can answer, you escalated a finding, another round may not be worth it, the rounds are used up, or a check she chose has run. Stop and call for her attention: use your harness's notification tool if it has one. Then give her the command's `briefing` as it is, since it is written for her, and add your own view where you have one. Don't run another round, and don't guess her answer. Wait for her.
 
 Record her answers exactly as she wrote them: don't summarize, tidy or translate them. A decision that later proves wrong has to be traceable to what she was told and what she said. The record is the real pull request. When the cross-review runs against a test or a faked GitHub, her answers land only in that fixture: tell her so at the time, and copy them, with what she was asked, to the real pull request or an Issue before the fixture goes. One answer for each item waiting for her, in a JSON file:
 
@@ -112,7 +116,7 @@ Record her answers exactly as she wrote them: don't summarize, tidy or translate
  {"id": "next-round", "decision": "Stop there, the rest is polish.", "choice": "stop"}]
 ```
 
-For `next-round`, also give `choice`: `review` for another round, or `stop` to end the cross-review. Past the limit, `review` raises it by one round. If her answer leaves that unclear, ask her again.
+For `next-round`, also give `choice`: `review` for another round, `check` for a focused check, or `stop` to end the cross-review. Past the limit, `review` raises it by one round. If she sets limits for a check, note them for the `review` that runs it. If her answer leaves any of that unclear, ask her again.
 
 ```bash
 python3 scripts/crossreview.py decide --repository <clone> --pull-request <n> --decisions <file>
@@ -124,6 +128,7 @@ It refuses unless every item waiting for her has exactly one decision. It posts 
 
 Each command's `turn` says what comes next:
 - `review`: run the next round. The reviewer checks your fixes in the code, weighs your reasons for declining, holds both of you to Cicely's decisions, and may raise new problems that your changes introduced. It treats a reasoned decline of a minor point as settled unless the reason is wrong on the facts.
+- `check`: Cicely chose a focused check. Run `review`, with her limits if she set any: it runs the check rather than a round.
 - `reply`: answer the open findings.
 - `cicely`: pause for Cicely's decisions (step 4).
 - `done`: nothing is left between you and the reviewer at the reviewed head. If you push more commits later, `review` reviews them as another round.
