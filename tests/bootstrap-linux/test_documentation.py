@@ -122,4 +122,37 @@ class Documentation(unittest.TestCase):
                 self.assertFalse(result['Passed'],result)
                 self.assertTrue(any('README.md:'+str(line)+':' in item and 'docs/missing.md' in item for item in result['Diagnostics']),result)
 
+    def test_unicode_whitespace_trim_cannot_turn_code_into_an_obsidian_comment(self):
+        self.write('tools/verify.json','{"schemaVersion":1,"preset":"foundation","requiredChecks":["documentation"]}')
+        for space in ('\u00a0','\u2028','\u3000'):
+            for prefix,continuation in ((space*3+'\n','Write `%%` to start a comment.\n'),('- '+space+'\n','  Write `%%` to start a comment.\n'),('> '+space+'\n','> Write `%%` to start a comment.\n'),(space*3+'\n','Write `%%` to start a comment.\n---\n')):
+                with self.subTest(prefix=repr(prefix),continuation=continuation):
+                    text=prefix+continuation+'\n[bad](docs/missing.md)\n'
+                    self.write('README.md',text)
+                    result=g.verify(self.root)
+                    self.assertFalse(result['Passed'],result)
+                    line=text[:text.index('[bad]')].count('\n')+1
+                    self.assertTrue(any('README.md:'+str(line)+':' in item and 'docs/missing.md' in item for item in result['Diagnostics']),result)
+
+    def test_tab_expansion_does_not_hide_a_wiki_link_beside_code(self):
+        self.write('docs/NEXT.md','- item\n\tmore `x`[[missing-note]] end\n')
+        result=g.documentation(self.root)
+        self.assertFalse(result['Passed'],result)
+        self.assertTrue(any('docs/NEXT.md:2:' in item and 'missing-note' in item for item in result['Diagnostics']),result)
+
+    def test_unicode_trimmed_index_paragraph_keeps_its_metadata_line(self):
+        path=self.root/'docs/JUDGEMENTS.md'
+        path.write_text(path.read_text().replace('- [[judgements/interface#Focus is visible|Focus is visible]]','\u00a0\u00a0\n[Focus is visible](judgements/interface.md#focus-is-visible)'))
+        result=g.documentation(self.root)
+        self.assertTrue(result['Passed'],result)
+
+    def test_html_comment_exclusion_preserves_the_surrounding_list_structure(self):
+        self.write('tools/verify.json','{"schemaVersion":1,"preset":"foundation","requiredChecks":["documentation"]}')
+        for indent in ('    ','\t'):
+            with self.subTest(indent=repr(indent)):
+                self.write('README.md','- <!--\n  -->\n'+indent+'[bad](docs/missing.md)\n')
+                result=g.verify(self.root)
+                self.assertFalse(result['Passed'],result)
+                self.assertTrue(any('README.md:3:' in item and 'docs/missing.md' in item for item in result['Diagnostics']),result)
+
 if __name__=='__main__': unittest.main()

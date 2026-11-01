@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Standalone Linux project gate. Python standard library only; no installed skill needed."""
 import argparse
+from bisect import bisect_right
 import importlib.util
 import datetime
 import json
@@ -21,8 +22,67 @@ import xml.etree.ElementTree as ET
 sys.dont_write_bytecode=True
 sys.path.insert(0,str(Path(__file__).resolve().parent/'_vendor'))
 from markdown_it import MarkdownIt
+from markdown_it.parser_block import ParserBlock
+from markdown_it.rules_block import heading as parse_heading
+from markdown_it.rules_block.state_block import StateBlock
 from markdown_it.rules_inline import autolink, backtick, html_inline, image, link
 MARKDOWN=MarkdownIt('commonmark')
+
+class SourceText(str):
+    """Keep source boundaries when the block rules trim their inline content."""
+    def __new__(cls,value,positions):
+        result=super().__new__(cls,value); result.positions=positions
+        return result
+    def strip(self,chars=None):
+        left=len(self)-len(str.lstrip(self,chars)); right=max(left,len(str.rstrip(self,chars)))
+        return SourceText(str.strip(self,chars),self.positions[left:right+1])
+
+class SourceBlockState(StateBlock):
+    def getLines(self,begin,end,indent,keepLastLF):
+        value=super().getLines(begin,end,indent,keepLastLF)
+        chunks=[]; positions=[]; last=self.bMarks[begin]
+        # Mirror the pinned parser's getLines transformations while its live list/
+        # quote offsets and tab widths are available; never infer them from content.
+        for line in range(begin,end):
+            line_start=first=self.bMarks[line]; width=0
+            last=min(len(self.src),self.eMarks[line]+(line+1<end or keepLastLF))
+            while first<last and width<indent:
+                char=self.src[first]
+                if char in (' ','\t'): width+=4-(width+self.bsCount[line])%4 if char=='\t' else 1
+                elif first-line_start<self.tShift[line]: width+=1
+                else: break
+                first+=1
+            padding=max(0,width-indent)
+            chunks.append(' '*padding+self.src[first:last])
+            positions.extend([first-1]*padding); positions.extend(range(first,last))
+        if ''.join(chunks)!=value: raise ValueError('Markdown source mapping disagrees with the pinned block parser')
+        return SourceText(value,positions+[last])
+
+class SourceBlockParser(ParserBlock):
+    def parse(self,src,md,env,outTokens):
+        if not src: return None
+        state=SourceBlockState(src,md,env,outTokens)
+        self.tokenize(state,state.line,state.lineMax)
+        for token in state.tokens:
+            if token.type=='inline':
+                if isinstance(token.content,SourceText): token.meta['source_positions']=token.content.positions
+                if len(token.meta.get('source_positions',[]))!=len(token.content)+1:
+                    raise ValueError('Markdown inline content has no exact source mapping')
+        return state.tokens
+
+def located_heading(state,start,end,silent):
+    count=len(state.tokens); begin=state.bMarks[start]+state.tShift[start]
+    matched=parse_heading(state,start,end,silent)
+    if matched and not silent:
+        begin+=len(state.tokens[count].markup)
+        raw=state.src[begin:state.eMarks[start]]; begin+=len(raw)-len(raw.lstrip())
+        token=state.tokens[count+1]
+        if state.src[begin:begin+len(token.content)]!=token.content: raise ValueError('Markdown heading source mapping failed')
+        token.meta['source_positions']=range(begin,begin+len(token.content)+1)
+    return matched
+
+_blocks=SourceBlockParser(); _blocks.ruler=MARKDOWN.block.ruler; MARKDOWN.block=_blocks
+MARKDOWN.block.ruler.at('heading',located_heading,{'alt':['paragraph','reference','blockquote']})
 
 def located_inline(rule,kind):
     """Keep source positions while leaving CommonMark link recognition to the parser."""
@@ -110,11 +170,9 @@ def block_spans(text,tree,kinds):
             for token in tree if token.type in kinds and token.map]
 
 def inline_position(token,position,lines,starts):
-    row=token.content.count('\n',0,position); sourcerow=token.map[0]+row
-    column=position-token.content.rfind('\n',0,position)-1
-    # CommonMark strips list/quote prefixes from inline content.
-    column+=max(0,lines[sourcerow].find(token.content.split('\n')[row]))
-    return sourcerow,column,starts[sourcerow]+column
+    absolute=token.meta['source_positions'][position]
+    row=bisect_right(starts,absolute,0,len(lines))-1
+    return row,absolute-starts[row],absolute
 
 def inline_spans(text,tree):
     starts=source_lines(text); lines=text.split('\n'); spans=[]
@@ -131,21 +189,14 @@ def tokens(text):
     text=text.replace('\r\n','\n').replace('\r','\n'); chars=list(text)
     at=0
     while at<len(text):
-        current=''.join(chars); match=re.search(r'<!--|%%',current[at:])
+        current=''.join(chars); match=re.search(r'%%',current[at:])
         if not match: break
-        start=at+match.start(); marker=match[0]
+        start=at+match.start()
         initial_tree=MARKDOWN.parse(current,{})
-        protected=block_spans(current,initial_tree,{'fence','code_block'})+inline_spans(current,initial_tree)
+        protected=block_spans(current,initial_tree,{'fence','code_block','html_block'})+inline_spans(current,initial_tree)
         if escaped(current,start) or any(a<=start<b for a,b in protected):
-            at=start+len(marker); continue
-        close=current.find('-->' if marker=='<!--' else '%%',start+len(marker))
-        if marker=='<!--':
-            blockend=next((b for a,b in block_spans(current,initial_tree,{'html_block'}) if a<=start<b),None)
-            # Real inline comments are already protected by their parser token. Other
-            # inline openers are literal, even if another paragraph contains a closer.
-            if blockend is None: at=start+len(marker); continue
-            end=blockend if close<0 else min(blockend,close+3)
-        else: end=len(current) if close<0 else close+2
+            at=start+2; continue
+        close=current.find('%%',start+2); end=len(current) if close<0 else close+2
         for i in range(start,end):
             if chars[i]!='\n': chars[i]=' '
         at=end

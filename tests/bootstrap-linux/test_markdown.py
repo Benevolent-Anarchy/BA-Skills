@@ -27,6 +27,24 @@ class Markdown(unittest.TestCase):
         result=g.tokens('```not `valid fence info\n## Behaviour of `Size`\n## Behaviour of `Colour`\n~~~\n## Hidden\n    ~~~\n## Still hidden\n~~~\n## Visible\n\\\\[[live]]\n')
         self.assertEqual([x[1] for x in result['headings']],['Behaviour of `Size`','Behaviour of `Colour`','Visible']); self.assertEqual([x['target'] for x in result['links']],['live'])
 class HtmlAndLabels(unittest.TestCase):
+    def test_inline_spans_keep_exact_offsets_through_block_normalization(self):
+        cases=(
+            '\u00a0\u00a0\u00a0\nWrite `%%` and [[live]].\n',
+            '- \u00a0\n  Write `%%` and [[live]].\n',
+            '> \u00a0\n> Write `%%` and [[live]].\n',
+            '- item\n\tmore `x`[[live]] end\n',
+            '> - item\n>\tmore `x`[[live]] end\n',
+            '\u3000\nWrite `%%` and [[live]].\n---\n',
+            '# \u3000 Write `%%` and [[live]]. ###\n',
+            '> \u00a0\n> text <!-- [[hidden]] --> [[live]]\n',
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                spans=g.inline_spans(text,g.MARKDOWN.parse(text,{}))
+                expected='<!-- [[hidden]] -->' if '<!--' in text else '`%%`' if '`%%`' in text else '`x`'
+                self.assertEqual(spans,[(text.index(expected),text.index(expected)+len(expected))])
+                self.assertEqual([link['target'] for link in g.tokens(text)['links']],['live'])
+
     def test_real_html_comments_hide_wiki_links_in_containers_and_image_alts(self):
         for text in ('> text <!-- note\n> [[hidden]]\n> --> end\n','- text <!-- note\n  [[hidden]]\n  --> end\n','![alt <!-- [[hidden]] --> end](present.md)\n'):
             with self.subTest(text=text):
