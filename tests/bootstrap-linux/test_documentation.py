@@ -83,4 +83,43 @@ class Documentation(unittest.TestCase):
                 result=g.documentation(self.root)
                 self.assertTrue(result['Passed'],result)
 
+    def test_unicode_separators_preserve_judgement_source_lines(self):
+        topic=self.root/'docs/judgements/interface.md'; original=topic.read_text()
+        index=self.root/'docs/JUDGEMENTS.md'; original_index=index.read_text()
+        for separator in ('\u2028','\u2029','\x85','\v','\f','\x1c','\x1d','\x1e'):
+            with self.subTest(separator=repr(separator)):
+                topic.write_text(original.replace('Body.','Pasted left'+separator+'right.')+'\n### Second record\n*Judged 2024-03-01, on Linux desktop.*\nBody.\n')
+                index.write_text(original_index+'Pasted left'+separator+'right.\n- [Second record](judgements/interface.md#second-record) — Judged 2024-03-01, on Linux desktop\n')
+                result=g.documentation(self.root)
+                self.assertTrue(result['Passed'],result)
+
+    def test_complete_gate_checks_links_nested_in_image_alt_text(self):
+        self.write('tools/verify.json','{"schemaVersion":1,"preset":"foundation","requiredChecks":["documentation"]}')
+        cases=(
+            ('![alt [x](docs/missing.md)](docs/DESIGN.md)\n',1),
+            ('![alt\n[x](docs/missing.md)](docs/DESIGN.md)\n',2),
+            ('![outer ![inner [x](docs/missing.md)](docs/DESIGN.md)](docs/DESIGN.md)\n',1),
+            ('![alt [x][ref]](docs/DESIGN.md)\n\n[ref]: docs/missing.md\n',1),
+        )
+        for text,line in cases:
+            with self.subTest(text=text):
+                self.write('README.md',text)
+                result=g.verify(self.root)
+                self.assertFalse(result['Passed'],result)
+                self.assertTrue(any('README.md:'+str(line)+':' in item and 'docs/missing.md' in item for item in result['Diagnostics']),result)
+
+    def test_html_comments_do_not_hide_links_outside_their_commonmark_scope(self):
+        self.write('tools/verify.json','{"schemaVersion":1,"preset":"foundation","requiredChecks":["documentation"]}')
+        cases=(
+            ('- <!-- note\n- [bad](docs/missing.md)\n',2),
+            ('> <!-- note\n\n[bad](docs/missing.md)\n',3),
+            ('Text <!-- a\n\n[bad](docs/missing.md)\n\nmore --> end\n',3),
+        )
+        for text,line in cases:
+            with self.subTest(text=text):
+                self.write('README.md',text)
+                result=g.verify(self.root)
+                self.assertFalse(result['Passed'],result)
+                self.assertTrue(any('README.md:'+str(line)+':' in item and 'docs/missing.md' in item for item in result['Diagnostics']),result)
+
 if __name__=='__main__': unittest.main()

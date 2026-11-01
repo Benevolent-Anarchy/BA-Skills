@@ -21,7 +21,7 @@ import xml.etree.ElementTree as ET
 sys.dont_write_bytecode=True
 sys.path.insert(0,str(Path(__file__).resolve().parent/'_vendor'))
 from markdown_it import MarkdownIt
-from markdown_it.rules_inline import autolink, image, link
+from markdown_it.rules_inline import autolink, backtick, html_inline, image, link
 MARKDOWN=MarkdownIt('commonmark')
 
 def located_inline(rule,kind):
@@ -30,18 +30,35 @@ def located_inline(rule,kind):
         start=state.pos; count=len(state.tokens)
         matched=rule(state,silent)
         if matched and not silent:
-            token=next(token for token in state.tokens[count:] if token.type==kind)
-            token.meta['source_span']=(start,state.pos)
+            token=next((token for token in state.tokens[count:] if token.type==kind),None)
+            if token is not None: token.meta['source_span']=(start,state.pos)
         return matched
     return parse
 
-for name,rule,kind in (('link',link,'link_open'),('image',image,'image'),('autolink',autolink,'link_open')):
+for name,rule,kind in (('link',link,'link_open'),('image',image,'image'),('autolink',autolink,'link_open'),('html_inline',html_inline,'html_inline'),('backticks',backtick,'code_inline')):
     MARKDOWN.inline.ruler.at(name,located_inline(rule,kind))
 
 def rendered_text(children):
     return ''.join(rendered_text(child.children or []) if child.type=='image' else
                    child.content if child.type in ('text','code_inline') else
                    ' ' if child.type in ('softbreak','hardbreak') else '' for child in children)
+
+def inline_nodes(children,origin=0):
+    """Walk image alt inlines as well, retaining their origin in the paragraph."""
+    for index,child in enumerate(children):
+        yield child,children,index,origin
+        if child.type=='image':
+            yield from inline_nodes(child.children or [],origin+child.meta['source_span'][0]+2)
+
+def inline_links(children):
+    for child,siblings,index,origin in inline_nodes(children):
+        if child.type not in ('link_open','image'): continue
+        start,end=child.meta['source_span']
+        if child.type=='image': label=rendered_text(child.children or [])
+        else:
+            close=next(i for i in range(index+1,len(siblings)) if siblings[i].type=='link_close')
+            label=rendered_text(siblings[index+1:close])
+        yield child,label,origin+start,origin+end
 
 REQUIRED = {'foundation':['documentation'], 'godot':['documentation','godot-import','godot-compile','gut-headless'], 'tauri':['documentation','typescript','frontend-tests','frontend-build','rust-format','rust-lint','rust-tests','tauri-build']}
 
@@ -81,29 +98,6 @@ def escaped(text,at):
     while back>=0 and text[back]=='\\': back-=1
     return (at-back-1)%2==1
 
-def code_spans(text):
-    blocks=[]; begin=0; offset=0
-    for line in text.splitlines(keepends=True):
-        boundary=not line.strip() or re.match(r'^ {0,3}(?:#{1,6}\s|<!--)',line)
-        if boundary:
-            if begin<offset: blocks.append((begin,offset))
-            blocks.append((offset,offset+len(line))); begin=offset+len(line)
-        offset+=len(line)
-    if begin<len(text): blocks.append((begin,len(text)))
-    spans=[]
-    for start,end in blocks:
-        at=start
-        while at<end:
-            match=re.search(r'`+',text[at:end])
-            if not match: break
-            a=at+match.start(); b=at+match.end(); ticks=text[a:b]
-            if escaped(text,a): at=b; continue
-            close=re.search(r'(?<!`)'+re.escape(ticks)+r'(?!`)',text[b:end])
-            if close:
-                finish=b+close.end(); spans.append((a,finish)); at=finish
-            else: at=b
-    return spans
-
 def source_lines(text):
     starts=[0]
     for match in re.finditer('\n',text): starts.append(match.end())
@@ -115,17 +109,21 @@ def block_spans(text,tree,kinds):
     return [(starts[token.map[0]],starts[min(token.map[1],len(starts)-1)])
             for token in tree if token.type in kinds and token.map]
 
+def inline_position(token,position,lines,starts):
+    row=token.content.count('\n',0,position); sourcerow=token.map[0]+row
+    column=position-token.content.rfind('\n',0,position)-1
+    # CommonMark strips list/quote prefixes from inline content.
+    column+=max(0,lines[sourcerow].find(token.content.split('\n')[row]))
+    return sourcerow,column,starts[sourcerow]+column
+
 def inline_spans(text,tree):
-    starts=source_lines(text); spans=[]
+    starts=source_lines(text); lines=text.split('\n'); spans=[]
     for token in tree:
         if token.type!='inline' or not token.map: continue
-        begin,end=starts[token.map[0]],starts[min(token.map[1],len(starts)-1)]
-        spans.extend((begin+a,begin+b) for a,b in code_spans(text[begin:end]))
-        at=begin
-        for child in token.children or []:
-            if child.type=='html_inline':
-                found=text.find(child.content,at,end)
-                if found>=0: spans.append((found,found+len(child.content))); at=found+len(child.content)
+        for child,_,_,origin in inline_nodes(token.children or []):
+            if child.type in ('html_inline','code_inline'):
+                a,b=child.meta['source_span']
+                spans.append((inline_position(token,origin+a,lines,starts)[2],inline_position(token,origin+b,lines,starts)[2]))
     return spans
 
 def tokens(text):
@@ -141,9 +139,13 @@ def tokens(text):
         if escaped(current,start) or any(a<=start<b for a,b in protected):
             at=start+len(marker); continue
         close=current.find('-->' if marker=='<!--' else '%%',start+len(marker))
-        if marker=='<!--' and close<0 and not any(a<=start<b for a,b in block_spans(current,initial_tree,{'html_block'})):
-            at=start+len(marker); continue  # An unclosed inline opener is literal prose.
-        end=len(current) if close<0 else close+(3 if marker=='<!--' else 2)
+        if marker=='<!--':
+            blockend=next((b for a,b in block_spans(current,initial_tree,{'html_block'}) if a<=start<b),None)
+            # Real inline comments are already protected by their parser token. Other
+            # inline openers are literal, even if another paragraph contains a closer.
+            if blockend is None: at=start+len(marker); continue
+            end=blockend if close<0 else min(blockend,close+3)
+        else: end=len(current) if close<0 else close+2
         for i in range(start,end):
             if chars[i]!='\n': chars[i]=' '
         at=end
@@ -152,7 +154,7 @@ def tokens(text):
         for i in range(begin,end):
             if chars[i]!='\n': chars[i]=' '
     visible=''.join(chars); spans=inline_spans(visible,tree)
-    headings=[]; lines=visible.splitlines()
+    headings=[]; lines=visible.split('\n')
     for index,token in enumerate(tree):
         if token.type=='heading_open' and token.map:
             title=tree[index+1].content
@@ -167,22 +169,12 @@ def tokens(text):
         add('wiki',target,label,len(parts)>1,match.start(),match.end())
     for token in tree:
         if token.type!='inline' or not token.map: continue
-        children=token.children or []; content_lines=token.content.split('\n')
-        for index,child in enumerate(children):
-            if child.type not in ('link_open','image'): continue
-            start,end=child.meta['source_span']; row=token.content.count('\n',0,start)
-            startcolumn=start-token.content.rfind('\n',0,start)-1
-            sourcerow=token.map[0]+row
-            absolute=starts[sourcerow]+max(0,lines[sourcerow].find(content_lines[row]))+startcolumn
+        children=token.children or []
+        for child,label,start,end in inline_links(children):
+            sourcerow,_,absolute=inline_position(token,start,lines,starts)
             if any(a<=absolute<b for a,b in wikispans): continue
-            endrow=token.content.count('\n',0,end); column=end-token.content.rfind('\n',0,end)-1
-            # Inline content omits list/quote prefixes. Restore that offset for index metadata.
-            source=lines[token.map[0]+endrow]; offset=max(0,source.find(content_lines[endrow]))
-            if child.type=='image': label=rendered_text(child.children or [])
-            else:
-                close=next(i for i in range(index+1,len(children)) if children[i].type=='link_close')
-                label=rendered_text(children[index+1:close])
-            links.append(dict(kind='markdown',target=child.attrGet('src' if child.type=='image' else 'href'),label=label,alias=True,line=sourcerow+1,endLine=token.map[0]+endrow+1,end=offset+column))
+            endrow,column,_=inline_position(token,end,lines,starts)
+            links.append(dict(kind='markdown',target=child.attrGet('src' if child.type=='image' else 'href'),label=label,alias=True,line=sourcerow+1,endLine=endrow+1,end=column))
     return dict(headings=headings,links=sorted(links,key=lambda item:item['line']),lines=lines)
 
 def documentation(root):

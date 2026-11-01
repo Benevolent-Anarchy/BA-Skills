@@ -27,6 +27,19 @@ class Markdown(unittest.TestCase):
         result=g.tokens('```not `valid fence info\n## Behaviour of `Size`\n## Behaviour of `Colour`\n~~~\n## Hidden\n    ~~~\n## Still hidden\n~~~\n## Visible\n\\\\[[live]]\n')
         self.assertEqual([x[1] for x in result['headings']],['Behaviour of `Size`','Behaviour of `Colour`','Visible']); self.assertEqual([x['target'] for x in result['links']],['live'])
 class HtmlAndLabels(unittest.TestCase):
+    def test_real_html_comments_hide_wiki_links_in_containers_and_image_alts(self):
+        for text in ('> text <!-- note\n> [[hidden]]\n> --> end\n','- text <!-- note\n  [[hidden]]\n  --> end\n','![alt <!-- [[hidden]] --> end](present.md)\n'):
+            with self.subTest(text=text):
+                result=g.tokens(text)
+                self.assertEqual([link for link in result['links'] if link['kind']=='wiki'],[])
+
+    def test_unicode_separators_do_not_split_inline_code(self):
+        for separator in ('\u2028','\u2029','\x85','\v','\f','\x1c','\x1d','\x1e','\u00a0','\u2003'):
+            with self.subTest(separator=repr(separator)):
+                for text in ('`code'+separator+'## [[hidden]]` [[live]]\n','`code\n'+separator+'\nlast [[hidden]]` [[live]]\n','`code\n##'+separator+'[[hidden]]` [[live]]\n'):
+                    result=g.tokens(text)
+                    self.assertEqual([link['target'] for link in result['links']],['live'])
+
     def test_wiki_links_do_not_inherit_commonmark_reference_targets(self):
         result=g.tokens('[[design/live]]\n\n[design/live]: missing.md\n')
         self.assertEqual([(link['kind'],link['target']) for link in result['links']],[('wiki','design/live')])

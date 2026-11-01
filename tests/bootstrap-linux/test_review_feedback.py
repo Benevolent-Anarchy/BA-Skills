@@ -112,6 +112,32 @@ class CloudReview(unittest.TestCase):
                 self.assertEqual(b.Bootstrap().root, self.root/'.local/state/BA-Skills/ba-bootstrap/state')
                 self.assertEqual(b.obsidian_settings(), self.root/'.config/obsidian/obsidian.json')
 
+    def test_installed_plugins_accept_two_part_minimum_app_versions(self):
+        project=Path(self.id['projectPath'])
+        b.write_manifest(project,b.foundation(self.id,self.preset))
+        self.engine.git(project,'init','--initial-branch=main')
+        for plugin in b.read_json(b.ASSETS/'obsidian/plugins.json'):
+            active=project/'docs/.obsidian/plugins'/plugin; active.mkdir(parents=True,exist_ok=True)
+            b.atomic_json(active/'manifest.json',dict(id=plugin,version='1.0.0',minAppVersion='1.4'))
+            (active/'main.js').write_text('installed bytes')
+        with patch.object(self.engine,'obsidian_request',side_effect=AssertionError('must retain installed plugins')):
+            result=self.engine.install_obsidian(self.id,app_version='1.5.0',app_check=lambda *_:{'verified':True})
+            self.assertTrue(result['installedVerified'],result)
+            result=self.engine.install_obsidian(self.id,app_version='1.3.9',app_check=lambda *_:{'verified':True})
+            self.assertFalse(result['installedVerified'],result)
+            self.assertTrue(any('requires Obsidian 1.4' in item for item in result['pending']),result)
+
+    def test_registry_releases_accept_two_part_minimum_app_versions(self):
+        base='https://github.com/fixture/dataview/releases/download/1.0.0/'
+        release=dict(tag_name='1.0.0',draft=False,prerelease=False,assets=[dict(name=name,browser_download_url=base+name) for name in ('manifest.json','main.js')])
+        def request(method,url,body=None):
+            if url=='/repos/fixture/dataview/releases/latest': return 200,release
+            if url==base+'manifest.json': return 200,dict(id='dataview',version='1.0.0',minAppVersion='1.4')
+            self.fail('valid latest release must not fall back to history: '+url)
+        selected=b.plugin_release('dataview',[dict(id='dataview',repo='fixture/dataview')],request)
+        self.assertEqual(selected['minAppVersion'],'1.4')
+        self.assertEqual(selected['skipped'],[])
+
 
 if __name__ == '__main__':
     unittest.main()

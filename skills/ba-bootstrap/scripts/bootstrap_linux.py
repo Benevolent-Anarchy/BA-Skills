@@ -880,7 +880,7 @@ class Bootstrap:
         return result
 
 def version_tuple(value):
-    if not re.fullmatch(r'\d+\.\d+\.\d+(?:\.\d+)?',value): raise ValueError('Invalid version: '+value)
+    if not re.fullmatch(r'\d+(?:\.\d+){1,3}',value): raise ValueError('Invalid version: '+value)
     return tuple(map(int,value.split('.')))
 def plugin_release(plugin,registry,request):
     entries=[item for item in registry if item['id']==plugin]
