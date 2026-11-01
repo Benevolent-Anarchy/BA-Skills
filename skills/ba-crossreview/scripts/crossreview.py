@@ -658,7 +658,8 @@ def all_ids(state: dict) -> list[str]:
 
 def turn(state: dict | None, head: str | None = None) -> str:
     """Whose move it is: review, reply, cicely (her decisions are needed first), done (nothing left between the
-    two at the reviewed head), stopped (she ended it rather than have another round) or limit (rounds used up).
+    two at the reviewed head), stopped (she ended it rather than have another round) or limit (the rounds are used
+    up and something is left unreviewed, but she hasn't been asked yet; `review` asks her).
     Given the pull request's head, a cross-review done or stopped at an earlier head is due another review."""
     if not state or not state['rounds']:
         return 'review'
@@ -670,7 +671,7 @@ def turn(state: dict | None, head: str | None = None) -> str:
     if last['answers'] is None and (not head or head == last['head']):
         return 'done'
     asked = checkpoint(last)
-    if asked and asked.get('choice') == 'stop' and (not head or head == last['answers']['head']):
+    if asked and asked.get('choice') == 'stop' and (not head or head == asked['head']):
         return 'stopped'
     return 'limit' if len(state['rounds']) >= state['maxRounds'] else 'review'
 
@@ -684,9 +685,22 @@ def questions(round: dict) -> list[dict]:
 
 
 def checkpoint(round: dict) -> dict | None:
-    """The question whether another round is worth it, which `reply` puts to Cicely after answers to only minor
-    findings."""
-    return (round.get('answers') or {}).get('checkpoint')
+    """The latest question to Cicely whether to have another round after this one. `reply` asks it after answers to
+    only minor findings, and after answers to the last round; `review` asks it when the rounds are used up and new
+    commits are left unreviewed. Earlier ones stay in the list."""
+    return (round.get('checkpoints') or [None])[-1]
+
+
+def ask_next_round(state: dict, reason: str, head: str) -> dict:
+    """Puts the question whether to have another round to Cicely: `small` after answers to only minor findings,
+    `limit` when the rounds are used up. `head` is what another round would review."""
+    last = state['rounds'][-1]
+    title = (f'Another round after round {last["round"]}, past the limit of {state["maxRounds"]}?'
+             if reason == 'limit' else f'Another round after round {last["round"]}?')
+    item = {'id': CHECKPOINT, 'reason': reason, 'round': last['round'], 'head': head, 'title': title,
+            'decision': None, 'choice': None}
+    last.setdefault('checkpoints', []).append(item)
+    return item
 
 
 def pending(state: dict) -> list[dict]:
@@ -841,7 +855,11 @@ def answers_comment(state: dict, round: dict) -> str:
         lines.append(f'- **{reply["id"]}** · {ACTIONS[reply["action"]]} · {titles[reply["id"]]} — {note[0]}')
         lines += indented('\n'.join(note[1:]))
         lines += in_item(considerations(reply, f'{AGENTS[state["author"]]} recommends'))
-    if checkpoint(round):
+    asked = checkpoint(round)
+    if asked and asked['reason'] == 'limit':
+        lines += ['', f'Round {round["round"]} was the last of {state["maxRounds"]}, so the cross-review pauses for '
+                      'Cicely to decide whether to have another round.']
+    elif asked:
         lines += ['', f'Only minor or nit findings were left, and these answers change {answers["changedLines"]} '
                       'lines, so the cross-review pauses for Cicely to decide whether another round is worth it.']
     return '\n'.join(lines) + '\n'
@@ -881,7 +899,7 @@ def item_lines(state: dict, item: dict) -> list[str]:
     """One thing waiting for Cicely, told so that she can decide it without having followed the review."""
     reviewer, author = AGENTS[state['reviewer']], AGENTS[state['author']]
     if item['id'] == CHECKPOINT:
-        return checkpoint_lines(state)
+        return limit_lines(state, item) if item['reason'] == 'limit' else checkpoint_lines(state, item)
     lines = [f'#### {item["id"]} · {item["title"]}']
     if 'note' in item:
         who = author
@@ -899,7 +917,38 @@ def item_lines(state: dict, item: dict) -> list[str]:
                     [*extra.splitlines(), '', f'*{who} gave no options; ask {author} to spell them out.*'])
 
 
-def checkpoint_lines(state: dict) -> list[str]:
+def limit_lines(state: dict, item: dict) -> list[str]:
+    """Whether to have another round when the rounds are used up and something is left unreviewed."""
+    reviewer, author = AGENTS[state['reviewer']], AGENTS[state['author']]
+    last = state['rounds'][-1]
+    number, took, answers = last['round'], cost(last), last['answers'] or {}
+    lines = [f'#### {item["title"]}']
+    if answers.get('head') == item['head']:
+        left = f'{author}\'s answers to round {number} unchecked'
+        notes = {reply['id']: reply for reply in answers['replies']}
+        lines.append(f'All {state["maxRounds"]} rounds are used, and {reviewer} hasn\'t checked {author}\'s answers to '
+                     f'round {number}:')
+        for finding in open_findings(last):
+            lines.append(f'- **{finding["id"]}** · {finding["severity"]} · {finding["title"]}')
+            lines.append(f'  - {reviewer}: {short(finding.get("reply") or finding["detail"], 300)}')
+            if finding['id'] in notes:
+                reply = notes[finding['id']]
+                lines.append(f'  - {author} {reply["action"]} it: {short(reply["note"], 300)}')
+    else:
+        left = f'the commits since round {number} unreviewed'
+        lines.append(f'All {state["maxRounds"]} rounds are used, and the commits pushed since round {number}, up to '
+                     f'`{item["head"][:7]}`, haven\'t been reviewed.')
+    return lines + ['', f'**Why it matters:** the rounds limit caps what the cross-review spends. Another round is '
+                        f'another review by {reviewer}' + (f'; round {number} took {took}.' if took else '.')
+                        + f' Stopping leaves {left}.',
+                    '', '**Options:**',
+                    f'1. **Another round** (round {number + 1}): {reviewer} checks what is above, and may raise new '
+                    'points only on what changed.',
+                    f'2. **Stop here:** the cross-review ends at `{item["head"][:7]}`. What is open stays open on the '
+                    'record; decide any of it yourself, or leave it. Marking the pull request ready stays your call.']
+
+
+def checkpoint_lines(state: dict, item: dict) -> list[str]:
     """Whether another round is worth it, after a round that left only minor findings."""
     reviewer, author = AGENTS[state['reviewer']], AGENTS[state['author']]
     last = state['rounds'][-1]
@@ -916,7 +965,7 @@ def checkpoint_lines(state: dict) -> list[str]:
     if declined:
         stop.append(f'The declines of {", ".join(declined)} stand.')
     stop.append('All of it stays on the record, and marking the pull request ready stays your call.')
-    return [f'#### Another round after round {number}?',
+    return [f'#### {item["title"]}',
             f'Round {number} left only minor or nit findings to answer: {answered}. {author}\'s answers changed '
             f'{changed} lines. The cross-review asks you before another round whenever a round\'s open findings were '
             f'all minor or nits and the answers changed fewer than {SMALL_ANSWERS} lines.',
@@ -971,31 +1020,20 @@ def next_lines(state: dict, move: str) -> list[str]:
     if move == 'done':
         return ['', f'**Next:** nothing is open between {author} and {reviewer} at `{last["head"][:7]}`. Marking the '
                     'pull request ready is your call.']
-    replies = (last['answers'] or {}).get('replies', [])
-    unchecked = ', '.join(f'{reply["id"]} ({ACTIONS[reply["action"]]})' for reply in replies)
     if move == 'stopped':
-        return ['', f'**You stopped it** after round {last["round"]}, at `{last["answers"]["head"][:7]}`. {reviewer} '
-                    f'didn\'t check {author}\'s last answers: {unchecked}. Marking the pull request ready is your call.']
-    # The rounds are used up.
-    took = cost(last)
-    lines = ['', f'### All {state["maxRounds"]} rounds are used']
-    open_now = open_findings(last) if replies else []
-    if open_now:
-        notes = {reply['id']: reply for reply in replies}
-        lines.append(f'{reviewer} hasn\'t checked {author}\'s answers to round {last["round"]}:')
-        for finding in open_now:
-            lines.append(f'- **{finding["id"]}** · {finding["severity"]} · {finding["title"]}')
-            lines.append(f'  - {reviewer}: {short(finding.get("reply") or finding["detail"], 300)}')
-            if finding['id'] in notes:
-                reply = notes[finding['id']]
-                lines.append(f'  - {author} {reply["action"]} it: {short(reply["note"], 300)}')
-    else:
-        lines.append(f'Commits pushed since round {last["round"]} haven\'t been reviewed.')
-    return lines + ['', '**Options:**',
-                    f'1. **One more round** (`--max-rounds {state["maxRounds"] + 1}`): {reviewer} checks what is above'
-                    + (f'. Expect about what round {last["round"]} took: {took}.' if took else '.'),
-                    '2. **Stop here:** what is open stays open on the record. Decide any of it yourself, or leave '
-                    'it; marking the pull request ready is your call.']
+        asked = checkpoint(last)
+        answers = last['answers'] or {}
+        if answers.get('head') == asked['head']:
+            unchecked = ', '.join(f'{reply["id"]} ({ACTIONS[reply["action"]]})' for reply in answers['replies'])
+            left = f'{reviewer} didn\'t check {author}\'s last answers: {unchecked}.'
+        else:
+            left = f'{reviewer} didn\'t review the commits since round {last["round"]}.'
+        return ['', f'**You stopped it** after round {last["round"]}, at `{asked["head"][:7]}`. {left} Marking the '
+                    'pull request ready is your call.']
+    # The rounds are used up, and she hasn't been asked yet.
+    return ['', f'**Next:** all {state["maxRounds"]} rounds are used, and something is left that {reviewer} hasn\'t '
+                f'reviewed. Another round is your decision: {author} asks you, with what is left, before any more '
+                'review.']
 
 
 def rounds_table(state: dict) -> list[str]:
@@ -1023,7 +1061,7 @@ def briefing(state: dict, move: str, live: dict | None = None) -> str:
     count = len(rounds)
     headlines = {'cicely': 'paused for your decision', 'reply': f'waiting for {author} to answer round {count}',
                  'review': f'{reviewer} reviews round {count + 1} next', 'done': 'done, with nothing open',
-                 'limit': f'stopped at the limit of {state["maxRounds"]} rounds',
+                 'limit': f'all {state["maxRounds"]} rounds are used',
                  'stopped': f'stopped by you after round {count}'}
     headline = f'{reviewer} is reviewing round {live["round"]}' if live else headlines[move]
     about = f'{author} wrote this pull request and {reviewer} reviews it, in up to {state["maxRounds"]} rounds.'
@@ -1118,14 +1156,18 @@ def command_review(arguments: argparse.Namespace) -> dict:
                  'author': arguments.author, 'reviewer': reviewer, 'maxRounds': DEFAULT_MAX_ROUNDS,
                  'session': None, 'worktree': str(review_worktree(repo, repository, arguments.pull_request)),
                  'startedAt': now(), 'rounds': [], 'escalated': []}
-    if arguments.max_rounds is not None:
-        if arguments.max_rounds < 1:
-            raise Refusal('--max-rounds must be at least 1.')
-        state['maxRounds'] = arguments.max_rounds
+    if arguments.max_rounds is not None and arguments.max_rounds < 1:
+        raise Refusal('--max-rounds must be at least 1.')
     if turn(state) == 'cicely':
         raise Refusal(waiting_for_cicely(state))
     if turn(state) == 'reply':
         raise Refusal(f'Round {len(state["rounds"])} has open findings; answer them with `reply` first.')
+    if arguments.max_rounds is not None:
+        # Past the limit, another round is Cicely's decision, recorded with `decide`, never the author's flag.
+        if state['rounds'] and len(state['rounds']) >= state['maxRounds'] and arguments.max_rounds > state['maxRounds']:
+            raise Refusal(f'All {state["maxRounds"]} rounds are used, so another round is Cicely\'s decision. Run '
+                          '`review` without --max-rounds to put it to her, and record her answer with `decide`.')
+        state['maxRounds'] = arguments.max_rounds
     pr = pull_request(repository, arguments.pull_request)
     if pr.get('state') != 'OPEN':
         raise Refusal(f'Pull request #{arguments.pull_request} is {str(pr.get("state")).lower()}, not open.')
@@ -1134,7 +1176,14 @@ def command_review(arguments: argparse.Namespace) -> dict:
         raise Refusal(f'Nothing is left between the author and the reviewer at {pr["headRefOid"][:7]}, the pull '
                       'request\'s head; the cross-review is done.')
     if move == 'limit':
-        raise Refusal(f'All {state["maxRounds"]} rounds are used; bring what is still open to Cicely.')
+        # The reviewer doesn't run: whether it should is put to Cicely.
+        ask_next_round(state, 'limit', pr['headRefOid'])
+        save(path, state)
+        move = turn(state, pr['headRefOid'])
+        warning = show_status(path, state, move)
+        return dict({'pullRequest': arguments.pull_request, 'reviewed': False, 'turn': move,
+                     'pending': [item['id'] for item in pending(state)], 'briefing': briefing(state, move)},
+                    **reported(state, [warning]))
     if move == 'stopped':
         raise Refusal(f'Cicely stopped the cross-review after round {len(state["rounds"])}; it reviews again only '
                       'when new commits are pushed.')
@@ -1290,11 +1339,12 @@ def command_reply(arguments: argparse.Namespace) -> dict:
     last['answers'] = {'head': pr['headRefOid'], 'answeredAt': now(), 'replies': replies, 'changedLines': changed,
                        'commentUrl': None}
     findings = {finding['id']: finding for finding in last['findings']}
-    # Answers to only minor findings that change little make another round a question for Cicely.
-    if len(state['rounds']) < state['maxRounds'] and changed < SMALL_ANSWERS \
-            and all(findings[reply['id']]['severity'] in ('minor', 'nit') for reply in replies):
-        last['answers']['checkpoint'] = {'id': CHECKPOINT, 'title': f'Another round after round {last["round"]}?',
-                                         'decision': None, 'choice': None}
+    # Another round is a question for Cicely after the last round, and after answers to only minor findings that
+    # change little.
+    if len(state['rounds']) >= state['maxRounds']:
+        ask_next_round(state, 'limit', pr['headRefOid'])
+    elif changed < SMALL_ANSWERS and all(findings[reply['id']]['severity'] in ('minor', 'nit') for reply in replies):
+        ask_next_round(state, 'small', pr['headRefOid'])
     for reply in replies:
         if reply['action'] == 'escalated':
             state['escalated'].append(dict(findings[reply['id']], note=reply['note'], stakes=reply['stakes'],
@@ -1368,6 +1418,8 @@ def command_decide(arguments: argparse.Namespace) -> dict:
         item['decision'] = decision['decision']
         if decision['id'] == CHECKPOINT:
             item['choice'] = decision['choice']
+            if item['reason'] == 'limit' and decision['choice'] == 'review':
+                state['maxRounds'] = max(state['maxRounds'], len(state['rounds']) + 1)
         # A question she has answered comes back to the author as an open finding carrying her decision.
         elif item['status'] == 'question':
             item['status'] = 'open'
