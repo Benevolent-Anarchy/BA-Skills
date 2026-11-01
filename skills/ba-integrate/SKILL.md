@@ -104,21 +104,14 @@ The expected base starts as the rehearsal's base commit and becomes each landing
    ```
 
    ```powershell
-   $titleEncoding = [Console]::OutputEncoding
-   try {
-       [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-       $title = gh pr view <n> --repo <owner>/<repo> --json title --jq .title
-       if ($LASTEXITCODE -ne 0) { throw 'Could not read the pull request title.' }
-   } finally {
-       [Console]::OutputEncoding = $titleEncoding
-   }
+   $title = gh pr view <n> --repo <owner>/<repo> --json title --jq .title
+   if ($LASTEXITCODE -ne 0) { throw 'Could not read the pull request title.' }
    $message = "Merge pull request #<n> from <owner>/<branch>`n`n$title"
    & ./scripts/land.ps1 -Worktree <rehearsal> -PullRequest <n> -Branch <branch> -ApprovedHead <approved head> -Updated <update's commit> -BaseBranch <base> -ExpectedBase <expected base> -Rehearsed <step commit> -Message $message
    ```
 
    Read the title as data and pass the message variable as one argument. Apostrophes, backslashes, quotes and shell expressions in a title stay literal; never paste the title into shell source or evaluate it as code.
    Run the Windows block in a PowerShell 7.2+ session. Its in-process script call keeps embedded quotes intact even on PowerShell 7.2, whose native argument passing can alter quotes when starting another `pwsh` process.
-   Capture `gh` output as UTF-8 so non-ASCII titles remain intact. The `finally` block restores the console's previous encoding even if reading the title fails.
 
    It refuses before pushing anything unless all of these hold:
    - the update holds the rehearsed tree

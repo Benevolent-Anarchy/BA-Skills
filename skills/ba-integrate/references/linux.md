@@ -24,27 +24,3 @@ The skill's rehearsal and gate sequence is unchanged: merge each surveyed head i
 Run `bash tests/integrate-linux/run-tests.sh` from the BA-Skills root. It exercises actual temporary Git repositories and bare remotes. Test-only Git transport routes fetches, pushes and remote-ref reads to those local remotes; URL and configuration checks still use real Git without a rewrite. GitHub's service boundary is a fixture too. It never writes real remote refs or a real home directory. `bash tools/verify.sh` runs the bootstrap, integration and release Linux suites and fails if any suite fails.
 
 The Linux gate neither parses nor exercises `.ps1` or `.psm1` sources. Windows support requires the separate Windows gate, `pwsh -NoProfile -File tools/verify.ps1`; a Linux pass alone does not verify the PowerShell implementation.
-
-## BA-Skills Windows gate for a rehearsal
-
-BA-Skills' Windows workflow checks every PR, without path filters. Its checked tree must match the actual rehearsal before that run can stand in for a Windows gate at an integration step. Record the checked commit and run URL in the plan. For other projects, use their own recorded Windows gate.
-
-The workflow configures a fixture Git identity and long-path support, installs a digest-pinned official Godot 4.7 release, and imports a digest-pinned Canonical Ubuntu image into WSL1. The WSL path tests run against a usable default distribution rather than only the preinstalled `wsl.exe` launcher.
-
-Push the candidate only to a dedicated verification branch, keeping PR and base updates subject to the integration plan's approval:
-
-```bash
-git push origin <rehearsed-commit>:refs/heads/codex/windows-verify/<run>
-gh run list --repo <owner>/<repo> --branch codex/windows-verify/<run> --workflow verify-windows.yml
-gh run watch <run-id> --repo <owner>/<repo> --exit-status
-```
-
-Once the workflow exists on the default branch, it can also be dispatched for an already-pushed candidate:
-
-```bash
-gh workflow run verify-windows.yml --repo <owner>/<repo> --ref main -f revision=<pushed-candidate-sha>
-```
-
-[GitHub requires a manually dispatched workflow to exist on the default branch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch). Before then, the push trigger works only if the pushed commit contains the workflow file. If an earlier candidate lacks it, create a temporary descendant in a separate verification worktree: add the reviewed workflow, set its checkout `ref` to the literal candidate SHA, and push that descendant to the dedicated verification branch. GitHub reads the workflow from the descendant but checks out and tests the exact candidate. Record both SHAs; keep this CI-only commit off PR and base branches.
-
-Each run prints `git rev-parse HEAD` before running the gate. Require that printed SHA to identify the intended candidate. A queued, running or failed check does not count as a gate pass.

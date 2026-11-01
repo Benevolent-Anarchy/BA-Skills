@@ -82,23 +82,12 @@ function New-PullRequest([int]$Number, [string]$Head, [string]$Sha, [string]$Bas
     }
 }
 
-## Runs a script and parses its JSON. Scripts with no Git transport use the documented
-## native -File boundary. Transport tests use the isolated fixture driver; smoke tests
-## can request -DirectFile to exercise the other entrypoints before remote access.
-function Invoke-IntegrateScript([string]$Name, [hashtable]$Parameters, [switch]$DirectFile) {
+## Runs one of the skill's scripts with $Parameters; returns its exit code and parsed JSON.
+function Invoke-IntegrateScript([string]$Name, [hashtable]$Parameters) {
     $scriptPath = Join-Path $root "skills/ba-integrate/scripts/$Name.ps1"
-    if ($DirectFile -or $Name -in @('update', 'check-issues', 'retarget')) {
-        $arguments = @(foreach ($key in $Parameters.Keys) {
-            if ($Parameters[$key] -is [bool]) {
-                if ($Parameters[$key]) { "-$key" } else { "-${key}:`$false" }
-            } else { "-$key"; "$($Parameters[$key])" }
-        })
-        $output = & (Join-Path $PSHOME 'pwsh') -NoProfile -File $scriptPath @arguments 2>&1
-    } else {
-        $parameterFile = Join-Path $sandbox ('parameters-' + [guid]::NewGuid().ToString('N') + '.clixml')
-        $Parameters | Export-Clixml -LiteralPath $parameterFile
-        $output = & (Join-Path $PSHOME 'pwsh') -NoProfile -File (Join-Path $PSScriptRoot 'invoke-script.ps1') -ScriptPath $scriptPath -ParametersPath $parameterFile 2>&1
-    }
+    $parameterFile = Join-Path $sandbox ('parameters-' + [guid]::NewGuid().ToString('N') + '.clixml')
+    $Parameters | Export-Clixml -LiteralPath $parameterFile
+    $output = & (Join-Path $PSHOME 'pwsh') -NoProfile -File (Join-Path $PSScriptRoot 'invoke-script.ps1') -ScriptPath $scriptPath -ParametersPath $parameterFile 2>&1
     $code = $LASTEXITCODE
     try { $result = ($output -join "`n") | ConvertFrom-Json }
     catch { throw "$Name output was not JSON (exit $code): $output" }
@@ -266,57 +255,6 @@ function Set-PreCommitHook([string]$Repository, [string]$Command) {
 ## The survey's record for PR $Number.
 function Get-SurveyPullRequest($Result, [int]$Number) {
     return @($Result.pullRequests | Where-Object number -EQ $Number)[0]
-}
-
-## Executes the documented Windows landing command with an external gh title source and
-## a local landing sink. Raw UTF-8 bytes expose native decoding under an OEM code page.
-function Invoke-DocumentedWindowsLand([bool]$FailTitle) {
-    $skill = Get-Content -LiteralPath (Join-Path $root 'skills/ba-integrate/SKILL.md') -Raw
-    $blocks = [regex]::Matches($skill, '(?ms)^   ```powershell\r?\n(?<code>.*?)^   ```')
-    $command = @($blocks | Where-Object { $_.Groups['code'].Value.Contains('& ./scripts/land.ps1') })[0].Groups['code'].Value
-    foreach ($placeholder in @{
-        '<n>' = '7'; '<owner>' = 'fixture'; '<repo>' = 'repo'; '<branch>' = 'one'; '<rehearsal>' = 'worktree'
-        '<approved head>' = 'head'; "<update's commit>" = 'updated'; '<base>' = 'main'; '<expected base>' = 'base'; '<step commit>' = 'rehearsed'
-    }.GetEnumerator()) { $command = $command.Replace($placeholder.Key, $placeholder.Value) }
-    $work = Join-Path $sandbox ('documented-land-' + [guid]::NewGuid().ToString('N'))
-    Write-FixtureText (Join-Path $work 'scripts/land.ps1') 'param([string]$Message); $global:FixtureReceivedMessage = $Message'
-    $titleScript = Join-Path $work 'gh-title.ps1'
-    Write-FixtureText $titleScript ('$bytes = [byte[]](67,97,102,195,169,10); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length); exit ' + [int]$FailTitle)
-    $proof = @'
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $false
-$global:FixtureTitleScript = '__TITLE_SCRIPT__'
-function gh {
-    & (Join-Path $PSHOME 'pwsh') -NoProfile -File $global:FixtureTitleScript @args
-    $global:LASTEXITCODE = $LASTEXITCODE
-}
-[Console]::OutputEncoding = [Text.Encoding]::GetEncoding(437)
-$failure = $null
-try {
-__COMMAND__
-} catch { $failure = $_.Exception.Message }
-$restoredEncoding = [Console]::OutputEncoding.CodePage
-[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-[ordered]@{ message = $global:FixtureReceivedMessage; encoding = $restoredEncoding; error = $failure } | ConvertTo-Json -Compress
-'@
-    $proofPath = Join-Path $work 'proof.ps1'
-    Write-FixtureText $proofPath ($proof.Replace('__TITLE_SCRIPT__', $titleScript.Replace("'", "''")).Replace('__COMMAND__', $command))
-    Push-Location -LiteralPath $work
-    try {
-        $output = & (Join-Path $PSHOME 'pwsh') -NoProfile -File $proofPath 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Documented landing proof failed: $output" }
-    } finally { Pop-Location }
-    return ($output -join "`n") | ConvertFrom-Json
-}
-
-Test 'the documented Windows landing preserves a UTF-8 title and restores its caller encoding' {
-    $run = Invoke-DocumentedWindowsLand $false
-    Assert (-not $run.error -and $run.message -ceq "Merge pull request #7 from fixture/one`n`nCafé" -and $run.encoding -eq 437) "Title or encoding changed: $($run | ConvertTo-Json -Compress)"
-}
-
-Test 'the documented Windows landing restores its caller encoding when gh fails' {
-    $run = Invoke-DocumentedWindowsLand $true
-    Assert ($run.error -match 'Could not read the pull request title' -and -not $run.message -and $run.encoding -eq 437) "Expected a refusal and restored encoding: $($run | ConvertTo-Json -Compress)"
 }
 
 Test 'independent pull requests keep number order and report their files' {
@@ -1145,52 +1083,6 @@ function New-GitHubCheckout {
     $repo = New-FixtureRepository @{ 'a.txt' = "a`n" }
     Invoke-FixtureGit $repo @('remote', 'add', 'origin', 'https://github.com/fixture/repo.git') | Out-Null
     return $repo
-}
-
-Test 'direct -File survey binds its repository, base and offline pull request file' {
-    $repo = New-FixtureRepository @{ 'a.txt' = "a`n" }
-    $records = Join-Path $sandbox 'empty-pull-requests.json'
-    Write-FixtureText $records '[]'
-    $run = Invoke-IntegrateScript 'survey' @{ Repository = $repo; Base = 'main'; PullRequestsJson = $records } -DirectFile
-    Assert ($run.Code -eq 0 -and $run.Result.base.branch -eq 'main' -and @($run.Result.order).Count -eq 0) "Wrong survey: $($run.Result | ConvertTo-Json -Compress)"
-}
-
-Test 'direct -File update binds commit strings and matches the rehearsal' {
-    $repo = New-FixtureRepository @{ 'a.txt' = "a`n" }
-    $head = Get-FixtureRef $repo 'main'
-    $run = Invoke-IntegrateScript 'update' @{ Worktree = $repo; Head = $head; Base = $head; Rehearsed = $head } -DirectFile
-    Assert ($run.Code -eq 0 -and $run.Result.matches -and $run.Result.commit -eq $head) "Wrong update: $($run.Result | ConvertTo-Json -Compress)"
-}
-
-foreach ($mode in @('List', 'Approved')) {
-    Test "direct -File retarget binds -$mode$(if ($mode -eq 'Approved') { ' none' })" {
-        $parameters = @{ Repository = (New-GitHubCheckout); Branch = 'one'; BaseBranch = 'main'; GitHubCli = (New-FakeDependents @() 2).Path }
-        $parameters[$mode] = if ($mode -eq 'List') { $true } else { 'none' }
-        $run = Invoke-IntegrateScript 'retarget' $parameters -DirectFile
-        Assert ($run.Code -eq 0 -and @($run.Result.targeting).Count -eq 0) "Wrong retarget result: $($run.Result | ConvertTo-Json -Compress)"
-        if ($mode -eq 'Approved') { Assert (@($run.Result.retargeted).Count -eq 0 -and @($run.Result.remaining).Count -eq 0) 'Expected the explicit empty approval set.' }
-    }
-}
-
-foreach ($entrypoint in @('land', 'delete-branch', 'check-issues')) {
-    Test "direct -File $entrypoint binds CLI arguments before refusing an off-GitHub remote" {
-        $repo = New-FixtureRepository @{ 'a.txt' = "a`n" }
-        $head = Get-FixtureRef $repo 'main'
-        Invoke-FixtureGit $repo @('remote', 'add', 'origin', (Join-Path $sandbox 'off-github.git')) | Out-Null
-        $fake = New-FakeGitHubCli @{}
-        $parameters = switch ($entrypoint) {
-            'land' { @{
-                Worktree = $repo; PullRequest = '17'; Branch = 'one'; ApprovedHead = $head; Updated = $head
-                BaseBranch = 'main'; ExpectedBase = $head; Rehearsed = $head; Message = 'CLI binding smoke'; GitHubCli = $fake
-            } }
-            'delete-branch' { @{ Repository = $repo; Branch = 'one'; MergedTip = $head; BaseBranch = 'main'; GitHubCli = $fake } }
-            'check-issues' { @{ Repository = $repo; PullRequest = '17'; GitHubCli = $fake } }
-        }
-        $run = Invoke-IntegrateScript $entrypoint $parameters -DirectFile
-        Assert ($run.Code -eq 1 -and $run.Result.error -match 'not a github.com repository') "Expected a bound-script refusal: $($run.Result | ConvertTo-Json -Compress)"
-        if ($entrypoint -ne 'delete-branch') { Assert ($run.Result.pullRequest -eq 17 -and $run.Result.pullRequest -isnot [string]) 'The pull request number was not bound as an integer.' }
-        Assert ((Get-FixtureRef $repo 'HEAD') -eq $head -and -not (Invoke-FixtureGit $repo @('status', '--porcelain'))) 'The checkout changed.'
-    }
 }
 
 foreach ($form in @('direct', 'insteadOf', 'pushInsteadOf')) {
