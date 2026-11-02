@@ -1,15 +1,16 @@
-# Linux bootstrap operations
+# Commands, toolchains and state
 
-Use `scripts/bootstrap.sh`; it runs a native Python 3.10+ implementation with a bundled CommonMark parser and never invokes PowerShell. Keep the `.ps1` implementations for Windows. `scripts/install.sh` delegates to the root Linux installer and accepts `--home PATH` and `--check-only`.
+Use `scripts/bootstrap.sh`; it runs a Python 3.10+ implementation with a bundled CommonMark parser. `scripts/install.sh` delegates to the root installer and accepts `--home PATH` and `--check-only`.
 
-| Windows option | Linux option |
+| Option | Purpose |
 | --- | --- |
-| `-Mode` | `--mode plan\|create\|status\|resume\|discard\|local-setup` |
-| `-Name`, `-Description` | `--name`, `--description` |
-| `-Parent`, `-Owner`, `-Repository` | `--parent`, `--owner`, `--repository` |
-| `-Preset`, `-Renderer` | `--preset`, `--renderer` |
-| `-AppIdentifier` | `--app-identifier` |
-| `-Interactive`, `-RefreshPlugins` | `--interactive`, `--refresh-plugins` |
+| `--mode` | `plan`, `create`, `status`, `resume`, `discard` or `local-setup` |
+| `--name`, `--description` | Project identity |
+| `--parent`, `--owner` | Where the project is created and who owns it |
+| `--repository` | An existing checkout, for `local-setup` |
+| `--preset`, `--renderer` | Starter selection; the renderer is Godot-only |
+| `--app-identifier` | Tauri application identifier |
+| `--interactive`, `--refresh-plugins` | Prompt for inputs; deliberately refresh Obsidian plugins |
 
 Names retain case and replace whitespace with hyphens. The default parent is `~/Dev` (expanded by the helper), owner `Benevolent-Anarchy`, preset Godot and renderer Compatibility. Supply an absolute parent; quote paths containing spaces. Tauri identifiers default to `org.benevolent-anarchy.<package>`, `com.cicely-f.<package>` or `com.<owner>.<package>`.
 
@@ -28,7 +29,7 @@ Foundation needs Bash, Python 3.10+, Git and authenticated GitHub CLI. Godot add
 
 Tauri additionally checks Node/npm, Rust/Cargo, rustfmt, Clippy, a C/C++ compiler, pkg-config, patchelf and the development libraries exposed as `webkit2gtk-4.1`, `gtk+-3.0`, `ayatana-appindicator3-0.1` and `librsvg-2.0`. Install missing SDKs separately; bootstrap does not install them. The recipe downloads the latest stable official generator with its published SHA-512 integrity, selects the latest non-yanked stable Tauri crate including future majors, checks generator compatibility and freezes npm/Cargo locks. An incompatible generator fails before either repository is created; it never silently downgrades.
 
-Generated projects contain both platform gates. On Linux run `bash tools/verify.sh`; on Windows use `pwsh -NoProfile -File tools/verify.ps1`. The Linux helper is standalone. It bundles pinned `markdown-it-py` 4.2.0 and `mdurl` 0.1.2 runtime sources under `tools/_vendor/`, with MIT/Expat notices, origin/version metadata and per-file SHA-256 checksums; it does not require a package download or system Markdown installation. CommonMark block tokens distinguish live nested lists/references from actual indented/fenced code. Native commands handle SIGTERM/SIGINT by granting child groups a bounded termination grace before forced cleanup, including nested gate groups and descendants retaining stdout after their leader exits. It validates documentation and its indexed topical corpora, exact local link paths/headings, decision dates and judgement metadata. Godot adds import/compile and GUT headless/rendered tests with fresh JUnit and post-run totals, executed-test/assertion counts, unexpected errors and orphan failures. Tauri adds locked dependency checks, direct stable Tauri version validation, TypeScript, actual frontend test records, frontend build, Rust format/Clippy/tests and the native application binary. A build is not an observed app launch.
+Generated projects run their gate with `bash tools/verify.sh`. The helper is standalone. It bundles pinned `markdown-it-py` 4.2.0 and `mdurl` 0.1.2 runtime sources under `tools/_vendor/`, with MIT/Expat notices, origin/version metadata and per-file SHA-256 checksums; it does not require a package download or system Markdown installation. CommonMark block tokens distinguish live nested lists/references from actual indented/fenced code. Native commands handle SIGTERM/SIGINT by granting child groups a bounded termination grace before forced cleanup, including nested gate groups and descendants retaining stdout after their leader exits. It validates documentation and its indexed topical corpora, exact local link paths/headings, decision dates and judgement metadata. Godot adds import/compile and GUT headless/rendered tests with fresh JUnit and post-run totals, executed-test/assertion counts, unexpected errors and orphan failures. Tauri adds locked dependency checks, direct stable Tauri version validation, TypeScript, actual frontend test records, frontend build, Rust format/Clippy/tests and the native application binary. A build is not an observed app launch.
 
 Run `bash tools/verify_selftest.sh` in a generated Godot project to run all deliberate verifier probes in disposable copies. `--only 'fails/*'` filters cases. Logs and copies remain in the printed temporary evidence directory.
 
