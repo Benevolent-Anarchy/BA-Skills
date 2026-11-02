@@ -375,6 +375,29 @@ class CrossReview(unittest.TestCase):
         self.assertNotIn(worktree.name, self.git('worktree', 'list'))
         self.assertEqual(self.script('status')['turn'], 'done')
 
+    def test_status_asks_github_for_commits_pushed_since_the_last_command(self):
+        # Cicely asked why `status` didn't ask GitHub: going by the head the last command saw, it called a
+        # cross-review done with new commits unreviewed.
+        self.queue(review(summary='Fine.'))
+        self.assertEqual(self.review()['turn'], 'done')
+        later = self.push_fix()
+        status = self.script('status')
+        self.assertEqual((status['turn'], status['head'], status['pullRequestHead']), ('review', self.head, later))
+        self.assertNotIn('warnings', status)
+        self.assertIn(f'**Next:** Codex reviews round 2 of 3. The pull request has moved on to `{later[:7]}` since '
+                      'round 1.', status['briefing'])
+        # Without GitHub, it goes by the head the last command saw, and says so.
+        (self.fixture / 'view-fails').touch()
+        for command in ('status', 'finish'):
+            result = self.script(command)
+            self.assertEqual(result['turn'], 'done')
+            warning, = result['warnings']
+            self.assertIn("GitHub couldn't be asked for the pull request's head, so this goes by the head the last "
+                          f'command saw, `{self.head[:7]}`, and knows of no commit pushed since.', warning)
+            self.assertIn('fixture: GitHub unreachable', warning)
+        (self.fixture / 'view-fails').unlink()
+        self.assertEqual(self.script('finish')['turn'], 'review')
+
     def test_an_escalated_finding_pauses_for_cicely_and_her_decision_goes_to_the_reviewer(self):
         self.queue(review(finding('Should this be a plugin?'), finding('One', 'minor')))
         self.review()

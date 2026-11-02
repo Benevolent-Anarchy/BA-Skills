@@ -38,7 +38,7 @@ Your progress is kept in the clone's Git directory, under `ba-crossreview/`. It 
 
 A cross-review can run for half a day, and Cicely may come back to it without remembering where it was. Two things show her where it stands at any moment, from any machine or app:
 - **The status comment** on the pull request, posted when the first round starts and edited at every step. While the reviewer works, it shows for how long and what it did last, such as the file it read or the command it ran. At every other moment it holds the briefing below.
-- **`status`**, which either agent can run in its own session, even while a review is running. It doesn't ask GitHub, so it knows of commits only as far as the last command saw them:
+- **`status`**, which either agent can run in its own session, even while a review is running. It asks GitHub for the pull request's head, so it counts commits pushed since the last command. If GitHub can't be reached, it goes by the head the last command saw and says so in `warnings`:
 
 ```bash
 python3 scripts/crossreview.py status --repository <clone> --pull-request <n>
@@ -149,7 +149,7 @@ python3 scripts/crossreview.py status --repository <clone> --pull-request <n>
 python3 scripts/crossreview.py finish --repository <clone> --pull-request <n>
 ```
 
-`status` lists the rounds, the reviewed head, what's open, what waits for Cicely, her decisions, every comment, and the briefing. `finish` removes the review worktree and the change files and keeps the record.
+`status` lists the rounds, the reviewed head, the pull request's head on GitHub, what's open, what waits for Cicely, her decisions, every comment, and the briefing. `finish` removes the review worktree and the change files and keeps the record. Both judge whose turn it is by the head on GitHub, or, when GitHub can't be reached, by the head the last command saw, with a warning.
 
 At `done` or `stopped`, give Cicely the briefing, then tell her:
 - what you fixed
