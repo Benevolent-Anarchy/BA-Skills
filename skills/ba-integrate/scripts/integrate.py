@@ -109,6 +109,11 @@ class GitHub:
             seen.add(after)
         if total is not None and len(nodes)!=total: raise RuntimeError(f'Read {len(nodes)} of {total} records; audit would be incomplete.')
         return nodes
+    def closing(self,here,number,manual=False):
+        # Read through GraphQL: older gh releases, such as Ubuntu's 2.46, lack the pr view field.
+        owner,name=here.split('/',1)
+        query='''query ClosingIssues($owner:String!,$name:String!,$number:Int!,$manual:Boolean!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){closingIssuesReferences(first:100,after:$after,userLinkedOnly:$manual){totalCount pageInfo{hasNextPage endCursor} nodes{number url repository{nameWithOwner}}}}}}'''
+        return self.connection(query,lambda d:d['repository']['pullRequest']['closingIssuesReferences'],owner=owner,name=name,number=number,manual=manual)
     def targeting(self,here,branch):
         owner,name=here.split('/',1)
         query='''query($owner:String!,$name:String!,$branch:String!,$after:String){repository(owner:$owner,name:$name){pullRequests(states:OPEN,baseRefName:$branch,first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{number url title isDraft}}}}'''
@@ -234,8 +239,16 @@ def retarget(a,r,out):
     if not a.approved:raise RuntimeError('Retargeting needs --approved numbers or none. Nothing was retargeted.')
     approved=set() if a.approved=='none' else {int(x) for x in re.split(r'[,\s]+',a.approved) if x}
     found={p['number'] for p in out['targeting']}
-    if found!=approved:
-        out.update(unexpected=sorted(found-approved),missing=sorted(approved-found));raise RuntimeError('The pull requests targeting this branch differ from the plan. Nothing was retargeted.')
+    unexpected=sorted(found-approved);missing=sorted(approved-found);already=[]
+    if not unexpected:
+        # GitHub retargets them itself when it deletes a merged head branch.
+        for n in missing:
+            p=gh.call('pr','view',str(n),'--repo',here,'--json','state,baseRefName')
+            if p.get('state')=='OPEN' and p.get('baseRefName')==a.base_branch:already.append(n)
+        missing=[n for n in missing if n not in already]
+    if unexpected or missing:
+        out.update(unexpected=unexpected,missing=missing);raise RuntimeError('The pull requests targeting this branch differ from the plan. Nothing was retargeted.')
+    out['alreadyRetargeted']=already
     out['retargeted']=[]
     for p in out['targeting']:
         gh.raw('pr','edit',str(p['number']),'--repo',here,'--base',a.base_branch);out['retargeted'].append(p['number'])
@@ -268,7 +281,7 @@ def land(a,r,out):
     if not r.ancestor(approved,updated):raise RuntimeError('The updated head does not contain the approved head. Nothing was pushed.')
     if not r.ancestor(expected,updated):raise RuntimeError('The updated head does not contain the expected base. Nothing was pushed.')
     if r.tree(updated)!=tree:raise RuntimeError('The updated head differs from the rehearsed step. Nothing was pushed.')
-    def view():return gh.call('pr','view',str(a.pull_request),'--repo',here,'--json','state,isDraft,headRefOid,headRefName,baseRefName,closingIssuesReferences')
+    def view():return gh.call('pr','view',str(a.pull_request),'--repo',here,'--json','state,isDraft,headRefOid,headRefName,baseRefName')
     def ready(heads,when):
         deadline=time.monotonic()+a.timeout_seconds
         while True:
@@ -314,7 +327,9 @@ def land(a,r,out):
         out['state']=p.get('state') if p else None
         if not p or p.get('state')!='MERGED':raise RuntimeError('Landed on the base, but GitHub has not confirmed MERGED. Do not delete its branch or start the next step. Run again with the same arguments to resume waiting. '+(last_error or ''))
         out['merged']=True
-        out['closingIssues']=[dict(url=x['url'],repository=x['repository']['owner']['login']+'/'+x['repository']['name'],number=x['number']) for x in p.get('closingIssuesReferences',[])]
+        try:closing=gh.closing(here,a.pull_request)
+        except (RuntimeError,ValueError,KeyError,TypeError) as e:raise RuntimeError('GitHub reports the pull request MERGED, but its closing issues could not be read; check-issues reads them again. '+str(e))
+        out['closingIssues']=[dict(url=x['url'],repository=x['repository']['nameWithOwner'],number=x['number']) for x in closing]
     finally:
         if started and r.merging():r.git('merge','--abort')
 
@@ -329,9 +344,8 @@ def check_issues(a,r,out):
     repo=gh.call('repo','view',here,'--json','nameWithOwner,defaultBranchRef');default=repo['defaultBranchRef']['name']
     pr=gh.call('pr','view',str(a.pull_request),'--repo',here,'--json','number,url,state,mergedAt,baseRefName')
     fields=dict(owner=owner,name=name,number=a.pull_request)
-    cq='''query ClosingIssues($owner:String!,$name:String!,$number:Int!,$manual:Boolean!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){closingIssuesReferences(first:100,after:$after,userLinkedOnly:$manual){totalCount pageInfo{hasNextPage endCursor} nodes{number url repository{nameWithOwner}}}}}}'''
-    closing=gh.connection(cq,lambda d:d['repository']['pullRequest']['closingIssuesReferences'],**fields,manual=False)
-    manual={p['url'] for p in gh.connection(cq,lambda d:d['repository']['pullRequest']['closingIssuesReferences'],**fields,manual=True)}
+    closing=gh.closing(here,a.pull_request)
+    manual={p['url'] for p in gh.closing(here,a.pull_request,manual=True)}
     pq='''query PullRequestCommits($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid mergeCommit{oid message parents(first:2){totalCount}} commits(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{commit{oid message}}}}}}'''
     record={}
     def commit_page(d):

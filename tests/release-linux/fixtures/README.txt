@@ -1,6 +1,6 @@
 Original PowerShell protocol fixtures
 
-original_protocol.py transcribes the retained Release.psm1 functions
+original_protocol.py transcribes the original Release.psm1 functions
 Get-ReleasePlan (ordered identity, complete plan and literal requiredActions),
 Get-ReleaseArtifact, Get-ReleaseNotesHash and Invoke-ReleasePublish's approval
 hashing. It never invokes the native planner/preparer/serializer. These are

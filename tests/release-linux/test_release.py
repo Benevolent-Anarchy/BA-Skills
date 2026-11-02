@@ -159,6 +159,15 @@ else: print('HTTP 404 Not Found'); sys.exit(1)
         self.assertFalse(json.loads((self.repo/'release.json').read_text())['sourceTag'])
         self.cli('setup','--answers-path',answers,'--expected-config-sha256',r['configSha256']);self.assertTrue(json.loads((self.repo/'release.json').read_text())['sourceTag'])
 
+    def test_prepare_without_a_selection_writes_nothing_and_never_prompts(self):
+        before=self.git('status','--porcelain')
+        for extra in ([],['--interactive']):
+            result=subprocess.run([str(SCRIPT),'--mode','prepare','--repository',str(self.repo),'--state-root',str(self.state),*extra],capture_output=True,text=True,env=self.env,stdin=subprocess.DEVNULL)
+            self.assertEqual(result.returncode,2,result.stdout+result.stderr)
+            data=json.loads(result.stdout)
+            self.assertEqual(data['status'],'selection-required');self.assertTrue(data['selection']['required']);self.assertTrue(data['selection']['choices'])
+        self.assertEqual(self.git('status','--porcelain'),before);self.assertFalse(self.state.exists() and any(self.state.iterdir()))
+
     def test_setup_reenables_notes_when_selected_in_stores(self):
         self.config['distributions']['notes'] = False
         self.save_config()
@@ -195,13 +204,13 @@ else: print('HTTP 404 Not Found'); sys.exit(1)
         self.git('add','release.json');self.git('commit','-qm','config newline only')
         self.assertIn('changed',self.cli('publish','--state-path',self.path,ok=False)['error'])
         self.assertNotEqual(self.journal()['plan']['configSha256'],self.cli('plan','--destination','itch-linux')['configSha256'])
-    def test_native_hook_resolves_ps_sibling_and_translates_options(self):
-        self.config['verification']['standalone']['script']='tools/check_standalone.ps1';self.config['verification']['standalone']['arguments']=['-ArtifactDirectory','{artifact}','-Platform','{platform}','-ExecutableName','{filename}']
-        self.write('tools/check_standalone.sh','#!/bin/sh\ntest "$1" = --artifact-directory && test "$3" = --platform && test "$5" = --executable-name && test -f "$2/$6"\n',True);self.save_config();self.commit('shared hooks')
+    def test_powershell_hook_is_refused_even_with_a_shell_sibling(self):
+        self.write('tools/verify.ps1','# Windows gate\n');self.config['verification']['gate']['script']='tools/verify.ps1';self.save_config();self.commit('PowerShell hook')
+        error=self.cli('validate',ok=False)['error'];self.assertIn('tools/verify.ps1',error);self.assertIn('.sh',error);self.assertFalse(self.calls())
+    def test_shell_hook_receives_its_configured_arguments_unchanged(self):
+        self.config['verification']['standalone']['arguments']=['--artifact-directory','{artifact}','-Platform','{platform}']
+        self.write('tools/standalone.sh','#!/bin/sh\ntest "$1" = --artifact-directory && test "$3" = -Platform && test -f "$2/game.x86_64"\n',True);self.save_config();self.commit('shell hook arguments')
         self.prepare();self.assertEqual(self.journal()['checks']['itch-linux']['standalone'],'succeeded')
-    def test_missing_native_hook_is_explicit_configuration_failure(self):
-        self.config['verification']['gate']['script']='tools/windows.ps1';self.save_config();self.commit('Windows only hook')
-        self.assertIn('native',self.cli('validate',ok=False)['error']);self.assertFalse(self.calls())
     def test_android_counter_reserved_once_and_does_not_touch_other_preset(self):
         self.add_android('increment-selected');r=self.cli('prepare','--destination','google-play',ok=False);self.assertEqual(r['status'],'source-update-required')
         self.assertIn('version/code=8',(self.repo/'export_presets.cfg').read_text());self.cli('prepare','--destination','google-play',ok=False);self.assertNotIn('version/code=9',(self.repo/'export_presets.cfg').read_text())
@@ -248,9 +257,9 @@ else: print('HTTP 404 Not Found'); sys.exit(1)
         self.assertIn('existing destinations',self.cli('extend','--state-path',self.path,'--destination','steam','--migrate-configuration',ok=False)['error'])
 
 
-    def test_native_setup_keeps_shared_ps_hook_when_native_sibling_exists(self):
+    def test_setup_proposes_shell_hooks_beside_powershell_ones(self):
         (self.repo/'release.json').unlink();self.write('tools/verify.ps1','# fixture Windows gate\n');self.write('tools/standalone.ps1','# fixture Windows standalone\n');self.commit('unset config')
-        r=self.cli('setup');self.assertEqual(r['configuration']['verification']['gate']['script'],'tools/verify.ps1');self.assertEqual(r['configuration']['verification']['standalone']['script'],'tools/standalone.ps1')
+        r=self.cli('setup');self.assertEqual(r['configuration']['verification']['gate']['script'],'tools/verify.sh');self.assertEqual(r['configuration']['verification']['standalone']['script'],'tools/standalone.sh')
     def test_migration_then_android_counter_reservation_can_resume_after_commit(self):
         self.add_android('increment-selected');del self.config['exports']['aab'];del self.config['distributions']['google-play'];self.save_config();self.commit('unconfigure Play before release');self.prepare();self.approve()
         self.config['exports']['aab']='AAB';self.config['distributions']['google-play']={'export':'aab','track':'production','releaseStatus':'completed','userFraction':None,'language':'en-US','retainVersionCodes':[]};self.save_config();self.commit('add reviewed Play config only')
@@ -311,7 +320,7 @@ else: print('HTTP 404 Not Found'); sys.exit(1)
         if play:self.add_android()
         if steam:self.config['distributions']['steam']={'appId':42,'branch':'default','depots':{'43':'linux'}}
         if display:self.config['distributions']['itch']['displayNameTemplate']='{title} {version} ({os})'
-        self.write('tools/verify.ps1','# Original inspected Windows fixture gate\n');self.write('tools/standalone.ps1','# Original inspected Windows fixture standalone\n');self.config['verification']['gate']['script']='tools/verify.ps1';self.config['verification']['standalone']['script']='tools/standalone.ps1';self.save_config();self.commit('original protocol hooks')
+        self.save_config();self.git('add','.');self.git('commit','-q','--allow-empty','-m','original protocol configuration')
     def test_original_protocol_matches_exact_plan_identity_actions_and_order(self):
         from original_protocol import plan_fixture,json_text
         self.original_protocol_config(play=True,steam=True,display=True);expected=plan_fixture(self.repo,['google-play','itch-linux','steam'],True,True,'Fixture 1.2.3 (Linux)');actual=self.cli('plan','--destination','steam,itch-linux,google-play')

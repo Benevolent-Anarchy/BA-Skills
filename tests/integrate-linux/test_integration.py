@@ -30,11 +30,14 @@ if d.get('fail'): print('fixture failure',file=sys.stderr);sys.exit(23)
 if d.get('warning'):print('fixture warning',file=sys.stderr)
 if a[:2] in (['pr','view'],['pr','edit']):
  if '--repo' not in a or a[a.index('--repo')+1]!='test/repo':raise SystemExit('repository not explicit')
+ # Like Ubuntu's gh 2.46, which lacks this pr view field.
+ if '--json' in a and 'closingIssuesReferences' in a[a.index('--json')+1]:raise SystemExit('Unknown JSON field: "closingIssuesReferences"')
 if a[:2]==['api','graphql'] and d.get('graphql_pages'):
  pages=d['graphql_pages'];o=pages.pop(0);d['graphql_pages']=pages;json.dump(d,open(p,'w'));print(json.dumps(o));sys.exit()
 if a[:2]==['api','graphql']:
  q=next(x[6:] for x in a if x.startswith('query='))
  if 'ClosingIssues' in q:
+  if d.get('closing_fail'):print('HTTP 502',file=sys.stderr);sys.exit(1)
   k='closingIssuesReferences'; c=d.get('closing',[])
   o={'data':{'repository':{'pullRequest':{k:{'nodes':c,'totalCount':len(c),'pageInfo':{'hasNextPage':False}}}}}}
  elif 'PullRequestCommits' in q:
@@ -119,6 +122,16 @@ print(json.dumps(o))
         self.assertEqual(json.loads(self.data.read_text())['targeting'][0]['number'],2)
         d=self.call('retarget',branch='feature',base_branch='main',approved='2');self.assertEqual(d['retargeted'],[2]);self.assertEqual(d['remaining'],[])
         self.state(fail=True);self.call('retarget',branch='feature',base_branch='main',list=True,ok=False)
+    def test_retarget_accepts_pull_requests_github_already_moved(self):
+        self.github();self.state(targeting=[],pr=dict(state='OPEN',baseRefName='main'))
+        d=self.call('retarget',branch='feature',base_branch='main',approved='2');self.assertEqual(d['alreadyRetargeted'],[2]);self.assertEqual(d['retargeted'],[]);self.assertEqual(d['remaining'],[])
+        self.state(targeting=[],pr=dict(state='CLOSED',baseRefName='main'))
+        d=self.call('retarget',branch='feature',base_branch='main',approved='2',ok=False);self.assertEqual(d['missing'],[2])
+        self.state(targeting=[],pr=dict(state='OPEN',baseRefName='elsewhere'))
+        d=self.call('retarget',branch='feature',base_branch='main',approved='2',ok=False);self.assertEqual(d['missing'],[2])
+        self.state(targeting=[dict(number=3,title='three',url='url',isDraft=False)],pr=dict(state='OPEN',baseRefName='main'))
+        d=self.call('retarget',branch='feature',base_branch='main',approved='2',ok=False);self.assertEqual((d['unexpected'],d['missing']),([3],[2]))
+        self.assertEqual([p['number'] for p in json.loads(self.data.read_text())['targeting']],[3])
     def test_retarget_incomplete_page_refused(self):
         self.github();self.state(more=True);self.call('retarget',branch='feature',base_branch='main',approved='none',ok=False)
     def test_repository_identity_refuses_multi_push_and_rewrite(self):
@@ -186,9 +199,22 @@ print(json.dumps(o))
         self.state(pr=dict(state='OPEN',isDraft=True,headRefName='feature',headRefOid=h,baseRefName='main'))
         self.call('land',ok=False,**common);self.assertEqual(self.git('ls-remote','origin','refs/heads/main').split()[0],self.base)
         view=dict(state='OPEN',isDraft=False,headRefName='feature',headRefOid=h,baseRefName='main')
-        self.state(views=[view,view],pr=dict(state='MERGED',closingIssuesReferences=[]))
+        self.state(views=[view,view],pr=dict(state='MERGED'))
         d=self.call('land',**common);self.assertTrue(d['merged']);self.assertTrue(d['landed'])
         d=self.call('land',**common);self.assertTrue(d['resumed'])
+    def test_land_reports_closing_issues_without_the_pr_view_field(self):
+        h=self.branch('feature','feature');self.local_remote();url='https://github.com/other/repo/issues/9'
+        view=dict(state='OPEN',isDraft=False,headRefName='feature',headRefOid=h,baseRefName='main')
+        self.state(views=[view,view],pr=dict(state='MERGED'),closing=[dict(url=url,number=9,repository={'nameWithOwner':'other/repo'})])
+        d=self.call('land',pull_request=1,branch='feature',approved_head=h,updated=h,base_branch='main',expected_base=self.base,rehearsed=h,message='fixture',timeout_seconds=0,poll_seconds=0)
+        self.assertTrue(d['merged']);self.assertEqual(d['closingIssues'],[dict(url=url,repository='other/repo',number=9)])
+    def test_land_closing_issue_failure_after_merge_reports_the_landing(self):
+        h=self.branch('feature','feature');self.local_remote()
+        view=dict(state='OPEN',isDraft=False,headRefName='feature',headRefOid=h,baseRefName='main')
+        self.state(views=[view,view],pr=dict(state='MERGED'),closing_fail=True)
+        d=self.call('land',pull_request=1,branch='feature',approved_head=h,updated=h,base_branch='main',expected_base=self.base,rehearsed=h,message='fixture',timeout_seconds=0,poll_seconds=0,ok=False)
+        self.assertTrue(d['landed']);self.assertTrue(d['merged']);self.assertIn('check-issues',d['error'])
+        self.assertEqual(self.git('ls-remote','origin','refs/heads/main').split()[0],d['mergeCommit'])
     def test_land_source_mismatch_never_pushes(self):
         h=self.branch('feature','feature');self.local_remote()
         d=self.call('land',pull_request=1,branch='feature',approved_head=h,updated=self.base,base_branch='main',expected_base=self.base,rehearsed=h,message='bad',timeout_seconds=0,ok=False)
@@ -235,7 +261,7 @@ print(json.dumps(o))
         view=dict(state='OPEN',isDraft=False,headRefName='feature',headRefOid=h,baseRefName='main');self.state(pr=view)
         args=dict(pull_request=1,branch='feature',approved_head=h,updated=h,base_branch='main',expected_base=self.base,rehearsed=h,message='fixture',timeout_seconds=0,poll_seconds=0)
         d=self.call('land',ok=False,**args);self.assertTrue(d['landed']);merge=d['mergeCommit'];self.assertFalse(d['merged'])
-        self.state(pr=dict(state='MERGED',closingIssuesReferences=[]));d=self.call('land',**args);self.assertEqual(d['mergeCommit'],merge)
+        self.state(pr=dict(state='MERGED'));d=self.call('land',**args);self.assertEqual(d['mergeCommit'],merge)
     def test_delete_moved_branch_is_preserved(self):
         h=self.branch('feature','feature');self.git('branch','-f','main',h);self.local_remote()
         (self.repo/'later').write_text('new work');self.git('add','.');self.git('commit','-qm','later');new=self.git('rev-parse','HEAD');self.git('push','-q','origin','feature')

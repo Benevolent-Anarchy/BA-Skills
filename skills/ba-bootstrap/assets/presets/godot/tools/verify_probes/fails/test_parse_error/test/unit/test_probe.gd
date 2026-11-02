@@ -1,5 +1,5 @@
 ## Verify self-test probe: a test script that does not parse. GUT alone would
-## skip it and pass, so tools/verify.ps1 must fail at the compile step.
+## skip it and pass, so the gate must fail at the compile step.
 extends GutTest
 
 

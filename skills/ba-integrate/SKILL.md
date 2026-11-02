@@ -13,7 +13,7 @@ A request to integrate a project authorizes the survey, the rehearsal and a scra
 
 Never mark a pull request ready, never merge a draft, and never rewrite history. Never rebase or force-push a pull-request branch: bring it up to date by merging the base into it. The scripts' pushes each name the exact value they replace and are fast-forwards of it, so a ref that moved in any direction fails its push. Leave review threads as they are. Never touch Cicely's main checkout beyond a fast-forward pull at the end, and only when it is clean.
 
-On Linux, the scripts below run from this skill's directory with Bash, Python 3.10+, Git 2.38+ and an authenticated GitHub CLI. The native `.sh` entry points perform the operations without PowerShell. Windows retains the matching `.ps1` scripts (PowerShell 7.2+). See [Linux commands](references/linux.md) for the complete option mapping and local verification. Each writes one JSON document. Read it even after a nonzero exit: a failure carries an `error` member saying what was and was not changed. Each script takes the GitHub repository from its remote's configured URL and names it in every GitHub CLI call, so `GH_REPO` and the CLI's own default repository never redirect it. A remote whose configured or rewritten push destination is not on github.com is refused, and so is one that pushes to more than one destination or that a URL rewrite sends to a different GitHub repository, since a push or deletion would then reach a repository the checks never read. Errors never repeat credentials from a remote's URL.
+The scripts below run from this skill's directory with Bash, Python 3.10+, Git 2.38+ and an authenticated GitHub CLI. See [commands](references/linux.md) for every option and for local verification. Each writes one JSON document. Read it even after a nonzero exit: a failure carries an `error` member saying what was and was not changed. Each script takes the GitHub repository from its remote's configured URL and names it in every GitHub CLI call, so `GH_REPO` and the CLI's own default repository never redirect it. A remote whose configured or rewritten push destination is not on github.com is refused, and so is one that pushes to more than one destination or that a URL rewrite sends to a different GitHub repository, since a push or deletion would then reach a repository the checks never read. Errors never repeat credentials from a remote's URL.
 
 ## 1. Prepare
 
@@ -23,10 +23,6 @@ Read the project's `AGENTS.md` (or `CLAUDE.md`) and its `## Integrating pull req
 
 ```bash
 bash scripts/survey.sh --repository '/home/cee/Dev/<project>'
-```
-
-```powershell
-pwsh -NoProfile -File scripts/survey.ps1 -Repository 'C:\Users\cicel\Dev\<project>'
 ```
 
 It fetches and reads every open pull request, across all of GitHub's pages. It skips drafts, forks and anything targeting neither the base nor another ready pull request. For each ready one it reports its head commit, files, commits, how far it is behind the base, conflicts with the base, review decision and unresolved review threads. It also reports which pairs conflict and in which files, which pull requests build on others, and an order: those it builds on first, then the fewest conflicts, oldest first. The order is a starting point: change it when the content says so, such as one pull request's decision relying on another's, and say why in the plan.
@@ -43,7 +39,7 @@ Create the rehearsal from the surveyed base commit, in the project's worktree fo
 git -C <root> worktree add -b integration/<yyyymmdd> <root>/.claude/worktrees/integration-<yyyymmdd> <base sha>
 ```
 
-Inspect every tracked `.gitattributes` in each checkout for `filter=lfs`, run `git lfs ls-files` when available, and hydrate the current revision with `git lfs pull` before inspecting assets or running a gate when LFS is used. Repeat after changing the checked-out revision, confirming every LFS object is present (`*`, not `-`). Use whatever the project's notes say a checkout there needs, such as Git's long-path support on Windows (`-c core.longpaths=true` on every git command). Then, for each pull request in order:
+Inspect every tracked `.gitattributes` in each checkout for `filter=lfs`, run `git lfs ls-files` when available, and hydrate the current revision with `git lfs pull` before inspecting assets or running a gate when LFS is used. Repeat after changing the checked-out revision, confirming every LFS object is present (`*`, not `-`). Use whatever the project's notes say a checkout there needs. Then, for each pull request in order:
 
 1. Merge its surveyed head with `git merge --no-ff --no-commit <head sha>`.
 2. Resolve each conflict as [resolving.md](references/resolving.md) and the project's notes say, and commit with `git commit --no-edit`. The step's commit, from `git rev-parse HEAD`, is what the merge step will reproduce. Put every change the step needs into this commit.
@@ -51,11 +47,6 @@ Inspect every tracked `.gitattributes` in each checkout for `filter=lfs`, run `g
 
    ```bash
    bash scripts/update.sh --worktree <rehearsal> --head <head sha> --base <previous step commit> --rehearsed <step commit>
-   git -C <rehearsal> checkout integration/<yyyymmdd>
-   ```
-
-   ```powershell
-   pwsh -NoProfile -File scripts/update.ps1 -Worktree <rehearsal> -Head <head sha> -Base <previous step commit> -Rehearsed <step commit>
    git -C <rehearsal> checkout integration/<yyyymmdd>
    ```
 
@@ -76,7 +67,7 @@ Present the plan and wait for Cicely's approval:
 - questions only she can answer, such as two decisions that contradict each other, a resolution that needs new code, or a semantic doubt
 - follow-up corrections found on re-reading, which go into a new draft pull request after the run
 - what will happen to each pull request: a merge commit bringing it up to date where it is behind, a merge commit on the base, a comment recording any resolutions, and deletion of its branch if the project's notes ask for it
-- every open pull request that targets a branch this run merges, drafts and stacked ones included, each retargeted to the base once that branch merges. List them for each branch with `bash scripts/retarget.sh --repository <root> --branch <branch> --base-branch <base> --list` on Linux, or `pwsh -NoProfile -File scripts/retarget.ps1 -Repository <root> -Branch <branch> -BaseBranch <base> -List` on Windows. Both read every page.
+- every open pull request that targets a branch this run merges, drafts and stacked ones included, each retargeted to the base once that branch merges. List them for each branch with `bash scripts/retarget.sh --repository <root> --branch <branch> --base-branch <base> --list` It reads every page.
 
 If her answers change a resolution, redo the rehearsal from that step. Reset the rehearsal branch to the previous step's commit, merge again, and take earlier resolutions from the old step commits where they still apply. Show what changed.
 
@@ -91,10 +82,6 @@ The expected base starts as the rehearsal's base commit and becomes each landing
    bash scripts/update.sh --worktree <rehearsal> --head <approved head> --base <expected base> --rehearsed <step commit> --message 'Merge <base> into <branch> for integration'
    ```
 
-   ```powershell
-   pwsh -NoProfile -File scripts/update.ps1 -Worktree <rehearsal> -Head <approved head> -Base <expected base> -Rehearsed <step commit> -Message 'Merge <base> into <branch> for integration'
-   ```
-
 3. Land it:
 
    ```bash
@@ -103,15 +90,7 @@ The expected base starts as the rehearsal's base commit and becomes each landing
    bash scripts/land.sh --worktree <rehearsal> --pull-request <n> --branch <branch> --approved-head <approved head> --updated <update's commit> --base-branch <base> --expected-base <expected base> --rehearsed <step commit> --message "$message"
    ```
 
-   ```powershell
-   $title = gh pr view <n> --repo <owner>/<repo> --json title --jq .title
-   if ($LASTEXITCODE -ne 0) { throw 'Could not read the pull request title.' }
-   $message = "Merge pull request #<n> from <owner>/<branch>`n`n$title"
-   & ./scripts/land.ps1 -Worktree <rehearsal> -PullRequest <n> -Branch <branch> -ApprovedHead <approved head> -Updated <update's commit> -BaseBranch <base> -ExpectedBase <expected base> -Rehearsed <step commit> -Message $message
-   ```
-
    Read the title as data and pass the message variable as one argument. Apostrophes, backslashes, quotes and shell expressions in a title stay literal; never paste the title into shell source or evaluate it as code.
-   Run the Windows block in a PowerShell 7.2+ session. Its in-process script call keeps embedded quotes intact even on PowerShell 7.2, whose native argument passing can alter quotes when starting another `pwsh` process.
 
    It refuses before pushing anything unless all of these hold:
    - the update holds the rehearsed tree
@@ -120,25 +99,17 @@ The expected base starts as the rehearsal's base commit and becomes each landing
 
    It makes the merge commit on the expected base and pushes the update to the branch. It reads GitHub again, then pushes the merge commit to the base. A ref that moved, a ruleset or a merge-queue requirement therefore fails the push instead of landing something unrehearsed. It then waits for GitHub to report the pull request `MERGED`. Its `mergeCommit` is the next step's expected base.
 4. Once it reports `MERGED`, comment on the pull request with any resolutions, using the project's author prefix. Update its description if it no longer describes the change.
-5. Retarget the pull requests the plan listed for the merged branch to the base. Do this before deleting the branch, because GitHub can close a pull request whose base branch is deleted. Do it even when branches are kept, so a stacked pull request lands on the base. The script reads every page of the pull requests targeting the branch. If they are not exactly the approved ones, for instance because one was opened since, it retargets none and the run stops for a new approval. Otherwise it retargets each and confirms none is left:
+5. Retarget the pull requests the plan listed for the merged branch to the base. Do this before deleting the branch, because GitHub can close a pull request whose base branch is deleted. Do it even when branches are kept, so a stacked pull request lands on the base. The script reads every page of the pull requests targeting the branch. If they are not exactly the approved ones, for instance because one was opened since, it retargets none and the run stops for a new approval. An approved one that already targets the base and is still open counts as retargeted, and is listed under `alreadyRetargeted`: GitHub moves stacked pull requests to the base itself when a repository deletes merged branches automatically. Otherwise it retargets each and confirms none is left:
 
    ```bash
    bash scripts/retarget.sh --repository <root> --branch <branch> --base-branch <base> --approved '<n>,<m>'
    ```
 
-   ```powershell
-   pwsh -NoProfile -File scripts/retarget.ps1 -Repository <root> -Branch <branch> -BaseBranch <base> -Approved '<n>,<m>'
-   ```
-
-   Pass `--approved none` (`-Approved none` on Windows) when the plan listed none.
-6. If the project's notes say merged branches are deleted, delete it. The script deletes only while the branch is still at the merged tip and no open pull request targets it. It reports a branch someone has pushed to since as `moved`, and refuses, naming them, while pull requests still target it:
+   Pass `--approved none` when the plan listed none.
+6. If the project's notes say merged branches are deleted, delete it. The script deletes only while the branch is still at the merged tip and no open pull request targets it. It reports a branch someone has pushed to since as `moved`, and one already gone as `absent`, as it is when the repository deletes merged branches automatically. It refuses, naming them, while pull requests still target it:
 
    ```bash
    bash scripts/delete-branch.sh --repository <root> --branch <branch> --merged-tip <land's branchTip> --base-branch <base>
-   ```
-
-   ```powershell
-   pwsh -NoProfile -File scripts/delete-branch.ps1 -Repository <root> -Branch <branch> -MergedTip <land's branchTip> -BaseBranch <base>
    ```
 
    Leave local branches: one may be checked out in a session's worktree.
@@ -151,6 +122,7 @@ When a run stops, report which pull requests merged, which did not, and what eac
 
 - `branchPushed: true, landed: false`: the branch holds the update (`branchTip`) and the base is unchanged. Fix what the error names. If the plan still holds, run `land.sh` again; if not, the run needs a new plan.
 - `landed: true, merged: false`: the merge commit (`mergeCommit`) is on the base, but GitHub has not yet reported the pull request merged. Run `land.sh` again to wait. Don't delete the branch, comment, or start the next step until it reports `merged: true`. Never land the pull request a second time.
+- `merged: true` with an `error`: the landing is complete, and GitHub has confirmed it. Only the read of its closing issues failed. Carry on from step 4, with `mergeCommit` as the next expected base. `check-issues` reads the closing issues again in step 6.
 - Any other refusal pushed nothing. If the cause was passing, such as a commit hook failing on the merge commit, the script has already abandoned the merge it started, so fix the cause and run it again with the same arguments. Otherwise, report it and replan.
 
 ## 6. Finish
@@ -161,10 +133,6 @@ Check each merged pull request's issues:
 
 ```bash
 bash scripts/check-issues.sh --repository <root> --pull-request <n>
-```
-
-```powershell
-pwsh -NoProfile -File scripts/check-issues.ps1 -Repository <root> -PullRequest <n>
 ```
 
 Which issues a pull request should close is GitHub's reading, not the script's. It takes the issues GitHub lists as closing the pull request, from the description's keywords or a link made by hand, and reads no description itself. A commit message closes issues only once its commit reaches the default branch, so the script counts only the messages that landed. When GitHub's comparison finds the pull request's head among the merge commit's ancestors, every listed commit landed, along with the merge commit, whichever pull request first brought a commit into the repository. Otherwise the script walks back from the merge commit while GitHub records the pull request as having introduced each commit, which finds a rebase's copies or a squash alone. The merge commit's own message always counts, and carries the title when landing made it. Its `landing` says which kind it found. Where GitHub's record cannot show what landed, as for a merged pull request whose branch was rewritten, it fails rather than guess. GitHub lists no closures from commit messages, so the script has GitHub render each of those messages. GitHub decides which repository each reference names, whether that issue exists, and whether it is an issue at all, and it leaves code alone. A reference it resolves to an issue counts when one of GitHub's closing keywords comes right before it. The script reads every commit, and fails rather than report a partial audit. Each issue is identified by its URL, since it can live in another repository. For an issue still open, its `findings` say why, from what it could establish:

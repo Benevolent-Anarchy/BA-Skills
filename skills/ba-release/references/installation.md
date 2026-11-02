@@ -1,52 +1,27 @@
 # Shared installation and discovery
 
-On Linux/WSL, use the [native entry points and option mapping](linux.md).
-Windows PowerShell examples below remain supported on Windows.
-
 The repository owns one `skills/ba-release` directory. Do not copy the skill into
 game repositories or maintain agent-specific workflow forks.
 
-```powershell
-pwsh -NoProfile -File <BA-Skills>/install.ps1 -Skill ba-release -IncludeWsl -CheckOnly
-pwsh -NoProfile -File <BA-Skills>/install.ps1 -Skill ba-release -IncludeWsl
-pwsh -NoProfile -File <BA-Skills>/install.ps1 -Skill ba-release -IncludeWsl -CheckOnly
-pwsh -NoProfile -File <BA-Skills>/skills/ba-release/scripts/verify-discovery.ps1
+```bash
+<BA-Skills>/install.sh --skill ba-release --check-only
+<BA-Skills>/install.sh --skill ba-release
+<skill>/scripts/verify-discovery.sh --directory "/path/to/game"
 ```
 
-Select `-Skill ba-release` to install only this skill. Omitting `-Skill` selects
-all repository skills, including ba-bootstrap's two mandatory native aliases.
+`--skill ba-release` installs only this skill; omitting `--skill` installs every
+repository skill. `<skill>/scripts/install.sh` selects ba-release and forwards
+`--home` and `--check-only`.
 
-The installer detects executables on each environment's PATH and preflights all
-selected links before making any. It preserves all other skills and refuses a
-regular file/folder, wrong link, dangling link, or conflicting legacy Codex entry.
-It never edits agent settings or replaces skill directories. Repeated execution
-returns `already-linked`. `-CheckOnly` reads without creating anything.
-
-| Runtime | User discovery directory | Link |
-| --- | --- | --- |
-| Native Windows Codex | Actual Windows user home `/.agents/skills/` | Directory junction |
-| Native Windows Claude Code | `CLAUDE_CONFIG_DIR/skills/`, otherwise Windows user home `/.claude/skills/` | Directory junction |
-| Linux/WSL Codex | Linux user home `/.agents/skills/` | Symbolic link |
-| Linux/WSL Claude Code | Linux `CLAUDE_CONFIG_DIR/skills/`, otherwise `~/.claude/skills/` | Symbolic link |
-
-Codex's current user-level discovery location is `.agents/skills`; `CODEX_HOME`
-is checked only for a conflicting legacy skill. Both hosts support linked skill
-folders: [Codex documentation](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills)
+The installer links `~/.agents/skills/ba-release` (Codex) and
+`~/.claude/skills/ba-release` (Claude Code) to the canonical source with symbolic
+links. It checks every selected target before creating any, preserves other
+skills, and refuses an existing wrong link, folder or file, leaving it in place.
+It never edits agent settings or replaces skill directories. `--check-only`
+creates nothing and reports `would-install` for a missing link. Both hosts
+support linked skill folders:
+[Codex documentation](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills)
 and [Claude Code documentation](https://code.claude.com/docs/en/skills#where-skills-live).
-
-`-IncludeWsl` enumerates registered distributions and probes each Linux user's
-login environment. `-WslDistribution <name>` restricts it when combined with
-`-IncludeWsl`. Windows paths are translated with that distribution's `wslpath`;
-the link points to the same canonical source under `/mnt/...`. The installer
-does not assume WSL's home equals Windows' home and does not treat an old skills
-directory as proof an agent is installed. Distributions with no PATH-visible
-agents get no new links. For a Linux checkout run native `install.sh`; `-IncludeWsl` is only relevant
-from native Windows.
-
-Use native Bash/Python release entry points and Linux Godot for a native WSL
-release workflow. For an existing Windows workflow, run the Windows release
-scripts against the Windows checkout;
-translate paths explicitly with `wslpath -w` when launching `pwsh.exe` from WSL.
 Installation does not install runtimes, engines, Butler, or credentials.
 
 Discovery verification queries the installed agents' own startup inventories

@@ -1,5 +1,5 @@
 ## Verify self-test probe: an engine error in after_all(), where GUT tracks it
-## under no test. tools/verify.ps1 must fail even though the test passes.
+## under no test. The gate must fail even though the test passes.
 extends GutTest
 
 

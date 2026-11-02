@@ -1,6 +1,6 @@
 ## Verify self-test probe: errors raised on purpose and asserted with GUT's
 ## error assertions, once in a hook and once in a test. Asserting an error
-## marks it handled, so tools/verify.ps1 must pass.
+## marks it handled, so the gate must pass.
 extends GutTest
 
 

@@ -7,18 +7,16 @@ description: Set up, plan, prepare, publish or resume Benevolent Anarchy Godot r
 
 Use the scripts beside this file as the implementation of release operations.
 Resolve `scripts/` relative to this SKILL.md's directory, including when installed
-through a link. On Linux/WSL use `scripts/release.sh` with Bash and Python 3;
-on Windows use PowerShell 7.3+ (`scripts/release.ps1`). Read the
-[native Linux commands and option mapping](references/linux.md) before running
-on Linux. The workflow is the same in any agent; do not substitute model-generated
-shell operations for the scripts. Examples below use Windows spelling; on Linux
-select the `.sh` entry point and mapped `--kebab-case` options.
+through a link. Run `scripts/release.sh` with Bash and Python 3, and read
+[commands, hooks and state](references/linux.md) for every option. The workflow
+is the same in any agent; do not substitute model-generated shell operations
+for the scripts.
 
 ## Setup and plan
 
 1. Read the game's repository instructions and current status. Inspect its
    project, presets, verification tools, origin and actual release history.
-   Run `scripts/release.ps1 -Mode setup -Repository <game-root>` on first use,
+   Run `scripts/release.sh --mode setup --repository <game-root>` on first use,
    when configuration is incomplete or to add or remove a store; a `stores`
    answer lists every store to keep. Ask its missing-fact questions, then apply
    explicit answers using its configuration hash. Read
@@ -40,15 +38,15 @@ select the `.sh` entry point and mapped `--kebab-case` options.
    separate itch desktop build. Read
    [store operations](references/stores.md) for store-specific checks and console
    steps. New stores need a tested adapter before selection.
-3. Run `scripts/release.ps1 -Mode validate -Repository <game-root>`, then
-   `scripts/release.ps1 -Mode plan -Repository <game-root> -Destination <ids> -VersionChange <operation>`.
+3. Run `scripts/release.sh --mode validate --repository <game-root>`, then
+   `scripts/release.sh --mode plan --repository <game-root> --destination <ids> --version-change <operation>`.
    Plan is read-only. Distinguish missing configuration from source edits that
    must be reviewed/committed before preparation. Present source/version, each
    channel's baseline, destinations, shared exports, Android counter action,
    exclusions, display labels, public note path, the planned `sourceTag` and
    pending console steps.
-   Before local preparation, run `scripts/release.ps1 -Mode doctor -Repository
-   <game-root> -Destination <same-ids>` and resolve its blocked checks. Doctor
+   Before local preparation, run `scripts/release.sh --mode doctor --repository
+   <game-root> --destination <same-ids>` and resolve its blocked checks. Doctor
    inspects only selected prerequisites and never builds, signs in or contacts
    stores. Its local `ready` does not prove remote permissions or an exported
    signature; read [runtime readiness](references/execution.md#runtime-readiness).
@@ -94,7 +92,7 @@ nothing; report it, and
 never try to force the older release there without the user's explicit
 reconciliation. If the newer build was sent but never went live, and the user
 decides to abandon it, inspect its console and record that with `abandon`, from
-the release state that sent it. Pass `-AbandonAuthorized` only after the user
+the release state that sent it. Pass `--abandon-authorized` only after the user
 explicitly authorizes it. Keep successful operations
 complete while retrying failed operations. Hold prepared destinations that must
 not publish yet with `hold` and a single-line public reason without credentials
@@ -102,15 +100,15 @@ or private discussion. Before unholding Play, re-read its live track and review
 active releases, rollout and `retainVersionCodes` with the user; an earlier
 approval does not cover a track that changed during the hold. Use `unhold` only
 when the user's condition is satisfied or they explicitly authorize resuming,
-and pass `-PlayTrackReviewed` for Play only after that fresh review. Ordinary publish
+and pass `--play-track-reviewed` for Play only after that fresh review. Ordinary publish
 and retries retain holds and skip those stores completely. Source, notes,
 artifacts and plan identity stay unchanged. A failed destination can be held
 after confirming it has no remote progress; started or uncertain store operations
 require reconciliation. Selected public notes still receive their read-only
 preflight while held, before any store publication. An interrupted upload remains
 `uncertain`; inspect its remote result and obtain explicit authorization before
-using `-RetryUncertain`. An expired/invalidated Play edit needs separate explicit
-authorization for `-ReplacePlayEdit` after inspecting the remote outcome and
+using `--retry-uncertain`. An expired/invalidated Play edit needs separate explicit
+authorization for `--replace-play-edit` after inspecting the remote outcome and
 other open work; preserve the same code, bundle, selection and approval. Steam
 uploads retain a build ID and console actions;
 Play commits retain edit/bundle/track progress and remain submitted until verified
@@ -144,7 +142,7 @@ text is immutable through extension. Track live releases per actual store channe
 Ordinary `extend` covers destinations declared in release.json when the release
 was prepared. For a store configured afterwards, add it through setup, have the
 user review that release.json change and commit it by itself, then pass
-`-MigrateConfiguration`. It adopts only added stores, channels, exports and
+`--migrate-configuration`. It adopts only added stores, channels, exports and
 checks with a confirmed baseline, and refuses any other change; read
 [extending a prepared release](references/execution.md#extending-a-prepared-release).
 
@@ -167,9 +165,9 @@ explicit configuration writes, validation, discovery and read-only plans against
 real projects. Keep future update notification outside this workflow; stable
 version labels and the public record do not require separate desktop executables.
 
-For native Linux commands, hooks, keyless authentication and discovery, read
-[native Linux operation](references/linux.md).
-For installation, native Windows/WSL discovery and checks, read
+For commands, hooks, keyless authentication and discovery, read
+[commands, hooks and state](references/linux.md).
+For installation and discovery checks, read
 [installation](references/installation.md).
 
 ## Chrome account guard
