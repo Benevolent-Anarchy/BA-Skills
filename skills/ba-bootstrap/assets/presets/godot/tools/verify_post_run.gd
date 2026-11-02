@@ -1,4 +1,4 @@
-## GUT post-run hook that tools/verify.ps1 installs, with tools/verify_pre_run.gd
+## GUT post-run hook that the gate installs, with tools/verify_pre_run.gd
 ## before the run. It fails the run on two things GUT reports but fails
 ## nothing for, so that the run would otherwise still exit zero:
 ## - An unexpected error raised outside any test. GUT fails a test for an
@@ -14,7 +14,7 @@
 ##   orphans comes only after this hook.
 ##
 ## It also writes GUT's own totals for the run where the environment variable
-## BA_VERIFY_TOTALS says, for verify.ps1's closing summary: GUT's JUnit
+## BA_VERIFY_TOTALS says, for the gate's closing summary: GUT's JUnit
 ## report holds only tests, and leaves out asserts made in before_all() and
 ## after_all(), which GUT's Run Summary counts.
 extends GutHookScript

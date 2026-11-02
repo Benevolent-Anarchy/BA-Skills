@@ -28,9 +28,9 @@ The aim is the best software we can build, not being right or looking good. Reco
 
 12. Preserve existing work. Do not discard, stash or relocate another person's or agent's changes merely to make a workflow convenient.
 
-13. Before opening a PR, make the proposed project state ready for a fresh session to take over once review passes. Finish the implementation, record durable outcomes, link resolved or remaining Issues, and update orientation where needed. Run the complete project gate (`bash tools/verify.sh` on Linux, `pwsh -NoProfile -File tools/verify.ps1` on Windows) against that finished state and require it to pass before opening the PR; earlier results do not cover subsequent changes. Do not rely on being able to make non-review-related changes after the review process starts.
+13. Before opening a PR, make the proposed project state ready for a fresh session to take over once review passes. Finish the implementation, record durable outcomes, link resolved or remaining Issues, and update orientation where needed. Run the complete project gate (`bash tools/verify.sh`) against that finished state and require it to pass before opening the PR; earlier results do not cover subsequent changes. Do not rely on being able to make non-review-related changes after the review process starts.
 
-14. Open every pull request as a draft (`gh pr create --draft`). Leave it a draft after reviews; Cicely marks it ready and retains merge control. Include the result, relevant verification and known limitations. `tools/verify.sh` on Linux and `tools/verify.ps1` on Windows are entry points to the project's complete verification gate; extend it as project checks are added rather than substituting a partial check for its complete result.
+14. Open every pull request as a draft (`gh pr create --draft`). Leave it a draft after reviews; Cicely marks it ready and retains merge control. Include the result, relevant verification and known limitations. `tools/verify.sh` is the entry point to the project's complete verification gate; extend it as project checks are added rather than substituting a partial check for its complete result.
 
 15. Prefer small changes and clear code, introduce dependencies for a concrete reason, and keep logic deterministic and independently testable where practical. Add comments explaining purpose, contracts and non-obvious choices rather than restating syntax.
 
@@ -48,6 +48,6 @@ The aim is the best software we can build, not being right or looking good. Reco
 
 {{PRESET_SETUP}}
 
-Run `bash tools/verify.sh` on Linux or `pwsh -NoProfile -File tools/verify.ps1` on Windows after setup and against the finished PR state.
+Run `bash tools/verify.sh` after setup and against the finished PR state.
 
 {{PRESET_GATE}}

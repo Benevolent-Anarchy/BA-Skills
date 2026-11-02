@@ -1,6 +1,6 @@
 # Bootstrap operations
 
-On Linux use `scripts/bootstrap.sh` and kebab-case options; see [Linux operations](linux.md) for command mapping, XDG state, dependencies and app verification. PowerShell examples below remain the Windows interface.
+Use `scripts/bootstrap.sh`; see [commands, toolchains and state](linux.md) for options, XDG state, dependencies and app verification.
 
 ## Outcomes and recovery
 
@@ -14,7 +14,7 @@ On Linux use `scripts/bootstrap.sh` and kebab-case options; see [Linux operation
 | `missing-input` | Collect the listed inputs; no creation has started. |
 | `discarded` | Explicitly requested unpublished preparation was removed. A new invocation can use the same name. |
 
-Creation journals live under `$XDG_STATE_HOME/BA-Skills/ba-bootstrap/state/` (default `~/.local/state/BA-Skills/ba-bootstrap/state/`) on Linux and `%LOCALAPPDATA%/BA-Skills/ba-bootstrap/state/` on Windows; vault journals are separately keyed by actual vault path under `vaults/`. Use the result's exact `journalPath`. These files contain identity, generated hashes, returned repository IDs and phase/ref receipts, never authentication tokens. Atomic snapshots and an exclusive lock protect retries. Preserve unreadable or incompatible journals; use a matching skill version or resolve the concrete conflict before continuing.
+Creation journals live under `$XDG_STATE_HOME/BA-Skills/ba-bootstrap/state/` (default `~/.local/state/BA-Skills/ba-bootstrap/state/`); vault journals are separately keyed by actual vault path under `vaults/`. Use the result's exact `journalPath`. These files contain identity, generated hashes, returned repository IDs and phase/ref receipts, never authentication tokens. Atomic snapshots and an exclusive lock protect retries. Preserve unreadable or incompatible journals; use a matching skill version or resolve the concrete conflict before continuing.
 
 New creation journals use schema v2 and include normalized preset/options, recipe version, exact dependency resolution, retained preparation checkpoints, a byte manifest/frozen snapshot and separate native staging/checkout receipts. Complete preparation and the selected full gate before the first repository POST; verify effective ignores and unchanged source bytes before recording success. Repeat the full gate on the private checkout before committing its exact frozen tree. Documentation or frontend success alone cannot replace a missing native check.
 
@@ -24,8 +24,8 @@ An interrupted snapshot publication can reuse its exact retained source and comp
 
 When Cicely explicitly asks to abandon an unpublished failed or incompatible preparation, run `discard` using its original name/owner:
 
-```powershell
-pwsh -NoProfile -File scripts/bootstrap.ps1 -Mode discard -Name 'Foo Bar Baz' -Owner Benevolent-Anarchy
+```bash
+scripts/bootstrap.sh --mode discard --name 'Foo Bar Baz' --owner Benevolent-Anarchy
 ```
 
 Discard runs locally under the journal lock, validates ownership and rejects linked paths before deletion. It removes this invocation's preparation trees, unpublished snapshot fragments, frozen snapshot and journal; it preserves the project path and unrelated state. It refuses if either repository creation phase was ever recorded, including a failed or unresolved attempt, or if any repository ID/ref is retained. Such invocations require identity recovery. Do not discard automatically to bypass an incompatible latest release or a missing SDK. After an authorized discard, collect the new selection and plan/create normally; no silent downgrade or preset substitution occurs.
@@ -46,7 +46,7 @@ The generated documentation gate checks Markdown links in root-level `.md` entry
 
 Preflight renders the foundation, including the supplied description, in a disposable temporary directory and runs that same documentation validator before creating either repository or a journal. The directory is removed after validation. A broken description link reports `blocked`; correct the description and plan/create again. Local links must resolve within the initial foundation, while external links remain allowed.
 
-After bootstrap is complete, use `local-setup -Repository <actual checkout> -RefreshPlugins` for a deliberate plugin update. Creation/resume rejects a refresh request on a completed journal with that concrete instruction; it does not report an ignored update as successful.
+After bootstrap is complete, use `--mode local-setup --repository <actual checkout> --refresh-plugins` for a deliberate plugin update. Creation/resume rejects a refresh request on a completed journal with that concrete instruction; it does not report an ignored update as successful.
 
 ## Project repository visibility
 
@@ -67,17 +67,10 @@ The public companion contains only its initial README, has `main`, remains writa
 
 GitHub's [current repository API](https://docs.github.com/en/rest/repos/repos#update-a-repository) supports `has_pull_requests`. When repository readback exposes it, the helper disables and verifies it; status checks that it stays disabled. If a host omits the field and the result says `needs-browser`, use authenticated browser tools for the exact public repository's **Settings → General → Features** page. Uncheck **Pull requests**; reopen/read the page and verify the unchecked state. If browser access is unavailable, keep that phase pending. Check the live surface for optional contribution/automation features; preserve security protections and owner publication access. Record any additional setting verified there in the trial receipt.
 
-Record the actual browser observation through the helper; this is an agent operation, not a user prompt:
+Record the actual browser observation through the helper; this is an agent operation, not a user prompt. Write it as JSON with `disabled: true`, `sourceUrl` set to the companion's exact `/settings` URL, `repositoryId` set to the observed and journalled public ID, and `observedAt` set to the actual readback time as an ISO timestamp. Then pass it to `status` or `resume`:
 
-```powershell
-Import-Module ./scripts/Bootstrap.psm1 -Force
-Import-Module ./scripts/State.psm1 -Force
-$identity = Get-BootstrapStoredIdentity -Name 'Foo Bar Baz'
-# repositoryId must be the observed/journalled public ID; observedAt is the actual readback time.
-$evidence = @{repositoryId=$observedRepositoryId; disabled=$true;
-    sourceUrl="https://github.com/$($identity.notesFullName)/settings";
-    observedAt=$observedAt}
-Set-BootstrapBrowserEvidence -Identity $identity -Setting pullRequests -Evidence $evidence
+```bash
+scripts/bootstrap.sh --mode resume --name 'Foo Bar Baz' --browser-evidence evidence.json
 ```
 
 The helper checks identity against both the journal and GitHub. A URL, timestamp or presumed API success does not prove the UI setting. Status labels this as stored browser evidence, not a fresh API check. Resume after readback to finish any remaining phases.
@@ -94,7 +87,7 @@ Carry each selected asset's published [GitHub SHA-256 digest](https://docs.githu
 
 Compatibility uses the running app's official CLI version when available, otherwise the newest numerically valid `obsidian-<version>.asar` in the application cache. The executable's product version is the installer version and cannot establish app compatibility. If neither source is available, installation may proceed but compatibility/app verification stays pending.
 
-New vaults use **Files and links → New link format → Absolute path in vault** and **Automatically update internal links** so editor-created wikilinks match the gate's vault-root paths. Use exact file and directory casing; the gate rejects links that only work through Windows' case-insensitive lookup. Existing vaults retain their preferences: set these two options manually if needed and update old shortest-path links to explicit vault-root paths.
+New vaults use **Files and links → New link format → Absolute path in vault** and **Automatically update internal links** so editor-created wikilinks match the gate's vault-root paths. Use exact file and directory casing; the gate rejects links whose case differs from the file's. Existing vaults retain their preferences: set these two options manually if needed and update old shortest-path links to explicit vault-root paths.
 
 Dataview's normal queries remain available; DataviewJS and inline DataviewJS start disabled. Canon does not require JavaScript execution from notes. Enable either setting only as a deliberate project-specific choice. Existing clones retain their Dataview settings; disable both JavaScript options manually if adopting these defaults.
 
@@ -116,6 +109,6 @@ Immediately after the last required desktop action, or when app checks are block
 
 ## Shared installation
 
-Run `pwsh -NoProfile -File scripts/install.ps1` from the canonical skill after integration. It dispatches to BA-Skills' named installer. Bootstrap always requests both native aliases (`~/.agents/skills/ba-bootstrap`, `~/.claude/skills/ba-bootstrap`, respecting `CLAUDE_CONFIG_DIR`) pointing to one canonical source. On Windows the established directory-junction pattern provides those aliases. Optional WSL discovery uses each distribution's own home. Existing wrong links, real folders/files and selected-skill legacy Codex conflicts are reported before installing anything.
+Run `scripts/install.sh` from the canonical skill after integration. It runs BA-Skills' root installer for this skill and accepts `--home PATH` and `--check-only`. It links `~/.agents/skills/ba-bootstrap` and `~/.claude/skills/ba-bootstrap` to one canonical source, checks both before creating either, and refuses an existing wrong link, folder or file, leaving it in place.
 
-Keep permanent aliases aimed at `C:\Users\cicel\Dev\BA-Skills\skills\ba-bootstrap`, not an unmerged development worktree. Other agents can use that source directly if their discovery convention differs.
+Keep permanent aliases aimed at the canonical checkout (`~/Dev/BA-Skills/skills/ba-bootstrap`), not an unmerged development worktree. Other agents can use that source directly if their discovery convention differs.

@@ -1,6 +1,6 @@
 ## Verify self-test probe: a rendered test whose assertion fails. It skips
 ## itself in the headless run, as every rendered test does, so only the
-## windowed step can catch it. tools/verify.ps1 must fail there.
+## windowed step can catch it. The gate must fail there.
 extends GutTest
 
 
