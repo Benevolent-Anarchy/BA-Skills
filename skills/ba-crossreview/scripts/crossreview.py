@@ -494,8 +494,10 @@ def fetch(repo: Path, remote: str, ref: str, into: str) -> str:
 
 def fetched(path: Path, name: str) -> str:
     """The local ref a cross-review fetches its pull request's `name`, head or base, into: named after its ledger,
-    whose lock keeps any other command from writing it meanwhile."""
-    return f'refs/ba-crossreview/{re.sub(r"[^A-Za-z0-9_-]", "_", path.stem)}/{name}'
+    whose lock keeps any other command from writing it meanwhile. A ledger's name may hold dots, which a ref name
+    can't always, so they are encoded rather than replaced: two ledgers never share refs."""
+    stem = re.sub(r'[^A-Za-z0-9_-]', lambda match: f'%{ord(match.group()):02X}', path.stem)
+    return f'refs/ba-crossreview/{stem}/{name}'
 
 
 def common_dir(repo: Path) -> Path:

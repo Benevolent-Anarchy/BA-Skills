@@ -5,6 +5,7 @@ the local origin for fetches. Fake gh, codex and claude commands stand in for Gi
 so no test touches the network or a real agent.
 """
 import fcntl
+import importlib.util
 import json
 import os
 import re
@@ -378,6 +379,20 @@ class CrossReview(unittest.TestCase):
         self.assertNotIn(worktree.name, self.git('worktree', 'list'))
         self.assertEqual(self.git('for-each-ref', 'refs/ba-crossreview'), '')
         self.assertEqual(self.script('status')['turn'], 'done')
+
+    def test_each_ledger_fetches_into_refs_of_its_own(self):
+        # Loaded in place, to name the refs the two ledgers' fetches would use.
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location('crossreview_under_test', SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        refs = []
+        for repository in ('example/game.tools', 'example/game_tools', 'example/.dotted'):
+            ledger = module.state_path(self.repo, repository, 7)
+            refs += [module.fetched(ledger, name) for name in ('head', 'base')]
+        self.assertEqual(len(set(refs)), len(refs))
+        for ref in refs:
+            self.git('check-ref-format', ref)
 
     def test_a_fetch_by_another_cross_review_never_changes_what_is_reviewed(self):
         # A commit of no pull request here, which another cross-review's fetch leaves in the clone's FETCH_HEAD.
