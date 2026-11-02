@@ -122,6 +122,7 @@ When a run stops, report which pull requests merged, which did not, and what eac
 
 - `branchPushed: true, landed: false`: the branch holds the update (`branchTip`) and the base is unchanged. Fix what the error names. If the plan still holds, run `land.sh` again; if not, the run needs a new plan.
 - `landed: true, merged: false`: the merge commit (`mergeCommit`) is on the base, but GitHub has not yet reported the pull request merged. Run `land.sh` again to wait. Don't delete the branch, comment, or start the next step until it reports `merged: true`. Never land the pull request a second time.
+- `merged: true` with an `error`: the landing is complete, and GitHub has confirmed it. Only the read of its closing issues failed. Carry on from step 4, with `mergeCommit` as the next expected base. `check-issues` reads the closing issues again in step 6.
 - Any other refusal pushed nothing. If the cause was passing, such as a commit hook failing on the merge commit, the script has already abandoned the merge it started, so fix the cause and run it again with the same arguments. Otherwise, report it and replan.
 
 ## 6. Finish

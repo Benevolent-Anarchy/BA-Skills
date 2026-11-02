@@ -37,6 +37,7 @@ if a[:2]==['api','graphql'] and d.get('graphql_pages'):
 if a[:2]==['api','graphql']:
  q=next(x[6:] for x in a if x.startswith('query='))
  if 'ClosingIssues' in q:
+  if d.get('closing_fail'):print('HTTP 502',file=sys.stderr);sys.exit(1)
   k='closingIssuesReferences'; c=d.get('closing',[])
   o={'data':{'repository':{'pullRequest':{k:{'nodes':c,'totalCount':len(c),'pageInfo':{'hasNextPage':False}}}}}}
  elif 'PullRequestCommits' in q:
@@ -207,6 +208,13 @@ print(json.dumps(o))
         self.state(views=[view,view],pr=dict(state='MERGED'),closing=[dict(url=url,number=9,repository={'nameWithOwner':'other/repo'})])
         d=self.call('land',pull_request=1,branch='feature',approved_head=h,updated=h,base_branch='main',expected_base=self.base,rehearsed=h,message='fixture',timeout_seconds=0,poll_seconds=0)
         self.assertTrue(d['merged']);self.assertEqual(d['closingIssues'],[dict(url=url,repository='other/repo',number=9)])
+    def test_land_closing_issue_failure_after_merge_reports_the_landing(self):
+        h=self.branch('feature','feature');self.local_remote()
+        view=dict(state='OPEN',isDraft=False,headRefName='feature',headRefOid=h,baseRefName='main')
+        self.state(views=[view,view],pr=dict(state='MERGED'),closing_fail=True)
+        d=self.call('land',pull_request=1,branch='feature',approved_head=h,updated=h,base_branch='main',expected_base=self.base,rehearsed=h,message='fixture',timeout_seconds=0,poll_seconds=0,ok=False)
+        self.assertTrue(d['landed']);self.assertTrue(d['merged']);self.assertIn('check-issues',d['error'])
+        self.assertEqual(self.git('ls-remote','origin','refs/heads/main').split()[0],d['mergeCommit'])
     def test_land_source_mismatch_never_pushes(self):
         h=self.branch('feature','feature');self.local_remote()
         d=self.call('land',pull_request=1,branch='feature',approved_head=h,updated=self.base,base_branch='main',expected_base=self.base,rehearsed=h,message='bad',timeout_seconds=0,ok=False)
