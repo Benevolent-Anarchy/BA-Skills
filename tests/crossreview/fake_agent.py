@@ -4,16 +4,21 @@ The first argument names the tool being faked. Every call is logged to calls.jso
 BA_CROSSREVIEW_FAKE names, with its arguments, working directory and standard input. pr.json is what
 `gh pr view` prints, and comments.json holds the comments `gh pr comment` posts and `gh api` edits. Each
 reviewer call takes the next entry of reviews.json and streams events as the real tool does: one step of
-work, then, after the entry's `sleep`, its answer and token usage. A Codex focused check, run with write
-access, starts its session's rollout file under CODEX_HOME, as Codex does, unless the entry has `noRollout`;
-logs each of the entry's `tokens` there as a running total; and leaves the entry's `leaves` files behind.
-Claude reports each message's `streamed` usage with every event of that message, as Claude does. An entry's
-`prHead` moves the pull request on while the reviewer reads, and its `viewFails` makes `gh pr view` fail from
-then on, until view-fails is removed. Git LFS counts as installed only when lfs-installed exists, and
+work, then, after the entry's `sleep`, its answer and token usage. A Codex focused check, whose permissions
+profile lets it write, starts its session's rollout file under CODEX_HOME, as Codex does, unless the entry
+has `noRollout`; logs each of the entry's `tokens` there as a running total; and leaves the entry's `leaves`
+files behind. Claude reports each message's `streamed` usage with every event of that message, as Claude
+does. Either reviewer runs the entry's `runs` commands, waiting for each, or, with `detached`, leaving them
+running in sessions of their own, as both do. A Claude call without a JSON schema is a check's trial: it
+runs `true`. Claude runs its commands through CLAUDE_CODE_SHELL_PREFIX, as Claude Code does, unless
+prefix-ignored exists, and `codex sandbox` runs the command it is given, without a sandbox. An entry's
+`prHead` moves the pull request on while the reviewer reads, and its `viewFails` makes `gh pr view` fail
+from then on, until view-fails is removed. Git LFS counts as installed only when lfs-installed exists, and
 lfs-files.txt is what `git lfs ls-files` prints.
 """
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -23,7 +28,9 @@ tool, args = sys.argv[1], sys.argv[2:]
 stdin = sys.stdin.read() if not sys.stdin.isatty() else ''
 with open(fixture / 'calls.jsonl', 'a', encoding='utf-8') as log:
     log.write(json.dumps({'tool': tool, 'args': args, 'cwd': os.getcwd(), 'stdin': stdin,
-                          'claudecode': os.environ.get('CLAUDECODE'), 'tmpdir': os.environ.get('TMPDIR')}) + '\n')
+                          'claudecode': os.environ.get('CLAUDECODE'), 'tmpdir': os.environ.get('TMPDIR'),
+                          'prefix': os.environ.get('CLAUDE_CODE_SHELL_PREFIX'),
+                          'codexHome': os.environ.get('CODEX_HOME')}) + '\n')
 
 
 def value(flag):
@@ -84,6 +91,24 @@ def emit(event):
     print(json.dumps(event), flush=True)
 
 
+def shell(command, detached=False):
+    """Runs a command as Claude Code's Bash tool does, or, `detached`, starts it in a session of its own, as Claude
+    Code and Codex do, and leaves it running."""
+    prefix = os.environ.get('CLAUDE_CODE_SHELL_PREFIX')
+    args = [prefix, command] if prefix and not (fixture / 'prefix-ignored').exists() else ['bash', '-c', command]
+    if detached:
+        subprocess.Popen(args, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return 0
+    return subprocess.run(args, capture_output=True).returncode
+
+
+if tool == 'codex' and args[:1] == ['sandbox']:
+    sys.exit(subprocess.run(args[args.index('--') + 1:]).returncode)
+if tool == 'claude' and '--json-schema' not in args:
+    shell('true')
+    print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'}))
+    sys.exit(0)
+
 review = next_review()
 if review.get('prHead'):
     # The pull request moves on while the reviewer reads.
@@ -96,10 +121,11 @@ if review.get('exit') or (resuming and review.get('resumeFails')):
     print(review.get('stderr', 'fixture: reviewer failed'), file=sys.stderr)
     sys.exit(review.get('exit') or 1)
 usage = review.get('usage', {'input': 1200000, 'cached': 900000, 'output': 30000})
+writes = any(arg.startswith('permissions.') and '"write"' in arg for arg in args)
 if tool == 'codex':
     session = args[2] if resuming else review.get('session', 'codex-thread-1')
     emit({'type': 'thread.started', 'thread_id': session})
-    if 'sandbox_mode="workspace-write"' in args and not review.get('noRollout'):
+    if writes and not review.get('noRollout'):
         rollout = Path(os.environ['CODEX_HOME'], 'sessions/2026/11/01', f'rollout-2026-11-01T09-00-00-{session}.jsonl')
         rollout.parent.mkdir(parents=True, exist_ok=True)
         with open(rollout, 'a', encoding='utf-8') as stream:
@@ -111,11 +137,14 @@ if tool == 'codex':
                                           'output_tokens': 0}}}}) + '\n')
             emit({'type': 'item.started', 'item': {'type': 'command_execution',
                                                    'command': "/bin/bash -lc 'python3 -m unittest'"}})
-    if 'sandbox_mode="workspace-write"' in args:
+    if writes:
         for name in review.get('leaves', []):
             for folder in (os.getcwd(), os.environ['TMPDIR']):
                 Path(folder, name).write_text('Left by the tests.\n', encoding='utf-8')
     emit({'type': 'item.started', 'item': {'type': 'command_execution', 'command': "/bin/bash -lc 'git status --short'"}})
+    for command in review.get('runs', []):
+        emit({'type': 'item.started', 'item': {'type': 'command_execution', 'command': f'/bin/bash -lc {command!r}'}})
+        shell(command, review.get('detached'))
     time.sleep(review.get('sleep', 0))
     Path(value('-o')).write_text(json.dumps(review['output']), encoding='utf-8')
     emit({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(review['output'])}})
@@ -127,6 +156,10 @@ elif tool == 'claude':
     streamed = review.get('streamed', {'input_tokens': 10, 'output_tokens': 5})
     emit({'type': 'assistant', 'message': {'id': 'message-1', 'usage': streamed, 'content': [
         {'type': 'tool_use', 'name': 'Read', 'input': {'file_path': os.path.join(os.getcwd(), 'widget.py')}}]}})
+    for command in review.get('runs', []):
+        emit({'type': 'assistant', 'message': {'id': 'message-1', 'usage': streamed, 'content': [
+            {'type': 'tool_use', 'name': 'Bash', 'input': {'command': command}}]}})
+        shell(command, review.get('detached'))
     emit({'type': 'assistant', 'message': {'id': 'message-1', 'usage': streamed, 'content': [
         {'type': 'text', 'text': 'Reading on.'}]}})
     time.sleep(review.get('sleep', 0))
