@@ -16,5 +16,5 @@ When Cicely asks for the ready pull requests, the ones no longer drafts, to be m
 - **`README.md`:** one paragraph per skill. Keep each pull request's change to its own skill's paragraph; where two changed the same paragraph, rewrite it to be true of the merged tree.
 - **Tests:** keep both sides' tests in `tests/run-tests.ps1` and the other suites.
 - **Posting:** begin every comment and description with `[Claude]` or `[Codex]`. The one exception is the comments where the cross-review skill records Cicely's decisions in her own words: those begin with `[Cee, via the skill]`. Each pull request's `Closes #N` lines close their issues when it merges.
-- **Branches:** delete each merged branch on GitHub, and leave local ones.
+- **Branches:** delete each merged branch on GitHub, and leave local ones. This repository deletes merged head branches itself, and GitHub then moves the pull requests stacked on them to the base. So `delete-branch.sh` reports the branch `absent`, and `retarget.sh` lists the stacked ones under `alreadyRetargeted`.
 - **After merging,** list the worktrees, sessions and Codex tasks still on the merged branches, and offer to clean them up; don't remove them unasked.

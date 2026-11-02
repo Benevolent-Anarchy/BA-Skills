@@ -1,8 +1,8 @@
-# Linux integration commands
+# Commands and verification
 
-Requirements: Bash, Python 3.10 or later, Git 2.38 or later (`merge-tree --write-tree`), and authenticated `gh`. Every command emits one JSON result; exit 1 carries `error` and any partial progress. Read the result before retrying. Arguments are passed as literal arrays, including paths with spaces, Unicode or square brackets; filenames use NUL-delimited Git output. No native command invokes PowerShell.
+Requirements: Bash, Python 3.10 or later, Git 2.38 or later (`merge-tree --write-tree`), and authenticated `gh`. Older `gh` releases, such as Ubuntu's 2.46, work: the scripts read a pull request's closing issues through GraphQL rather than a `pr view` field those releases lack. Every command emits one JSON result; exit 1 carries `error` and any partial progress. Read the result before retrying. Arguments are passed as literal arrays, including paths with spaces, Unicode or square brackets; filenames use NUL-delimited Git output.
 
-Run from the skill directory. All six commands have `--help`. Linux option names correspond to the PowerShell names below. Values are separate arguments; quote paths and multiline commit messages.
+Run from the skill directory. All six commands have `--help`. Values are separate arguments; quote paths and multiline commit messages.
 
 | Entry point | Required options | Additional options and defaults |
 | --- | --- | --- |
@@ -13,14 +13,10 @@ Run from the skill directory. All six commands have `--help`. Linux option names
 | `scripts/delete-branch.sh` | `--repository --branch --merged-tip --base-branch` | `--remote origin`, `--github-cli` |
 | `scripts/check-issues.sh` | `--repository --pull-request` | `--recent-seconds 120`, `--remote origin`, `--github-cli` |
 
-The PowerShell spelling is PascalCase with one hyphen (`-ApprovedHead`); Linux uses the corresponding double-hyphen kebab case (`--approved-head`). `-PullRequestsJson`, `-GitHubCli`, `-RecentSeconds`, `-TimeoutSeconds`, `-PollSeconds` map to `--pull-requests-json`, `--github-cli`, `--recent-seconds`, `--timeout-seconds`, `--poll-seconds`. Switches `-List` and `-CheckOnly` become `--list` and `--check-only`.
+`integrate.py` implements the operations: checked subprocesses, commit resolution/existence/ancestry, exact remote branch reads, tracked dirty/merge detection, separate gh output/error streams, credential redaction, GitHub URL parsing and destination validation, paginated dependent PR reads, and CLI discovery. The Bash wrappers select the operation; they contain no business logic.
 
-`integrate.py` implements the shared `Integrate.psm1` operations: checked subprocesses, commit resolution/existence/ancestry, exact remote branch reads, tracked dirty/merge detection, separate gh output/error streams, credential redaction, GitHub URL parsing and destination validation, paginated dependent PR reads, and CLI discovery. The Bash wrappers select the operation; they contain no business logic.
+The scripts recognize GitHub's documented `ssh://git@ssh.github.com:443/owner/repo.git` endpoint as the same repository as its HTTPS and standard SSH URLs. Other hosts and unrecognized ports remain refused. See [GitHub's SSH-over-HTTPS instructions](https://docs.github.com/en/authentication/troubleshooting-ssh/using-ssh-over-the-https-port).
 
-Both implementations recognize GitHub's documented `ssh://git@ssh.github.com:443/owner/repo.git` endpoint as the same repository as its HTTPS and standard SSH URLs. Other hosts and unrecognized ports remain refused. See [GitHub's SSH-over-HTTPS instructions](https://docs.github.com/en/authentication/troubleshooting-ssh/using-ssh-over-the-https-port).
+The rehearsal and gate sequence is the one `SKILL.md` describes: merge each surveyed head into the scratch branch, resolve and commit, replay with `update.sh`, return to the scratch branch, then run the project's gate at every step. Gate failure is a plan finding. The scripts never mark a PR ready or create a PR. Any follow-up PR created by an agent must use `gh pr create --draft` and remain a draft.
 
-The skill's rehearsal and gate sequence is unchanged: merge each surveyed head into the scratch branch, resolve and commit, replay with `update.sh`, return to the scratch branch, then run the project's gate at every step. Gate failure is a plan finding. The scripts never mark a PR ready or create a PR. Any follow-up PR created by an agent must use `gh pr create --draft` and remain a draft.
-
-Run `bash tests/integrate-linux/run-tests.sh` from the BA-Skills root. It exercises actual temporary Git repositories and bare remotes. Test-only Git transport routes fetches, pushes and remote-ref reads to those local remotes; URL and configuration checks still use real Git without a rewrite. GitHub's service boundary is a fixture too. It never writes real remote refs or a real home directory. `bash tools/verify.sh` runs the bootstrap, integration and release Linux suites and the cross-review suite, and fails if any suite fails.
-
-The Linux gate neither parses nor exercises `.ps1` or `.psm1` sources. Windows support requires the separate Windows gate, `pwsh -NoProfile -File tools/verify.ps1`; a Linux pass alone does not verify the PowerShell implementation.
+Run `bash tests/integrate-linux/run-tests.sh` from the BA-Skills root. It exercises actual temporary Git repositories and bare remotes. Test-only Git transport routes fetches, pushes and remote-ref reads to those local remotes; URL and configuration checks still use real Git without a rewrite. GitHub's service boundary is a fixture too, and like Ubuntu's `gh` 2.46 it refuses the `closingIssuesReferences` field in `pr view`. It never writes real remote refs or a real home directory. `bash tools/verify.sh` runs the bootstrap, integration, release and cross-review suites, and fails if any suite fails.
