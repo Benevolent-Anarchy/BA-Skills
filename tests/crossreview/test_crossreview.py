@@ -5,6 +5,7 @@ the local origin for fetches. Fake gh, codex and claude commands stand in for Gi
 so no test touches the network or a real agent.
 """
 import fcntl
+import importlib.util
 import json
 import os
 import re
@@ -363,7 +364,10 @@ class CrossReview(unittest.TestCase):
 
     def test_a_clean_review_ends_it_and_finish_removes_the_checkout(self):
         self.queue(review(summary='The change holds up.'))
+        own = f'{self.base}\t\tthe author\'s own fetch\n'
+        (self.repo / '.git/FETCH_HEAD').write_text(own, encoding='utf-8')
         result = self.review()
+        self.assertEqual((self.repo / '.git/FETCH_HEAD').read_text(encoding='utf-8'), own)
         self.assertEqual((result['open'], result['turn']), ([], 'done'))
         self.assertIn('The change holds up.\n\nNothing is open.', self.posts()[0]['body'])
         self.assertIn('done', self.review(ok=False)['error'])
@@ -373,7 +377,67 @@ class CrossReview(unittest.TestCase):
         self.assertFalse(worktree.exists())
         self.assertFalse(worktree.with_name(worktree.name + '.change').exists())
         self.assertNotIn(worktree.name, self.git('worktree', 'list'))
+        self.assertEqual(self.git('for-each-ref', 'refs/ba-crossreview'), '')
         self.assertEqual(self.script('status')['turn'], 'done')
+
+    def test_each_ledger_fetches_into_refs_of_its_own(self):
+        # Loaded in place, to name the refs the two ledgers' fetches would use.
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location('crossreview_under_test', SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        refs = []
+        # GitHub allows a repository name of 100 characters, dots and all.
+        for repository in ('example/game.tools', 'example/game_tools', 'example/.dotted', 'example/a' + '.' * 90 + 'b'):
+            ledger = module.state_path(self.repo, repository, 7)
+            refs += [module.fetched(ledger, name) for name in ('head', 'base')]
+        self.assertEqual(len(set(refs)), len(refs))
+        for ref in refs:
+            self.git('fetch', '--quiet', '--no-tags', '--no-write-fetch-head', 'origin', f'+refs/heads/main:{ref}')
+            self.assertEqual(self.git('rev-parse', ref), self.base)
+
+    def test_a_fetch_by_another_cross_review_never_changes_what_is_reviewed(self):
+        # A commit of no pull request here, which another cross-review's fetch leaves in the clone's FETCH_HEAD.
+        self.git('checkout', '-q', '-b', 'decoy', 'main')
+        (self.repo / 'decoy.py').write_text('decoy = True\n', encoding='utf-8')
+        self.git('add', 'decoy.py')
+        self.git('commit', '-qm', 'Decoy')
+        decoy = self.git('rev-parse', 'HEAD')
+        self.git('checkout', '-q', 'feature')
+        # Every fetch is followed at once by the other cross-review's, as when two run in this clone together.
+        wrapper = self.bin / 'git'
+        wrapper.write_text(f'''#!{sys.executable}
+import os, subprocess, sys
+args = sys.argv[1:]
+code = subprocess.run([os.environ['REAL_GIT'], *args]).returncode
+if code == 0 and 'fetch' in args:
+    where = args[args.index('-C') + 1] if '-C' in args else '.'
+    folder = subprocess.run([os.environ['REAL_GIT'], '-C', where, 'rev-parse', '--absolute-git-dir'],
+                            capture_output=True, text=True).stdout.strip()
+    with open(os.path.join(folder, 'FETCH_HEAD'), 'w') as stream:
+        stream.write(os.environ['DECOY'] + '\\t\\tanother cross-review\\'s fetch\\n')
+sys.exit(code)
+''', encoding='utf-8')
+        wrapper.chmod(0o755)
+        self.env.update(REAL_GIT=shutil.which('git'), DECOY=decoy)
+        self.queue(review(finding('Subtracts instead of adding', 'blocker')), review(summary='Fixed.'))
+        result = self.review()
+        self.assertEqual(result['head'], self.head)
+        call, = self.calls('codex')
+        self.assertIn(f'git diff {self.base}...{self.head}', call['stdin'])
+        change = Path(call['cwd']).with_name(Path(call['cwd']).name + '.change')
+        diff = (change / 'change.diff').read_text(encoding='utf-8')
+        self.assertIn('+def widget():', diff)
+        self.assertNotIn('decoy', diff)
+        fixed = self.push_fix()
+        self.reply(('F1', 'fixed', 'Adds now.'))
+        refs = dict(line.split()[::-1] for line in self.git('for-each-ref', '--format=%(objectname) %(refname)',
+                                                            'refs/ba-crossreview').splitlines())
+        folder, = {ref.rsplit('/', 1)[0] for ref in refs}
+        self.assertRegex(folder, r'^refs/ba-crossreview/fixture-repo-7-[0-9a-f]{16}$')
+        self.assertEqual(refs, {f'{folder}/head': fixed, f'{folder}/base': self.base})
+        self.assertTrue(self.script('finish')['removed'])
+        self.assertEqual(self.git('for-each-ref', 'refs/ba-crossreview'), '')
 
     def test_status_asks_github_for_commits_pushed_since_the_last_command(self):
         # Cicely asked why `status` didn't ask GitHub: going by the head the last command saw, it called a

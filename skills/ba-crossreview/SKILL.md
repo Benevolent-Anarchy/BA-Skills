@@ -32,7 +32,7 @@ python3 scripts/crossreview.py <command> --repository <clone> --pull-request <n>
 
 Each command writes one JSON document. Read it even after a nonzero exit: a failure carries an `error` member, and then nothing was posted or recorded, beyond a note on the status comment, unless the error says it posted a comment. In that case don't run the command again; tell Cicely. The script reads the GitHub repository from the remote's configured URL and names it in every `gh` call, so `GH_REPO` never redirects it. A remote that isn't on github.com is refused. Only one command at a time changes a pull request's cross-review; another is refused until it finishes. `status` only reads, so it runs any time.
 
-Your progress is kept in the clone's Git directory, under `ba-crossreview/`. It is never committed, and it belongs to that machine.
+Your progress is kept in the clone's Git directory, under `ba-crossreview/`. It is never committed, and it belongs to that machine. The script fetches the pull request's head and base into refs of its own under `refs/ba-crossreview/`, and leaves `FETCH_HEAD` alone, so cross-reviews of different pull requests can run in one clone at the same time.
 
 ## Where things stand
 
@@ -149,7 +149,7 @@ python3 scripts/crossreview.py status --repository <clone> --pull-request <n>
 python3 scripts/crossreview.py finish --repository <clone> --pull-request <n>
 ```
 
-`status` lists the rounds, the reviewed head, the pull request's head on GitHub, what's open, what waits for Cicely, her decisions, every comment, and the briefing. `finish` removes the review worktree and the change files and keeps the record. Both judge whose turn it is by the head on GitHub, or, when GitHub can't be reached, by the head the last command saw, with a warning.
+`status` lists the rounds, the reviewed head, the pull request's head on GitHub, what's open, what waits for Cicely, her decisions, every comment, and the briefing. `finish` removes the review worktree, the change files and the fetched refs, and keeps the record. Both judge whose turn it is by the head on GitHub, or, when GitHub can't be reached, by the head the last command saw, with a warning.
 
 At `done` or `stopped`, give Cicely the briefing, then tell her:
 - what you fixed

@@ -484,9 +484,22 @@ def edit(repository: str, comment: int, body: str) -> None:
        input=json.dumps({'body': body}))
 
 
-def fetch(repo: Path, remote: str, ref: str) -> str:
-    git(repo, 'fetch', '--quiet', '--no-tags', remote, ref)
-    return git(repo, 'rev-parse', 'FETCH_HEAD^{commit}')
+def fetch(repo: Path, remote: str, ref: str, into: str) -> str:
+    """Fetches `ref` into the local ref `into`, which only this pull request's cross-review writes. FETCH_HEAD is
+    shared by every fetch in the clone, so cross-reviews of other pull requests running at the same time could
+    change it between this fetch and its read; it is left as it was."""
+    git(repo, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', remote, f'+{ref}:{into}')
+    return git(repo, 'rev-parse', '--verify', f'{into}^{{commit}}')
+
+
+def fetched(path: Path, name: str) -> str:
+    """The local ref a cross-review fetches its pull request's `name`, head or base, into: named after its ledger,
+    whose lock keeps any other command from writing it meanwhile. A ledger's name may hold dots, which a ref name
+    can't always, and may be long, while each part of a ref name is a file name. So the ref keeps a readable part
+    of the ledger's name, with a hash of all of it: two ledgers never share refs, and the part stays short."""
+    readable = re.sub(r'[^A-Za-z0-9_-]', '_', path.stem)[:64]
+    digest = hashlib.sha256(path.stem.encode('utf-8')).hexdigest()[:16]
+    return f'refs/ba-crossreview/{readable}-{digest}/{name}'
 
 
 def common_dir(repo: Path) -> Path:
@@ -2001,7 +2014,7 @@ def command_review(arguments: argparse.Namespace) -> dict:
     if move == 'stopped':
         raise Refusal(f'Cicely stopped the cross-review after {label(state["rounds"][-1])}; it reviews again only '
                       'when new commits are pushed.')
-    head = fetch(repo, arguments.remote, f'refs/pull/{arguments.pull_request}/head')
+    head = fetch(repo, arguments.remote, f'refs/pull/{arguments.pull_request}/head', fetched(path, 'head'))
     if head != pr['headRefOid']:
         raise Refusal(f'The pull request head moved while it was fetched ({pr["headRefOid"][:7]} on GitHub, '
                       f'{head[:7]} fetched); run again.')
@@ -2030,7 +2043,7 @@ def command_review(arguments: argparse.Namespace) -> dict:
     executable = shutil.which(reviewer)
     if not executable:
         raise Refusal(f'The {AGENTS[reviewer]} CLI ({reviewer}) is not on PATH.')
-    base = fetch(repo, arguments.remote, f'refs/heads/{pr["baseRefName"]}')
+    base = fetch(repo, arguments.remote, f'refs/heads/{pr["baseRefName"]}', fetched(path, 'base'))
     merge_base = git(repo, 'merge-base', base, head)
     worktree = Path(state['worktree'])
     check_out(repo, worktree, head)
@@ -2247,7 +2260,8 @@ def command_reply(arguments: argparse.Namespace) -> dict:
         raise Refusal(f'Pull request #{arguments.pull_request} is {str(pr.get("state")).lower()}, not open.')
     if any(reply['action'] == 'fixed' for reply in replies) and pr['headRefOid'] == last['head']:
         raise Refusal(f'The pull request is still at the reviewed head {last["head"][:7]}; push the fixes first.')
-    changed = changed_lines(repo, arguments.remote, arguments.pull_request, last['head'], pr['headRefOid'])
+    changed = changed_lines(repo, arguments.remote, arguments.pull_request, last['head'], pr['headRefOid'],
+                            fetched(path, 'head'))
     state['pullRequestHead'] = pr['headRefOid']
     replies = [dict({'id': reply['id'], 'action': reply['action'], 'note': reply['note'].strip()},
                     **({'stakes': words(reply['stakes']), 'options': choices(reply['options']),
@@ -2278,13 +2292,13 @@ def command_reply(arguments: argparse.Namespace) -> dict:
                  'briefing': briefing(state, move)}, **reported(state, [warning]))
 
 
-def changed_lines(repo: Path, remote: str, number: int, reviewed: str, head: str) -> int:
+def changed_lines(repo: Path, remote: str, number: int, reviewed: str, head: str, into: str) -> int:
     """How many lines the commits since the reviewed head add or remove."""
     if head == reviewed:
         return 0
-    fetched = fetch(repo, remote, f'refs/pull/{number}/head')
-    if fetched != head:
-        raise Refusal(f'The pull request head moved while it was fetched ({head[:7]} on GitHub, {fetched[:7]} '
+    got = fetch(repo, remote, f'refs/pull/{number}/head', into)
+    if got != head:
+        raise Refusal(f'The pull request head moved while it was fetched ({head[:7]} on GitHub, {got[:7]} '
                       'fetched); run again.')
     return lines_between(repo, reviewed, head)
 
@@ -2424,6 +2438,11 @@ def command_finish(arguments: argparse.Namespace) -> dict:
     for folder in (worktree, change_folder(worktree), scratch_folder(worktree)):
         if folder.exists():
             shutil.rmtree(folder)
+            removed = True
+    for name in ('head', 'base'):
+        ref = fetched(path, name)
+        if git(repo, 'for-each-ref', '--format=%(refname)', ref) == ref:
+            git(repo, 'update-ref', '-d', ref)
             removed = True
     head, warning = current_head(repository, arguments.pull_request, state)
     result = {'pullRequest': arguments.pull_request, 'worktree': str(worktree), 'removed': removed,
