@@ -387,12 +387,14 @@ class CrossReview(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         refs = []
-        for repository in ('example/game.tools', 'example/game_tools', 'example/.dotted'):
+        # GitHub allows a repository name of 100 characters, dots and all.
+        for repository in ('example/game.tools', 'example/game_tools', 'example/.dotted', 'example/a' + '.' * 90 + 'b'):
             ledger = module.state_path(self.repo, repository, 7)
             refs += [module.fetched(ledger, name) for name in ('head', 'base')]
         self.assertEqual(len(set(refs)), len(refs))
         for ref in refs:
-            self.git('check-ref-format', ref)
+            self.git('fetch', '--quiet', '--no-tags', '--no-write-fetch-head', 'origin', f'+refs/heads/main:{ref}')
+            self.assertEqual(self.git('rev-parse', ref), self.base)
 
     def test_a_fetch_by_another_cross_review_never_changes_what_is_reviewed(self):
         # A commit of no pull request here, which another cross-review's fetch leaves in the clone's FETCH_HEAD.
@@ -431,8 +433,9 @@ sys.exit(code)
         self.reply(('F1', 'fixed', 'Adds now.'))
         refs = dict(line.split()[::-1] for line in self.git('for-each-ref', '--format=%(objectname) %(refname)',
                                                             'refs/ba-crossreview').splitlines())
-        self.assertEqual(refs, {'refs/ba-crossreview/fixture-repo-7/head': fixed,
-                                'refs/ba-crossreview/fixture-repo-7/base': self.base})
+        folder, = {ref.rsplit('/', 1)[0] for ref in refs}
+        self.assertRegex(folder, r'^refs/ba-crossreview/fixture-repo-7-[0-9a-f]{16}$')
+        self.assertEqual(refs, {f'{folder}/head': fixed, f'{folder}/base': self.base})
         self.assertTrue(self.script('finish')['removed'])
         self.assertEqual(self.git('for-each-ref', 'refs/ba-crossreview'), '')
 
