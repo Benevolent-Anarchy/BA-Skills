@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import fcntl
 import glob
 import hashlib
@@ -50,7 +51,6 @@ COMMITS_LISTED = 10  # At most this many unreviewed commits are listed for Cicel
 # Stopping leaves the commits a question lists unreviewed, and only those: what is pushed later isn't skipped.
 LATER_COMMITS = 'Anything pushed after them is reviewed, or put to you first, together with them.'
 STATUS_SECONDS = 120  # At most this often, the status comment shows what a running reviewer is doing.
-LOOK_SECONDS = 1  # This often, what a running reviewer started is listed, to stop whatever it leaves running.
 DEFAULT_MAX_ROUNDS = 3
 DEFAULT_TIMEOUT_MINUTES = 90
 DEFAULT_CHECK_TOKENS = 1_000_000  # Cicely's default limits for a focused check.
@@ -283,22 +283,33 @@ def run(args: list[str], cwd: Path | None = None, input: str | None = None, env:
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
+PR_SET_CHILD_SUBREAPER = 36  # From <linux/prctl.h>.
+
+
+@contextlib.contextmanager
+def adopting():
+    """While it lasts, a process whose parent ends is handed to this one, rather than to the system, so whatever a
+    reviewer starts stays among this process's descendants, however it was started and whenever its parent ends."""
+    prctl = ctypes.CDLL(None, use_errno=True).prctl
+    if prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0):
+        raise Refusal('The reviewer wasn\'t started: what it starts couldn\'t be kept in reach, to be stopped when it '
+                      f'ends ({os.strerror(ctypes.get_errno())}).')
+    try:
+        yield
+    finally:
+        prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
+
+
+@adopting()
 def run_streaming(args: list[str], cwd: Path, input: str, env: dict | None, timeout: float,
                   on_line) -> subprocess.CompletedProcess:
     """Runs a reviewer like `run`, handing each line it prints to `on_line` as it comes, and None after a few
     quiet seconds, so its progress can be shown while it works. However the reviewer ends, whatever it started that
-    is still running is stopped: Codex and Claude Code start commands in sessions of their own, which ending the
-    reviewer doesn't reach, and one could go on writing to the checkout after it is cleared."""
+    is still running is stopped: see `end_strays`."""
     process = subprocess.Popen(args, cwd=cwd, env=env, text=True, encoding='utf-8', errors='replace',
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                start_new_session=True)
     lines, errors = queue.Queue(), []
-    started, looked = {}, 0.0  # What the reviewer started, by process id, with its start time.
-
-    def look() -> None:
-        nonlocal looked
-        looked = time.monotonic()
-        started.update(descendants({process.pid}, processes()))
 
     def feed() -> None:
         with contextlib.suppress(OSError):
@@ -316,54 +327,46 @@ def run_streaming(args: list[str], cwd: Path, input: str, env: dict | None, time
                threading.Thread(target=lambda: errors.append(process.stderr.read()), daemon=True)]
     for thread in threads:
         thread.start()
-    deadline, quiet, output = time.monotonic() + timeout, time.monotonic(), []
+    deadline, output = time.monotonic() + timeout, []
     try:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(args, timeout)
-            if time.monotonic() - looked >= LOOK_SECONDS:
-                look()
             try:
-                line = lines.get(timeout=min(remaining, LOOK_SECONDS))
+                line = lines.get(timeout=min(remaining, 5))
             except queue.Empty:
-                if time.monotonic() - quiet >= 5:
-                    quiet = time.monotonic()
-                    on_line(None)
+                on_line(None)
                 continue
-            quiet = time.monotonic()
             if line is None:
                 break
             output.append(line)
             on_line(line)
         process.wait(max(deadline - time.monotonic(), 0.1))
     except BaseException as error:
-        # Paused, the reviewer starts nothing more while what it started is listed.
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGSTOP)
-        look()
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
         process.wait()
-        end_processes(started)
+        end_strays()
         if isinstance(error, subprocess.TimeoutExpired):
             raise TimedOut(f'{Path(args[0]).name} did not finish within {timeout / 60:g} minutes and was stopped.')
         raise
-    end_processes(started)
+    end_strays()
     for thread in threads:
         thread.join(5)
     return subprocess.CompletedProcess(args, process.returncode, ''.join(output), ''.join(errors))
 
 
-def processes() -> dict[int, tuple[int, str]]:
-    """Each live process's parent and start time, by process id."""
+def processes(ended: bool = False) -> dict[int, tuple[int, str]]:
+    """Each live process's parent and start time, by process id, and, if `ended`, each that has ended but not yet
+    been waited for."""
     found = {}
     for entry in Path('/proc').iterdir():
         if entry.name.isdigit():
             with contextlib.suppress(OSError, ValueError, IndexError):
                 stat = (entry / 'stat').read_text(encoding='utf-8', errors='replace')
                 fields = stat[stat.rindex(')') + 2:].split()  # The name, in parentheses, may hold anything.
-                if fields[0] != 'Z':
+                if ended or fields[0] != 'Z':
                     found[int(entry.name)] = (int(fields[1]), fields[19])
     return found
 
@@ -377,6 +380,27 @@ def descendants(roots: set[int], running: dict[int, tuple[int, str]]) -> dict[in
         if not more:
             return found
         found.update(more)
+
+
+def end_strays(seconds: float = 10) -> None:
+    """Stops whatever is still running of what this process's children started, now that the reviewer, the one
+    child it waits for, has ended, and waits for it to go. Codex and Claude Code start commands in sessions of their
+    own, which ending them doesn't reach, and one could go on writing to the checkout after it is cleared. While
+    `adopting`, all of them are this process's descendants."""
+    me, deadline = os.getpid(), time.monotonic() + seconds
+    while True:
+        strays = descendants({me}, processes())
+        for pid in strays:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+        # The ended are this process's children now, to be waited for.
+        for pid, (parent, _) in processes(ended=True).items():
+            if parent == me:
+                with contextlib.suppress(ChildProcessError):
+                    os.waitpid(pid, os.WNOHANG)
+        if not strays or time.monotonic() > deadline:
+            return
+        time.sleep(0.1)
 
 
 def end_processes(noted: dict[int, str], seconds: float = 10) -> None:

@@ -1102,11 +1102,13 @@ class CrossReview(unittest.TestCase):
         self.assertFalse((worktree / 'late.txt').exists())
 
     def test_whatever_a_reviewer_leaves_running_is_stopped_when_it_ends(self):
+        # Codex found (F2) that listing what the reviewer started once a second missed a command it started just
+        # before it ended, so here it ends at once.
         late = self.root / 'late.txt'
-        self.queue(review(finding('One', 'minor'), runs=[f'sleep 4; echo late > {shlex.quote(str(late))}'],
-                          detached=True, sleep=2))
+        self.queue(review(finding('One', 'minor'), runs=[f'sleep 2; echo late > {shlex.quote(str(late))}'],
+                          detached=True))
         self.assertEqual(self.review()['turn'], 'reply')
-        time.sleep(4)
+        time.sleep(3)
         self.assertFalse(late.exists())
 
     def test_a_folder_of_keys_that_holds_the_checkout_isnt_hidden(self):
