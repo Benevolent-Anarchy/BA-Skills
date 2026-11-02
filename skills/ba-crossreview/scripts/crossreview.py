@@ -463,6 +463,17 @@ def pull_request(repository: str, number: int) -> dict:
     return json.loads(gh(repository, 'pr', 'view', str(number), '--json', fields))
 
 
+def current_head(repository: str, number: int, state: dict) -> tuple[str | None, str | None]:
+    """The pull request's head as GitHub has it now, so commits pushed since the last command count, or, if GitHub
+    can't say, the head that command saw, with a warning saying so."""
+    try:
+        return pull_request(repository, number)['headRefOid'], None
+    except Refusal as error:
+        seen = state.get('pullRequestHead')
+        return seen, (f'GitHub couldn\'t be asked for the pull request\'s head, so this goes by the head the last '
+                      f'command saw{f", `{seen[:7]}`" if seen else ""}, and knows of no commit pushed since. {error}')
+
+
 def post(repository: str, number: int, body: str) -> str:
     output = gh(repository, 'pr', 'comment', str(number), '--body-file', '-', input=body).splitlines()
     return output[-1] if output else None
@@ -1750,7 +1761,11 @@ def next_lines(state: dict, move: str) -> list[str]:
     if move == 'reply':
         return ['', f'**Next:** {author} answers {", ".join(finding["id"] for finding in open_findings(last))}.']
     if move == 'review':
-        return ['', f'**Next:** {reviewer} reviews round {reviews(state) + 1} of {state["maxRounds"]}.']
+        # After a step that left nothing to answer, only new commits bring another round.
+        head = state.get('pullRequestHead')
+        since = f' The pull request has moved on to `{head[:7]}` since {label(last)}.' \
+            if last and last['answers'] is None and head and head != last['head'] else ''
+        return ['', f'**Next:** {reviewer} reviews round {reviews(state) + 1} of {state["maxRounds"]}.{since}']
     if move == 'check':
         found = checkable(state)
         what = (', '.join(sorted(found, key=number_of)) if found
@@ -1990,7 +2005,8 @@ def command_review(arguments: argparse.Namespace) -> dict:
     if head != pr['headRefOid']:
         raise Refusal(f'The pull request head moved while it was fetched ({pr["headRefOid"][:7]} on GitHub, '
                       f'{head[:7]} fetched); run again.')
-    # The pull request's head as last seen, which a check may not reach: `status` judges by it without asking GitHub.
+    # The pull request's head as last seen, which a check may not reach: `status` falls back on it when it can't ask
+    # GitHub.
     state['pullRequestHead'] = head
     last = state['rounds'][-1] if state['rounds'] else None
     # Past the limit, and before a few new commits that answer no finding are reviewed, the reviewer doesn't run:
@@ -2374,20 +2390,25 @@ def command_status(arguments: argparse.Namespace) -> dict:
     if state is None:
         return {'pullRequest': arguments.pull_request, 'rounds': 0, 'turn': 'review', 'running': running(path)}
     last = state['rounds'][-1] if state['rounds'] else None
-    # Without asking GitHub, `status` knows the pull request's head only as the last command saw it.
-    move, live = turn(state, state.get('pullRequestHead')), running(path)
-    return {'pullRequest': arguments.pull_request, 'author': state['author'], 'reviewer': state['reviewer'],
-            'rounds': reviews(state), 'checks': len(state['rounds']) - reviews(state), 'maxRounds': state['maxRounds'],
-            'turn': move, 'running': live,
-            'head': last['head'] if last else None, 'pullRequestHead': state.get('pullRequestHead'),
-            'open': open_findings(last) if last else [],
-            'unverified': unverified(last) if last else [],
-            'pending': pending(state), 'escalated': state['escalated'], 'decisions': state.get('decisions', []),
-            'comments': [url for round in state['rounds']
-                         for url in (round['commentUrl'], (round['answers'] or {}).get('commentUrl')) if url]
-                        + [record['commentUrl'] for record in state.get('decisions', []) if record['commentUrl']],
-            'statusComment': (state.get('statusComment') or {}).get('url'), 'briefing': briefing(state, move, live),
-            'worktree': state['worktree'], 'state': str(path)}
+    # GitHub's head, so commits pushed since the last command count; `status` only reads, so it isn't recorded.
+    head, warning = current_head(repository, arguments.pull_request, state)
+    state = dict(state, pullRequestHead=head)
+    move, live = turn(state, head), running(path)
+    result = {'pullRequest': arguments.pull_request, 'author': state['author'], 'reviewer': state['reviewer'],
+              'rounds': reviews(state), 'checks': len(state['rounds']) - reviews(state),
+              'maxRounds': state['maxRounds'], 'turn': move, 'running': live,
+              'head': last['head'] if last else None, 'pullRequestHead': head,
+              'open': open_findings(last) if last else [],
+              'unverified': unverified(last) if last else [],
+              'pending': pending(state), 'escalated': state['escalated'], 'decisions': state.get('decisions', []),
+              'comments': [url for round in state['rounds']
+                           for url in (round['commentUrl'], (round['answers'] or {}).get('commentUrl')) if url]
+                          + [record['commentUrl'] for record in state.get('decisions', []) if record['commentUrl']],
+              'statusComment': (state.get('statusComment') or {}).get('url'), 'briefing': briefing(state, move, live),
+              'worktree': state['worktree'], 'state': str(path)}
+    if warning:
+        result['warnings'] = [warning]
+    return result
 
 
 def command_finish(arguments: argparse.Namespace) -> dict:
@@ -2404,8 +2425,12 @@ def command_finish(arguments: argparse.Namespace) -> dict:
         if folder.exists():
             shutil.rmtree(folder)
             removed = True
-    return {'pullRequest': arguments.pull_request, 'worktree': str(worktree), 'removed': removed,
-            'turn': turn(state, state.get('pullRequestHead'))}
+    head, warning = current_head(repository, arguments.pull_request, state)
+    result = {'pullRequest': arguments.pull_request, 'worktree': str(worktree), 'removed': removed,
+              'turn': turn(state, head)}
+    if warning:
+        result['warnings'] = [warning]
+    return result
 
 
 def main(argv: list[str]) -> int:
