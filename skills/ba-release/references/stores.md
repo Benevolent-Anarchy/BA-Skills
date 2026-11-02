@@ -1,7 +1,6 @@
 # Store publication and observed completion
 
-On Linux/WSL, use the [native entry points and option mapping](linux.md).
-Windows PowerShell examples below remain supported on Windows.
+Commands below run `<skill>/scripts/release.sh`; see [commands, hooks and state](linux.md) for every option.
 
 Every published store belongs in the game's configuration. Selection remains
 explicit on each plan; public notes are a separate selectable destination.
@@ -40,13 +39,13 @@ Inspect existing Steamworks app/depot VDFs and match their ContentRoots to real
 Godot desktop exports. Publication generates new VDFs under the release state,
 using only prepared artifacts, approved IDs/branch and inspected exclusions.
 Original SDK scripts are untouched. Supply the installed SteamCMD executable
-with `-SteamCmdExecutable`, and the existing account name through runtime
+with `--steam-cmd-executable`, and the existing account name through runtime
 `BA_STEAM_USERNAME`. Establish cached SteamCMD authentication separately; never
 put a password, Guard code or login config into the skill/config/arguments.
 
 The adapter requires an AppID/BuildID completion record as well as a zero exit
 code. Completion followed by a nonzero exit retains that build ID as `uncertain`;
-ordinary resume does not reupload it. After reconciliation, `-RetryUncertain`
+ordinary resume does not reupload it. After reconciliation, `--retry-uncertain`
 resumes its console work using the known build. It records the build ID and
 Steamworks build page, then returns
 `awaiting-store-action`. For a selected beta branch it includes `SetLive`; for
@@ -62,7 +61,7 @@ These constraints and VDF keys follow the
 An uploaded build alone does not establish live activation or announcement.
 
 After observing both, create this receipt under the release state and run
-`release.ps1 -Mode confirm -StatePath <state> -ReceiptPath <receipt>`:
+`release.sh --mode confirm --state-path <state> --receipt-path <receipt>`:
 
 ```json
 {
@@ -115,13 +114,13 @@ updates the approved track with the reviewed locale text, validates the edit and
 commits using `changesInReviewBehavior=ERROR_IF_IN_REVIEW` so it cannot silently
 cancel existing review work. See the [commit API](https://developers.google.com/android-publisher/api-ref/rest/v3/edits/commit?hl=en).
 If the commit response is lost, status stays `uncertain` and is not automatically
-retried. Inspect Play Console/edit state before `-RetryUncertain`; an expired or
+retried. Inspect Play Console/edit state before `--retry-uncertain`; an expired or
 committed edit is not silently replaced with a new edit or version code.
 
 If the saved edit is confirmed missing (HTTP 404), separately authorize
-`-ReplacePlayEdit` after inspecting the remote track and ensuring no other open
+`--replace-play-edit` after inspecting the remote track and ensuring no other open
 work will be invalidated. For an uncertain operation also supply
-`-RetryUncertain`. Replacement retains the old edit ID/phase, original artifact
+`--retry-uncertain`. Replacement retains the old edit ID/phase, original artifact
 hash, Android code and approval. It creates a new edit only after that confirmed
 404, then [lists bundles](https://developers.google.com/android-publisher/api-ref/rest/v3/edits.bundles/list)
 and reuses an identical existing code/hash. Conflicting hashes fail without a
@@ -172,7 +171,7 @@ store console. Confirm the Steam build is not set live on the approved branch
 and will not be. For Play, confirm the release was removed from the approved
 track or the edit discarded. Then write an observed receipt under that
 release's state and, only with the user's explicit authorization, run
-`release.ps1 -Mode abandon -StatePath <state> -ReceiptPath <receipt> -AbandonAuthorized`.
+`release.sh --mode abandon --state-path <state> --receipt-path <receipt> --abandon-authorized`.
 Every receipt names the destination, the approved `planId`, `observedAt`,
 `live: false` and the inspected `evidenceUrl`:
 

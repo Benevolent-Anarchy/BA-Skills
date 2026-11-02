@@ -1,6 +1,6 @@
-# Native Linux release operations
+# Commands, hooks and state
 
-On Linux and WSL, use Bash 4+ and Python 3.9+:
+Use Bash 4+ and Python 3.9+:
 
 ```bash
 <skill>/scripts/release.sh --mode setup --repository "/path/to/game"
@@ -21,28 +21,22 @@ On Linux and WSL, use Bash 4+ and Python 3.9+:
 ```
 
 The Bash entry points invoke the standard-library Python implementation. They
-never invoke PowerShell or translate a release into a model-generated shell
-sequence. Windows continues to use the existing `.ps1`/`.psm1` implementation.
-All safety and approval requirements in the skill, execution and store references
-apply on both hosts. No store is contacted by setup, validation, planning or doctor.
+never translate a release into a model-generated shell sequence. All safety and
+approval requirements in the skill, execution and store references apply. No store is contacted by setup, validation, planning or doctor.
 
-Every `release.ps1` parameter has a native equivalent:
+Options:
 
-| PowerShell | Linux |
-| --- | --- |
-| `-Mode`, `-Repository`, `-Destination` | `--mode`, `--repository`, `--destination` |
-| `-StateRoot`, `-StatePath` | `--state-root`, `--state-path` |
-| `-VersionChange`, `-NewRelease` | `--version-change`, `--new-release` |
-| `-AnswersPath`, `-ExpectedConfigSha256`, `-Interactive` | `--answers-path`, `--expected-config-sha256`, `--interactive` |
-| `-GodotExecutable`, `-ButlerExecutable` | `--godot-executable`, `--butler-executable` |
-| `-GhExecutable`, `-SteamCmdExecutable` | `--gh-executable`, `--steam-cmd-executable` |
-| `-TemplateRoot`, `-EditorSettingsPath` | `--template-root`, `--editor-settings-path` |
-| `-AndroidSdkPath`, `-JavaSdkPath` | `--android-sdk-path`, `--java-sdk-path` |
-| `-ApprovedPlanId`, `-ApprovedNotesSha256` | `--approved-plan-id`, `--approved-notes-sha256` |
-| `-ReceiptPath`, `-AbandonAuthorized` | `--receipt-path`, `--abandon-authorized` |
-| `-HoldReason`, `-PlayTrackReviewed` | `--hold-reason`, `--play-track-reviewed` |
-| `-RetryUncertain`, `-ReplacePlayEdit` | `--retry-uncertain`, `--replace-play-edit` |
-| `-MigrateConfiguration` | `--migrate-configuration` |
+- `--mode`, `--repository`, `--destination`
+- `--state-root`, `--state-path`
+- `--version-change`, `--new-release`
+- `--answers-path`, `--expected-config-sha256`, `--interactive`
+- `--godot-executable`, `--butler-executable`, `--gh-executable`, `--steam-cmd-executable`
+- `--template-root`, `--editor-settings-path`, `--android-sdk-path`, `--java-sdk-path`
+- `--approved-plan-id`, `--approved-notes-sha256`
+- `--receipt-path`, `--abandon-authorized`
+- `--hold-reason`, `--play-track-reviewed`
+- `--retry-uncertain`, `--replace-play-edit`
+- `--migrate-configuration`
 
 Destinations can be comma-separated or supplied with repeated `--destination`.
 Exit codes remain 0 success, 1 invalid input/precondition, 2 blocked plan/doctor
@@ -51,12 +45,13 @@ JSON except interactive prompts and the authorized child action's own output.
 Always quote paths. Relative executable overrides containing `/` are fixed
 against the caller's directory before any mode changes working directory.
 
-Configuration stays shared. Native verification hooks can be executable native
-scripts, `.sh` files run through Bash, or `.py` files run through the release
-engine's Python interpreter. Shell and Python hooks need no execute bit; Python
-hooks need no shebang. A configured `.ps1` hook resolves to its
-existing `.sh` sibling on Linux; absence is an explicit error. In that case named
-`-CamelCase` arguments translate to `--kebab-case`, while values remain exact.
+Verification hooks can be executable scripts, `.sh` files run through Bash, or
+`.py` files run through the release engine's Python interpreter. Shell and Python
+hooks need no execute bit; Python hooks need no shebang. Their arguments are
+passed exactly as configured. PowerShell hooks are no longer run: a `.ps1` hook
+in release.json is refused with an error, even beside a `.sh` file of the same
+name, so name the `.sh` or `.py` hook instead. Setup proposes `tools/verify` and
+`tools/standalone` as `.sh`, else `.py`, when they exist.
 A host must run meaningful functionality checks for its selected exports; Linux
 startup checks do not verify Windows runtime behavior. Cross-exporting Windows
 requires its configured native check to verify the relevant functionality or
