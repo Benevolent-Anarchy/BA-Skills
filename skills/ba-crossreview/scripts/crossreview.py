@@ -357,16 +357,15 @@ def run_streaming(args: list[str], cwd: Path, input: str, env: dict | None, time
     return subprocess.CompletedProcess(args, process.returncode, ''.join(output), ''.join(errors))
 
 
-def processes(ended: bool = False) -> dict[int, tuple[int, str]]:
-    """Each live process's parent and start time, by process id, and, if `ended`, each that has ended but not yet
-    been waited for."""
+def processes() -> dict[int, tuple[int, str]]:
+    """Each live process's parent and start time, by process id."""
     found = {}
     for entry in Path('/proc').iterdir():
         if entry.name.isdigit():
             with contextlib.suppress(OSError, ValueError, IndexError):
                 stat = (entry / 'stat').read_text(encoding='utf-8', errors='replace')
                 fields = stat[stat.rindex(')') + 2:].split()  # The name, in parentheses, may hold anything.
-                if ended or fields[0] != 'Z':
+                if fields[0] != 'Z':
                     found[int(entry.name)] = (int(fields[1]), fields[19])
     return found
 
@@ -386,21 +385,22 @@ def end_strays(seconds: float = 10) -> None:
     """Stops whatever is still running of what this process's children started, now that the reviewer, the one
     child it waits for, has ended, and waits for it to go. Codex and Claude Code start commands in sessions of their
     own, which ending them doesn't reach, and one could go on writing to the checkout after it is cleared. While
-    `adopting`, all of them are this process's descendants."""
+    `adopting`, all of them are this process's descendants, so it is done once this process has no child left. The
+    system says so, not the list of processes, which can miss a process that starts another and ends while it is
+    read."""
     me, deadline = os.getpid(), time.monotonic() + seconds
     while True:
-        strays = descendants({me}, processes())
-        for pid in strays:
+        for pid in descendants({me}, processes()):
             with contextlib.suppress(OSError):
                 os.kill(pid, signal.SIGKILL)
-        # The ended are this process's children now, to be waited for.
-        for pid, (parent, _) in processes(ended=True).items():
-            if parent == me:
-                with contextlib.suppress(ChildProcessError):
-                    os.waitpid(pid, os.WNOHANG)
-        if not strays or time.monotonic() > deadline:
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0]:  # The ended are this process's children now, to be waited for.
+                pass
+        except ChildProcessError:  # None is left.
             return
-        time.sleep(0.1)
+        if time.monotonic() > deadline:
+            return
+        time.sleep(0.05)
 
 
 def end_processes(noted: dict[int, str], seconds: float = 10) -> None:

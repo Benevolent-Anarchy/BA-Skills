@@ -1111,6 +1111,20 @@ class CrossReview(unittest.TestCase):
         time.sleep(3)
         self.assertFalse(late.exists())
 
+    def test_whatever_a_reviewer_leaves_running_is_stopped_even_if_it_moves(self):
+        # Codex's check found (F2) that cleanup trusted a list of processes, which came back empty when a stray
+        # started itself afresh, under a new process id, and ended while the list was read. Here five strays do so
+        # for half a second; the cleanup that trusted the list let one through about two times in three each.
+        late, hop = self.root / 'late.txt', self.root / 'hop.py'
+        hop.write_text('import os, sys, time\nend = time.monotonic() + 0.5\nwhile time.monotonic() < end:\n'
+                       '    if os.fork():\n        os._exit(0)\ntime.sleep(1.5)\nopen(sys.argv[1], "w").write("late")\n',
+                       encoding='utf-8')
+        command = ' '.join(shlex.quote(str(arg)) for arg in (sys.executable, hop, late))
+        self.queue(review(finding('One', 'minor'), runs=[command] * 5, detached=True))
+        self.assertEqual(self.review()['turn'], 'reply')
+        time.sleep(3)
+        self.assertFalse(late.exists())
+
     def test_a_folder_of_keys_that_holds_the_checkout_isnt_hidden(self):
         # Hiding it would hide the checkout too.
         (self.home / '.claude').symlink_to(self.root)
