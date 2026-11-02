@@ -153,8 +153,8 @@ or loses its tag. Publication makes the tag only after a store is live; see
 
 Setup reports actual Godot/Git facts, a grouped proposal, missing questions and
 explicit destination choices as JSON. It asks when project/preset mappings are
-ambiguous. `--interactive` gathers human answers; agents use reported questions
-with their input tools. Nothing verifies, exports, bumps or contacts stores.
+ambiguous. `--interactive` asks each reported question at the terminal, taking a
+JSON value for each; agents use reported questions with their input tools. Nothing verifies, exports, bumps or contacts stores.
 
 Answer keys use public dotted paths: `previousRelease`, `verification.gate.script`,
 `verification.standalone`, `distributions.itch.game`, `distributions.itch.channels`,
@@ -181,22 +181,16 @@ Inspection never adds a store or selects a destination by itself. Asked about a
 destination of a store the file does not configure, such as `--destination steam`
 for an itch-only game, it returns a `stores` question instead.
 
-Interactive setup of an existing configuration starts with its stores:
+Change the stores with an answers file. Run setup once to read the
+configuration's hash, then apply the answers:
 
 ```bash
-<skill>/scripts/release.sh --mode setup --repository <root> --interactive
+<skill>/scripts/release.sh --mode setup --repository <root>
+<skill>/scripts/release.sh --mode setup --repository <root> --answers-path <answers.json> --expected-config-sha256 <reported-hash>
 ```
 
-Enter a store to add it, or a configured store with a leading `-`, such as
-`-notes`, to remove it and its settings. A blank answer keeps the stores, and
-adding one never removes another. After a change, setup asks for every missing
-fact, including the new store's settings and its own baseline, then validates
-the whole configuration and writes it once. For an itch-only game, answering
-`steam` keeps itch and asks for Steam's `appId`, `branch`, `depots` and
-`previousRelease`.
-
-In an answers file, `stores` replaces the store list: name every store to keep
-as well as the new ones, because `["steam"]` alone removes itch. This adds Steam
+`stores` replaces the store list: name every store to keep as well as the new
+ones, because `["steam"]` alone removes itch. This adds Steam
 to a game that publishes on itch with notes:
 
 ```json

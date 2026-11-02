@@ -112,8 +112,8 @@ blocks store publication; retry checks it again.
 
 ## Local preparation
 
-Prepare requires explicit selection; omission returns a chooser without writes,
-or prompts with `--interactive`. Version operations are `patch`, `minor`, `major`,
+Prepare requires an explicit selection with `--destination`. Without one it
+writes nothing, and exits 2 with `selection-required` and the choices. Version operations are `patch`, `minor`, `major`,
 `current` (default); plan previews the requested operation consistently in its
 version, labels and notes paths. `sourceVersion` is the actual Godot setting;
 `preview` identifies a projected version that still requires a source commit.

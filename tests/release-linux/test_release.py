@@ -159,6 +159,15 @@ else: print('HTTP 404 Not Found'); sys.exit(1)
         self.assertFalse(json.loads((self.repo/'release.json').read_text())['sourceTag'])
         self.cli('setup','--answers-path',answers,'--expected-config-sha256',r['configSha256']);self.assertTrue(json.loads((self.repo/'release.json').read_text())['sourceTag'])
 
+    def test_prepare_without_a_selection_writes_nothing_and_never_prompts(self):
+        before=self.git('status','--porcelain')
+        for extra in ([],['--interactive']):
+            result=subprocess.run([str(SCRIPT),'--mode','prepare','--repository',str(self.repo),'--state-root',str(self.state),*extra],capture_output=True,text=True,env=self.env,stdin=subprocess.DEVNULL)
+            self.assertEqual(result.returncode,2,result.stdout+result.stderr)
+            data=json.loads(result.stdout)
+            self.assertEqual(data['status'],'selection-required');self.assertTrue(data['selection']['required']);self.assertTrue(data['selection']['choices'])
+        self.assertEqual(self.git('status','--porcelain'),before);self.assertFalse(self.state.exists() and any(self.state.iterdir()))
+
     def test_setup_reenables_notes_when_selected_in_stores(self):
         self.config['distributions']['notes'] = False
         self.save_config()

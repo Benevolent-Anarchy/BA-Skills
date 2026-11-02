@@ -35,7 +35,7 @@ each release's source, pushed to origin once a store is live and never moved.
 
 First use: run `scripts/release.sh --mode setup --repository <game-root>` from
 the canonical skill directory for inspected facts and missing questions, or add
-`--interactive` for a terminal wizard. Configuration writes use explicit answers
+`--interactive` to answer them at the terminal. Configuration writes use explicit answers
 and the reported hash. Each new release chooses its destinations and
 patch/minor/major/current version handling; retries reuse the reservation.
 `extend` later adds stores that release.json declared when the release was
