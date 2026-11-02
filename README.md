@@ -33,15 +33,15 @@ selection and approval of the concrete plan and notes. A game whose release.json
 sets `sourceTag`, as a new setup does, also gets an annotated `v<version>` tag on
 each release's source, pushed to origin once a store is live and never moved.
 
-First use: run `scripts/release.ps1 -Mode setup -Repository <game-root>` from
+First use: run `scripts/release.sh --mode setup --repository <game-root>` from
 the canonical skill directory for inspected facts and missing questions, or add
-`-Interactive` for a terminal wizard. Configuration writes use explicit answers
+`--interactive` for a terminal wizard. Configuration writes use explicit answers
 and the reported hash. Each new release chooses its destinations and
 patch/minor/major/current version handling; retries reuse the reservation.
 `extend` later adds stores that release.json declared when the release was
 prepared, retaining existing artifacts and completed uploads. A store configured
 afterwards needs that release.json change committed by itself and
-`extend -MigrateConfiguration`, which accepts only additions.
+`extend --migrate-configuration`, which accepts only additions.
 Run `doctor` with the intended selection before preparation to find local tool,
 engine/template and selected Android signing prerequisites. It remains read-only
 and distinguishes local presence from unverified remote authentication.

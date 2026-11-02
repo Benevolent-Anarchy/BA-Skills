@@ -1,24 +1,20 @@
 # Execution and recovery
 
-On Linux/WSL, use the [native entry points and option mapping](linux.md).
-Windows PowerShell examples below remain supported on Windows.
+Run `<skill>/scripts/release.sh`; see [commands, hooks and state](linux.md) for every option. Destination IDs can be
+comma-separated or given with repeated `--destination`.
 
-Use `pwsh -NoProfile -File <skill>/scripts/release.ps1`. The following arguments
-are passed after the script path. Comma-separated destination IDs work with
-`pwsh -File`; an array also works when calling from PowerShell.
-
-```powershell
--Mode doctor -Repository <game-root> -Destination steam,itch-windows,notes
--Mode plan -Repository <game-root> -Destination itch-windows,notes -VersionChange patch
--Mode prepare -Repository <game-root> -Destination itch-windows,notes -VersionChange patch
--Mode extend -StatePath <prepared-state-directory> -Destination google-play
--Mode extend -StatePath <prepared-state-directory> -Destination steam -MigrateConfiguration
--Mode status -StatePath <prepared-state-directory>
--Mode hold -StatePath <prepared-state-directory> -Destination google-play -HoldReason "Waiting for existing review to clear."
--Mode unhold -StatePath <prepared-state-directory> -Destination google-play -PlayTrackReviewed
--Mode publish -StatePath <prepared-state-directory> -ApprovedPlanId <displayed-id> -ApprovedNotesSha256 <displayed-notes-hash>
--Mode confirm -StatePath <prepared-state-directory> -ReceiptPath <observed-store-receipt.json>
--Mode abandon -StatePath <prepared-state-directory> -ReceiptPath <observed-abandonment.json> -AbandonAuthorized
+```bash
+<skill>/scripts/release.sh --mode doctor --repository <game-root> --destination steam,itch-windows,notes
+<skill>/scripts/release.sh --mode plan --repository <game-root> --destination itch-windows,notes --version-change patch
+<skill>/scripts/release.sh --mode prepare --repository <game-root> --destination itch-windows,notes --version-change patch
+<skill>/scripts/release.sh --mode extend --state-path <prepared-state-directory> --destination google-play
+<skill>/scripts/release.sh --mode extend --state-path <prepared-state-directory> --destination steam --migrate-configuration
+<skill>/scripts/release.sh --mode status --state-path <prepared-state-directory>
+<skill>/scripts/release.sh --mode hold --state-path <prepared-state-directory> --destination google-play --hold-reason "Waiting for existing review to clear."
+<skill>/scripts/release.sh --mode unhold --state-path <prepared-state-directory> --destination google-play --play-track-reviewed
+<skill>/scripts/release.sh --mode publish --state-path <prepared-state-directory> --approved-plan-id <displayed-id> --approved-notes-sha256 <displayed-notes-hash>
+<skill>/scripts/release.sh --mode confirm --state-path <prepared-state-directory> --receipt-path <observed-store-receipt.json>
+<skill>/scripts/release.sh --mode abandon --state-path <prepared-state-directory> --receipt-path <observed-abandonment.json> --abandon-authorized
 ```
 
 `validate` checks schema and actual project files. `plan` emits JSON to stdout and
@@ -36,18 +32,17 @@ Godot's configured SDK/JDK, release signing inputs and the Gradle project templa
 when applicable. Private credentials and keystore names/paths are never emitted.
 Unselected destinations need no tools, signing inputs or authentication checks.
 
-Host paths stay out of release.json. Supply `-GodotExecutable`,
-`-ButlerExecutable`, `-SteamCmdExecutable`, `-GhExecutable`, `-TemplateRoot`,
-`-EditorSettingsPath`, `-AndroidSdkPath` or `-JavaSdkPath` when discovery needs an
-explicit override. Godot's normal Windows/Linux/WSL data paths and self-contained
-editor mode are supported. This does not translate Windows tools into Linux tools.
+Host paths stay out of release.json. Supply `--godot-executable`,
+`--butler-executable`, `--steam-cmd-executable`, `--gh-executable`, `--template-root`,
+`--editor-settings-path`, `--android-sdk-path` or `--java-sdk-path` when discovery needs an
+explicit override. Godot's normal data paths and self-contained
+editor mode are supported.
 
-The `release.ps1` CLI resolves relative executable overrides containing a directory
-against the caller's working directory, once, before any mode runs. Fully qualified
-paths stay unchanged, even when their drive is unavailable. The shared Git/GitHub
-CLI, Godot, gcloud, Butler and SteamCMD lookup uses PATH for bare names, never an
-implicit file in the game or state directory. On Windows it supports only `.exe`, `.com`, `.bat`,
-`.cmd` and `.ps1`; association-only scripts are not waited processes.
+`release.sh` resolves relative executable overrides containing a `/` against
+the caller's working directory, once, before any mode changes directory. Absolute
+paths stay unchanged. The shared Git/GitHub CLI, Godot, gcloud, Butler and
+SteamCMD lookup uses PATH for bare names, never an implicit file in the game or
+state directory.
 Both tool execution and bounded probes receive closed stdin. They are non-interactive:
 wrappers cannot wait on the agent's open input pipe; sign in separately beforehand.
 
@@ -73,7 +68,7 @@ excluded from the release journal because they can contain credentials.
 
 ## Prepared destination holds
 
-Use `hold` with explicit prepared destination IDs and `-HoldReason`. The reason
+Use `hold` with explicit prepared destination IDs and `--hold-reason`. The reason
 is single-line public availability text of 1 to 1000 characters; credentials,
 control characters and private discussion do not belong there. The script rejects
 credential-like values before journal writes and checks older reasons again before
@@ -85,11 +80,11 @@ API calls. Other approved destinations proceed independently.
 Use `unhold` only after verifying the user's release condition has been met or
 receiving explicit authorization to proceed. For Play, first inspect the current
 live track and review active releases, rollout and `retainVersionCodes` with the
-user. Pass `-PlayTrackReviewed` only after that review; unhold refuses Play without
+user. Pass `--play-track-reviewed` only after that review; unhold refuses Play without
 it and records the acknowledgement. If the reviewed retention or release settings
 need to change, stop and obtain a revised approved plan through the release workflow.
 Do not edit the journal to bypass approval. An older unhold that still needs Play
-publication must repeat `unhold -PlayTrackReviewed` before publishing. Already
+publication must repeat `unhold --play-track-reviewed` before publishing. Already
 submitted or completed Play destinations remain skipped on independent retries.
 If an older unhold already attempted Play publication, the same acknowledgement
 command records the review while preserving its failed, interrupted or uncertain
@@ -115,15 +110,10 @@ the read-only visibility, write-permission and canonical-content preflight befor
 any store upload. A failed preflight preserves the hold, records the failure and
 blocks store publication; retry checks it again.
 
-Release execution and tests require PowerShell 7.3 or newer so deserialized journal
-objects preserve key order, retaining existing artifact approval hashes. See
-[Microsoft's JSON ordering documentation](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/convertfrom-json#-ashashtable).
-The installer itself remains compatible with PowerShell 7.2.
-
 ## Local preparation
 
 Prepare requires explicit selection; omission returns a chooser without writes,
-or prompts with `-Interactive`. Version operations are `patch`, `minor`, `major`,
+or prompts with `--interactive`. Version operations are `patch`, `minor`, `major`,
 `current` (default); plan previews the requested operation consistently in its
 version, labels and notes paths. `sourceVersion` is the actual Godot setting;
 `preview` identifies a projected version that still requires a source commit.
@@ -135,7 +125,7 @@ increment are journaled before edits. `increment-selected` covers itch APK and
 Play AAB independently; holding Play leaves its AAB counter unchanged.
 Prepare returns `source-update-required` before checks/exports: review and commit
 those settings locally, then repeat the same request. Retries reuse the reservation,
-including interrupted file writes. `-NewRelease` explicitly starts a later bump
+including interrupted file writes. `--new-release` explicitly starts a later bump
 after the previous reservation is committed; ordinary retries never do.
 
 With clean source, prepare runs the configured complete verification script,
@@ -143,29 +133,25 @@ then Godot's `--headless --path <project> --export-release <existing-preset>
 <staged-filename>` for the union of selected itch, Steam depot and Play presets.
 Each shared preset exports once. It writes into per-user state,
 leaving existing `dist/` exports untouched. It exports no builds for a notes-only
-selection. `-GodotExecutable` can specify an inspected engine when PATH does not
+selection. `--godot-executable` can specify an inspected engine when PATH does not
 select the correct one; that machine-specific path is not release.json data.
 Gradle exports append `-Dorg.gradle.daemon=false` to their process's existing
-`GRADLE_OPTS`, then restore the caller's environment. This prevents an idle
-Gradle child from keeping Godot's Windows console wrapper alive after export;
+`GRADLE_OPTS`, then restore the caller's environment. This keeps an idle
+Gradle daemon from outliving the export;
 it changes neither the project's Gradle files nor other export processes.
 It then runs selected itch desktops' standalone functionality checks with specific
 excluded files physically unavailable, restores the common artifacts and checks
 Butler `push --dry-run` output. `selection.<id>.txt` records the preview for review.
-Supply `-ButlerExecutable` if needed. These checks do not upload; an ordinary push
+Supply `--butler-executable` if needed. These checks do not upload; an ordinary push
 is live publication and is approval gated. Failed checks prevent publication.
 For Android, both dry-run and publication pass the signed APK itself to Butler.
 The optional `.apk.idsig` sidecar remains in the sealed local artifact; additional
 payload files require explicit distribution support rather than being discarded.
 
-State defaults to `%LOCALAPPDATA%/ba-release/releases/` on Windows and
-`${XDG_STATE_HOME:-~/.local/state}/ba-release/releases/` on Linux. `-StateRoot`
-overrides it but must remain outside the source tree, including linked ancestors.
-A native Windows file-handle lookup resolves Store app filesystem redirection
-and links before returning the state path. Use that returned physical path for
-WSL checks, browser uploads and agents outside the Store app; the logical Local
-AppData path can point somewhere different in those processes. Every mode given
-`-StatePath` first finds the state's state root, two folders up, where the
+State defaults to `${XDG_STATE_HOME:-~/.local/state}/ba-release/releases/`.
+`--state-root` overrides it but must remain outside the source tree, including
+linked ancestors. Every mode given
+`--state-path` first finds the state's state root, two folders up, where the
 shared ledger and store-write record live. A path that already sits inside a
 state root is used as given, in a folder named for its version under one named
 for its checkout. That covers one through a link to the state root, and a
@@ -192,7 +178,7 @@ That directory, and the version reservation beside it, belong to one checkout.
 The live ledger does not: `repositories/<id>/live.json` under the state root
 holds it for the game's GitHub repository, as its origin names it, so every
 checkout, worktree and clone of the game that uses that state root reads and
-advances the same one. Windows and WSL keep separate default roots. A damaged
+advances the same one. A damaged
 shared ledger stops the plan, naming the file by its place under the state root,
 rather than being read as proof that nothing shipped.
 
@@ -226,7 +212,7 @@ extension; only the added destinations are read from the live ledger.
 A store, or itch channel, first configured after preparation needs a configuration
 migration. Add it through setup (see [configuration](configuration.md#adding-a-store-to-a-prepared-release)),
 review the release.json diff with the user and commit it by itself. Then repeat
-`extend` with `-MigrateConfiguration`. Without the switch, extend refuses and
+`extend` with `--migrate-configuration`. Without the switch, extend refuses and
 names the destinations the change would add.
 
 Migration accepts only additions: new destination IDs with their baselines, export
@@ -347,11 +333,11 @@ a retry. Other channels proceed.
 
 A build that was sent but never went live, and that the user has decided to
 abandon, is reconciled from the release state that sent it:
-`-Mode abandon -StatePath <that state> -ReceiptPath <observed.json> -AbandonAuthorized`.
+`--mode abandon --state-path <that state> --receipt-path <observed.json> --abandon-authorized`.
 First inspect the store console and confirm the build is not live and will not
 be made live; take the receipt shapes from [store operations](stores.md#abandoning-an-upload-that-never-went-live).
 Then obtain the user's explicit authorization, since abandoning lets a release
-that does not contain that build replace it. Without `-AbandonAuthorized` the
+that does not contain that build replace it. Without `--abandon-authorized` the
 mode checks the receipt and records nothing. The receipt must name the release's
 approved plan and the exact recorded attempt. That destination becomes
 `abandoned`, keeping its attempts and remote evidence. Only that state's
@@ -369,7 +355,7 @@ different state roots cannot see each other's ledger.
 
 Read [store operations](stores.md) for SteamCMD invocation, Play edit/track
 publication, runtime authentication and required console steps. Override
-`-SteamCmdExecutable` at runtime to point at the inspected SDK executable. The
+`--steam-cmd-executable` at runtime to point at the inspected SDK executable. The
 test-only module transport injects disposable Play responses; the CLI always
 uses the fixed Android Publisher host.
 
@@ -383,7 +369,7 @@ observed receipts; follow [browser completion](browser-completion.md). Missing
 browser access or pending review remains an explicit incomplete state.
 
 Retry `prepare` with the same repository and destination selection to reuse
-verified exports. Retry `publish -StatePath <same-directory>` to reuse approval
+verified exports. Retry `publish --state-path <same-directory>` to reuse approval
 and skip successful destinations. Failed local export output is retained in a
 separate staging folder for inspection; only successful manifests can publish.
 
@@ -403,7 +389,7 @@ separate staging folder for inspection; only successful manifests can publish.
 
 An interrupted `in-progress` operation becomes `uncertain` on resume and is not
 automatically repeated. Inspect the remote channel/file before deciding whether
-to retry. `-RetryUncertain` explicitly authorizes another attempt at the same
+to retry. `--retry-uncertain` explicitly authorizes another attempt at the same
 version after that inspection; require user authorization for that retry. A
 failed command can also have ambiguous remote effects: reconcile before retrying
 when needed. Repeating a note attempt recognizes already-published identical
@@ -420,10 +406,10 @@ individual destinations and errors alongside that status. Never convert a
 partial failure into a whole-release success claim.
 
 An invalidated/expired Play edit can be replaced only with explicit
-`-ReplacePlayEdit` authorization after remote reconciliation. Confirmed HTTP 404
+`--replace-play-edit` authorization after remote reconciliation. Confirmed HTTP 404
 is required; ordinary retries and other API failures never replace edits. The
 same bundle/code/approval is retained. For uncertain operations combine it with
-`-RetryUncertain`; see the store reference before authorizing this recovery.
+`--retry-uncertain`; see the store reference before authorizing this recovery.
 
 Store completion uses a local `confirm` receipt after observing the actual
 console result. It checks the plan and notes approval, unchanged artifacts,

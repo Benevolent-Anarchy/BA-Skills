@@ -14,7 +14,7 @@ cannot be verified. Profile-name and connection-selection details never replace
 this check. [For Claude Code](../SKILL.md#for-claude-code) contains only Claude's
 preferred-device selection details; Codex uses the same shared account guard.
 
-Run `release.ps1 -Mode status -StatePath <state>` first. Use its sealed selection,
+Run `release.sh --mode status --state-path <state>` first. Use its sealed selection,
 approval, version, store identifiers and recorded remote results. Read
 [store operations](stores.md) for the receipt fields and required console states.
 Only act on selected destinations. Before publication, the displayed plan and
@@ -92,7 +92,7 @@ See [Play review and managed publishing](https://support.google.com/googleplay/a
 ## Record and resume
 
 After observing the required results, save a factual receipt under the release
-state and run `release.ps1 -Mode confirm -StatePath <state> -ReceiptPath <receipt>`.
+state and run `release.sh --mode confirm --state-path <state> --receipt-path <receipt>`.
 Include the approved plan ID, notes digest, actual observation timestamp and
 observed identifiers/URLs. Never manufacture evidence to clear a pending status.
 If only part of a console step completes, preserve its evidence locally and report

@@ -1,7 +1,6 @@
 # Per-game release.json
 
-On Linux/WSL, use the [native entry points and option mapping](linux.md).
-Windows PowerShell examples below remain supported on Windows.
+Commands below run `<skill>/scripts/release.sh`; see [commands, hooks and state](linux.md) for every option.
 
 Keep one human-edited JSON file at the source Git root. Schema version 1 groups
 settings by store and maps short export aliases to exact existing Godot preset
@@ -21,7 +20,7 @@ blockers, including deliberately unknown publication facts.
 | `project` | Relative Godot directory inside the source Git root. |
 | `previousRelease` | Confirmed previous published source commit/ref, or `null` until confirmed; must be an ancestor of the selected source when a release is first planned. Canonical notes count from the newer of this and the game's newest release in the shared live ledger, so it is needed only until a release is recorded there; a game whose earlier releases were recorded per checkout sets it once to its last release's source. |
 | `exports` | Object mapping lowercase aliases such as `windows`, `linux`, `apk`, `aab` to distinct, exact inspected preset names. |
-| `verification.gate` | `{script, arguments?}`: inspected repository-relative verification script (native `.sh`/executable on Linux, `.ps1` on Windows; see [native hook mapping](linux.md)) and string arguments, defaulting to `[]`. |
+| `verification.gate` | `{script, arguments?}`: inspected repository-relative verification script (a `.sh` or `.py` file or an executable; PowerShell hooks are refused, see [hooks](linux.md)) and string arguments, defaulting to `[]`. |
 | `verification.standalone` | Shared `{exports, script, arguments?}` hook, or array of those objects for different scripts. `exports` contains aliases. An unknown script may remain `null`. |
 | `distributions` | Store settings below. Declaring a store makes operations available; nothing is selected automatically. |
 | `androidVersionCodePolicy` | Default `increment-selected`: reserve each selected Android preset's existing code + 1 once. `existing` preserves a separately managed valid scheme. Never derive codes by removing version dots. |
@@ -140,21 +139,21 @@ tag, and that artifact's own source stays in the journal.
 A new setup writes `true`. A game configured earlier keeps tagging off until a
 setup answer `"sourceTag": true` turns it on; leave it off for a game that already
 tags its releases another way. Changing stores keeps the game's choice, and
-`-MigrateConfiguration` refuses a change to it, so a prepared release never gains
+`--migrate-configuration` refuses a change to it, so a prepared release never gains
 or loses its tag. Publication makes the tag only after a store is live; see
 [execution](execution.md#approval-publication-and-recovery).
 
 ## First-run setup
 
-```powershell
--Mode setup -Repository <root>
--Mode setup -Repository <root> -Destination steam,itch-windows
--Mode setup -Repository <root> -AnswersPath <answers.json> -ExpectedConfigSha256 <reported-hash>
+```bash
+<skill>/scripts/release.sh --mode setup --repository <root>
+<skill>/scripts/release.sh --mode setup --repository <root> --destination steam,itch-windows
+<skill>/scripts/release.sh --mode setup --repository <root> --answers-path <answers.json> --expected-config-sha256 <reported-hash>
 ```
 
 Setup reports actual Godot/Git facts, a grouped proposal, missing questions and
 explicit destination choices as JSON. It asks when project/preset mappings are
-ambiguous. `-Interactive` gathers human answers; agents use reported questions
+ambiguous. `--interactive` gathers human answers; agents use reported questions
 with their input tools. Nothing verifies, exports, bumps or contacts stores.
 
 Answer keys use public dotted paths: `previousRelease`, `verification.gate.script`,
@@ -179,13 +178,13 @@ Which stores `release.json` configures is a setup choice; which configured
 destinations a release includes is chosen for each release. Setup reports the
 configured stores as `stores.configured`, apart from the release `selection`.
 Inspection never adds a store or selects a destination by itself. Asked about a
-destination of a store the file does not configure, such as `-Destination steam`
+destination of a store the file does not configure, such as `--destination steam`
 for an itch-only game, it returns a `stores` question instead.
 
 Interactive setup of an existing configuration starts with its stores:
 
-```powershell
--Mode setup -Repository <root> -Interactive
+```bash
+<skill>/scripts/release.sh --mode setup --repository <root> --interactive
 ```
 
 Enter a store to add it, or a configured store with a leading `-`, such as
@@ -226,7 +225,7 @@ setup's `stores` with the complete retained list, such as `["itch", "steam",
 add stores or itch channels, export aliases, and standalone checks for presets
 that had none. Every added store is adopted, selected or not, so add only stores
 whose settings and baseline are confirmed. Commit that release.json change by
-itself, then run `extend` with `-MigrateConfiguration`.
+itself, then run `extend` with `--migrate-configuration`.
 [Execution](execution.md#extending-a-prepared-release) states exactly when
 ordinary `extend` is enough and what migration refuses. Anything else needs a
 new release.
