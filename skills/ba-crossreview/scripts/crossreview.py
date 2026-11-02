@@ -50,6 +50,7 @@ COMMITS_LISTED = 10  # At most this many unreviewed commits are listed for Cicel
 # Stopping leaves the commits a question lists unreviewed, and only those: what is pushed later isn't skipped.
 LATER_COMMITS = 'Anything pushed after them is reviewed, or put to you first, together with them.'
 STATUS_SECONDS = 120  # At most this often, the status comment shows what a running reviewer is doing.
+LOOK_SECONDS = 1  # This often, what a running reviewer started is listed, to stop whatever it leaves running.
 DEFAULT_MAX_ROUNDS = 3
 DEFAULT_TIMEOUT_MINUTES = 90
 DEFAULT_CHECK_TOKENS = 1_000_000  # Cicely's default limits for a focused check.
@@ -285,11 +286,19 @@ def run(args: list[str], cwd: Path | None = None, input: str | None = None, env:
 def run_streaming(args: list[str], cwd: Path, input: str, env: dict | None, timeout: float,
                   on_line) -> subprocess.CompletedProcess:
     """Runs a reviewer like `run`, handing each line it prints to `on_line` as it comes, and None after a few
-    quiet seconds, so its progress can be shown while it works."""
+    quiet seconds, so its progress can be shown while it works. However the reviewer ends, whatever it started that
+    is still running is stopped: Codex and Claude Code start commands in sessions of their own, which ending the
+    reviewer doesn't reach, and one could go on writing to the checkout after it is cleared."""
     process = subprocess.Popen(args, cwd=cwd, env=env, text=True, encoding='utf-8', errors='replace',
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                start_new_session=True)
     lines, errors = queue.Queue(), []
+    started, looked = {}, 0.0  # What the reviewer started, by process id, with its start time.
+
+    def look() -> None:
+        nonlocal looked
+        looked = time.monotonic()
+        started.update(descendants({process.pid}, processes()))
 
     def feed() -> None:
         with contextlib.suppress(OSError):
@@ -307,32 +316,87 @@ def run_streaming(args: list[str], cwd: Path, input: str, env: dict | None, time
                threading.Thread(target=lambda: errors.append(process.stderr.read()), daemon=True)]
     for thread in threads:
         thread.start()
-    deadline, output = time.monotonic() + timeout, []
+    deadline, quiet, output = time.monotonic() + timeout, time.monotonic(), []
     try:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(args, timeout)
+            if time.monotonic() - looked >= LOOK_SECONDS:
+                look()
             try:
-                line = lines.get(timeout=min(remaining, 5))
+                line = lines.get(timeout=min(remaining, LOOK_SECONDS))
             except queue.Empty:
-                on_line(None)
+                if time.monotonic() - quiet >= 5:
+                    quiet = time.monotonic()
+                    on_line(None)
                 continue
+            quiet = time.monotonic()
             if line is None:
                 break
             output.append(line)
             on_line(line)
         process.wait(max(deadline - time.monotonic(), 0.1))
     except BaseException as error:
+        # Paused, the reviewer starts nothing more while what it started is listed.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGSTOP)
+        look()
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
         process.wait()
+        end_processes(started)
         if isinstance(error, subprocess.TimeoutExpired):
             raise TimedOut(f'{Path(args[0]).name} did not finish within {timeout / 60:g} minutes and was stopped.')
         raise
+    end_processes(started)
     for thread in threads:
         thread.join(5)
     return subprocess.CompletedProcess(args, process.returncode, ''.join(output), ''.join(errors))
+
+
+def processes() -> dict[int, tuple[int, str]]:
+    """Each live process's parent and start time, by process id."""
+    found = {}
+    for entry in Path('/proc').iterdir():
+        if entry.name.isdigit():
+            with contextlib.suppress(OSError, ValueError, IndexError):
+                stat = (entry / 'stat').read_text(encoding='utf-8', errors='replace')
+                fields = stat[stat.rindex(')') + 2:].split()  # The name, in parentheses, may hold anything.
+                if fields[0] != 'Z':
+                    found[int(entry.name)] = (int(fields[1]), fields[19])
+    return found
+
+
+def descendants(roots: set[int], running: dict[int, tuple[int, str]]) -> dict[int, str]:
+    """The `running` processes that `roots` started, and those started in turn, with their start times."""
+    found = {}
+    while True:
+        more = {pid: start for pid, (parent, start) in running.items()
+                if (parent in roots or parent in found) and pid not in roots and pid not in found}
+        if not more:
+            return found
+        found.update(more)
+
+
+def end_processes(noted: dict[int, str], seconds: float = 10) -> None:
+    """Stops the `noted` processes that are still running, and whatever they started, and waits for them to go. A
+    process is known by its start time as well as its id, so one that took over a finished process's id is left
+    alone."""
+    if not noted:
+        return
+    running = processes()
+    doomed = {pid: start for pid, start in noted.items() if running.get(pid, (0, None))[1] == start}
+    doomed.update(descendants(set(doomed), running))
+    for pid in doomed:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        running = processes()
+        if not any(running.get(pid, (0, None))[1] == start for pid, start in doomed.items()):
+            break
+        time.sleep(0.1)
 
 
 def tail(text: str, lines: int = 20) -> str:
@@ -593,23 +657,31 @@ def codex_settings() -> list[str]:
     return settings
 
 
+HIDDEN = 'The files and folders in your home that hold keys and logins, such as `~/.ssh`, can\'t be read.'
 TOOLS = {
     'codex': 'You may run commands that only read, such as `git show`. You cannot write files, so don\'t rely on '
-             'builds or tests that write.',
+             'builds or tests that write. ' + HIDDEN,
     'claude': 'You have only the Read, Grep and Glob tools, limited to your working directory and the folder holding '
               'the change, so you can\'t run commands or tests.',
 }
 # Cicely's decision: a check may run tests, sandboxed. Claude's commands run in Codex's sandbox, set up as for
 # Codex's own checks: see `sandbox_shell`.
 SANDBOX = ('in a sandbox: you can write only in your working directory and in the temp folder `$TMPDIR` names, Git '
-           'can\'t write, and there is no network. You may undo a fix to see whether a test catches it, but put it '
-           'back. Whatever you leave in your working directory is discarded after the check.')
+           'can\'t write, and there is no network. ' + HIDDEN + ' You may undo a fix to see whether a test catches it, '
+           'but put it back. Whatever you leave in your working directory is discarded after the check.')
+# Cicely's decision (2 November 2026): a reviewer's commands can't read the keys and logins in your home folder, as
+# a reviewer could quote one in its review, which goes on GitHub. Without a network, commands couldn't use them
+# anyway. Patterns, relative to your home folder; one that holds a path the reviewer needs isn't hidden.
+SECRETS = ('.ssh', '.gnupg', '.password-store', '.local/share/keyrings', '.pki', '.netrc', '.git-credentials',
+           '.config/gh', '.codex', '.claude', '.claude.json', '.aws', '.azure', '.config/gcloud', '.kube', '.docker',
+           '.mozilla', '.config/google-chrome*', '.config/chromium*', '.config/BraveSoftware',
+           '.config/microsoft-edge*')
 CHECK_TOOLS = {
     'codex': 'You may run commands, the project\'s tests among them, ' + SANDBOX,
     'claude': 'You have the Read, Grep and Glob tools, limited to your working directory and the folder holding the '
               'change, and the Bash tool, whose commands, the project\'s tests among them, run ' + SANDBOX,
 }
-SANDBOX_PROFILE = 'ba_crossreview_check'  # The name of the Codex permissions profile Claude's check commands run in.
+SANDBOX_PROFILE = 'ba_crossreview_check'  # The name of the Codex permissions profile a reviewer's commands run in.
 SANDBOX_TRIAL = 'Run the command `true` once with the Bash tool, then reply "done". Do nothing else.'
 SANDBOX_TRIAL_MINUTES = 3
 
@@ -731,15 +803,12 @@ def run_codex(executable: str, worktree: Path, change: Path, prompt: str, sessio
     with tempfile.TemporaryDirectory(prefix='ba-crossreview-') as scratch:
         schema, last = Path(scratch) / 'schema.json', Path(scratch) / 'review.json'
         schema.write_text(json.dumps(CHECK_SCHEMA if check else REVIEW_SCHEMA), encoding='utf-8')
-        # Read-only: the sandbox stops writes, and leaving out the user's configuration and rules leaves out its
-        # plugins, MCP servers and command allowances, which act outside the sandbox. `exec resume` takes no
-        # --sandbox, so the sandbox is set as configuration for both. A check may write only in its checkout and its
-        # own temp folder, never in /tmp at large, and has no network.
-        sandbox = ['-c', 'sandbox_mode="read-only"'] if not check else [
-            '-c', 'sandbox_mode="workspace-write"', '-c', 'sandbox_workspace_write.network_access=false',
-            '-c', 'sandbox_workspace_write.exclude_slash_tmp=true',
-            '-c', 'sandbox_workspace_write.exclude_tmpdir_env_var=true',
-            '-c', f'sandbox_workspace_write.writable_roots=[{json.dumps(str(check["scratch"]))}]']
+        # A review only reads, and a check may write only in its checkout and its own temp folder, never in /tmp at
+        # large: see `sandbox_profile`. `exec resume` takes no --sandbox, so the sandbox is set as configuration for
+        # both. Leaving out the user's configuration and rules leaves out its plugins, MCP servers and command
+        # allowances, which act outside the sandbox.
+        profile = sandbox_profile([change, common_dir(worktree)], [worktree, check['scratch']] if check else [])
+        sandbox = ['-c', profile, '-c', f'default_permissions="{SANDBOX_PROFILE}"']
         args = [executable, 'exec', *(['resume', session] if session else []),
                 '--ignore-user-config', '--ignore-rules', *codex_settings(), *sandbox, '-c', 'approval_policy="never"',
                 '--output-schema', str(schema), '-o', str(last), '--json', '-']
@@ -819,14 +888,32 @@ def toml_string(text: str) -> str:
                          for char in text) + '"'
 
 
+def secrets(needed: list[Path]) -> list[str]:
+    """The paths SECRETS names that are there, resolved, but for any that holds a path the reviewer needs, such as
+    the checkout, which hiding it would hide too."""
+    found = {os.path.realpath(path) for pattern in SECRETS for path in Path.home().glob(pattern)}
+    needed = [os.path.realpath(path) for path in needed]
+    return sorted(path for path in found if not any(need == path or need.startswith(path + os.sep) for need in needed))
+
+
+def sandbox_profile(needed: list[Path], writable: list[Path]) -> str:
+    """The configuration of the Codex permissions profile a reviewer's commands run in: everything can be read but
+    SECRETS, only the `writable` folders written, Git can't write, and there is no network, nor any Unix socket such
+    as D-Bus. `needed` are the other paths the reviewer reads, such as the change."""
+    entries = {':root': 'read', **{path: 'deny' for path in secrets([*needed, *writable])},
+               **{str(path): 'write' for path in writable}}
+    return (f'permissions.{SANDBOX_PROFILE}={{filesystem={{'
+            + ','.join(f'{toml_string(path)}={toml_string(access)}' for path, access in entries.items())
+            + '},network={enabled=false}}')
+
+
 @contextlib.contextmanager
-def sandbox_shell(codex: str, worktree: Path, scratch: Path):
+def sandbox_shell(codex: str, worktree: Path, change: Path, scratch: Path):
     """Yields a wrapper for Claude Code to run each of a check's commands with, given as one command line, in Codex's
-    sandbox, set up as for Codex's own checks: everything can be read, only the checkout and the check's temp folder
-    written, Git can't write, and there is no network, nor any Unix socket such as D-Bus. Outside the sandbox, it
-    notes each command's process in `commands` beside it, and when the check ends, however it ends, whatever is still
-    running of them is stopped. Its folder is out of the sandbox's reach and holds an empty Codex home, so neither your
-    Codex configuration nor anything a command writes can change the sandbox."""
+    sandbox, set up as for Codex's own checks: see `sandbox_profile`. Outside the sandbox, it notes each command's
+    process in `commands` beside it, and when the check ends, however it ends, whatever is still running of them is
+    stopped, as Claude Code starts each in a session of its own. Its folder is out of the sandbox's reach and holds an
+    empty Codex home, so neither your Codex configuration nor anything a command writes can change the sandbox."""
     # Claude Code's own sandbox (2.1.316) doesn't start headless on Cicely's Linux (kernel 7.3, bubblewrap 0.12): its
     # seccomp helper sets up a user namespace inside its bubblewrap sandbox, which gets no capabilities there, so the
     # helper fails and the sandbox fails closed. Bubblewrap alone would start, but would let commands reach D-Bus, and
@@ -836,10 +923,7 @@ def sandbox_shell(codex: str, worktree: Path, scratch: Path):
         folder = Path(folder)
         home = folder / 'codex'
         home.mkdir()
-        entries = {':root': 'read', str(worktree): 'write', str(scratch): 'write'}
-        profile = (f'permissions.{SANDBOX_PROFILE}={{filesystem={{'
-                   + ','.join(f'{toml_string(path)}={toml_string(access)}' for path, access in entries.items())
-                   + '},network={enabled=false}}')
+        profile = sandbox_profile([change, common_dir(worktree)], [worktree, scratch])
         wrapper = folder / 'shell'
         # The wrapper notes its process id and start time, the 22nd field of its stat, as `processes` reads them; the
         # process goes on as Codex's sandbox.
@@ -855,47 +939,11 @@ def sandbox_shell(codex: str, worktree: Path, scratch: Path):
         try:
             yield wrapper
         finally:
-            end_commands(folder / 'commands')
-
-
-def processes() -> dict[int, tuple[int, str]]:
-    """Each live process's parent and start time, by process id."""
-    found = {}
-    for entry in Path('/proc').iterdir():
-        if entry.name.isdigit():
-            with contextlib.suppress(OSError, ValueError, IndexError):
-                stat = (entry / 'stat').read_text(encoding='utf-8', errors='replace')
-                fields = stat[stat.rindex(')') + 2:].split()  # The name, in parentheses, may hold anything.
-                if fields[0] != 'Z':
-                    found[int(entry.name)] = (int(fields[1]), fields[19])
-    return found
-
-
-def end_commands(log: Path, seconds: float = 10) -> None:
-    """Stops the commands the wrapper noted in `log` that are still running, and whatever they started, and waits
-    for them to go. Claude Code starts each command in a session of its own, so stopping Claude at a check's limit
-    leaves them running, and one could write to the checkout after it is cleared. A process is known by its start
-    time as well as its id, so one that took over a finished command's id is left alone."""
-    try:
-        noted = {tuple(line.split()) for line in log.read_text(encoding='utf-8').splitlines()}
-    except OSError:
-        return
-    running = processes()
-    doomed = {pid: start for pid, (_, start) in running.items() if (str(pid), start) in noted}
-    while True:
-        started = {pid: start for pid, (parent, start) in running.items() if parent in doomed and pid not in doomed}
-        if not started:
-            break
-        doomed.update(started)
-    for pid in doomed:
-        with contextlib.suppress(OSError):
-            os.kill(pid, signal.SIGKILL)
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        running = processes()
-        if not any(running.get(pid, (0, None))[1] == start for pid, start in doomed.items()):
-            break
-        time.sleep(0.1)
+            try:
+                noted = (folder / 'commands').read_text(encoding='utf-8').splitlines()
+            except OSError:  # No command ran.
+                noted = []
+            end_processes({int(pid): start for pid, start in map(str.split, noted)})
 
 
 def sandbox_trial(executable: str, env: dict, wrapper: Path) -> None:
@@ -949,7 +997,7 @@ def run_claude(executable: str, worktree: Path, change: Path, prompt: str, sessi
             if not codex:
                 raise Refusal('Claude\'s check runs its commands in Codex\'s sandbox, but the Codex CLI (codex) is not '
                               'on PATH.')
-            wrapper = stack.enter_context(sandbox_shell(codex, worktree, check['scratch']))
+            wrapper = stack.enter_context(sandbox_shell(codex, worktree, change, check['scratch']))
             env.update(TMPDIR=str(check['scratch']), CLAUDE_CODE_SHELL_PREFIX=str(wrapper))
             sandbox_trial(executable, env, wrapper)
         # Only the reading tools, confined to the checkout and the change, and a check's Bash, whose commands run in
@@ -1311,7 +1359,7 @@ def tested(reviewer: str, done: bool) -> str:
     """What a focused check by this reviewer may do, or, once `done`, could do."""
     sandbox = "Codex's sandbox, which" if reviewer == 'claude' else 'a sandbox that'
     return (f'{AGENTS[reviewer]} {"could" if done else "may"} run the tests, in {sandbox} writes only to its checkout '
-            'and a temp folder of its own, with no network.')
+            'and a temp folder of its own, with no network, and hides your keys and logins.')
 
 
 def considerations(item: dict, recommends: str) -> str:

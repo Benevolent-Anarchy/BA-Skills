@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -64,6 +65,11 @@ class CrossReview(unittest.TestCase):
         self.fixture = self.root / 'fixture'
         self.temp = self.root / 'temp'
         self.codex_home = self.root / 'codex home'
+        self.home = self.root / 'home'
+        # Keys and logins no reviewer's commands may read: a folder, a browser's profile and a file.
+        for folder in ('.ssh', '.config/google-chrome-ba'):
+            (self.home / folder).mkdir(parents=True)
+        (self.home / '.netrc').write_text('machine example.invalid\n', encoding='utf-8')
         bin = self.root / 'bin'
         for path in (self.repo, self.fixture, self.temp, self.codex_home, bin):
             path.mkdir()
@@ -74,7 +80,7 @@ class CrossReview(unittest.TestCase):
         self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GH_REPO='wrong/repository',
                         PYTHONDONTWRITEBYTECODE='1', BA_CROSSREVIEW_FAKE=str(self.fixture), CLAUDECODE='1',
                         TMPDIR=str(self.temp), TEMP=str(self.temp), TMP=str(self.temp), CODEX_HOME=str(self.codex_home),
-                        PATH=str(bin) + os.pathsep + os.environ.get('PATH', ''))
+                        HOME=str(self.home), PATH=str(bin) + os.pathsep + os.environ.get('PATH', ''))
         subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.origin)], env=self.env, check=True)
         self.git('init', '-q', '-b', 'main')
         self.git('config', 'user.name', 'Fixture')
@@ -193,6 +199,14 @@ class CrossReview(unittest.TestCase):
     def option(self, args, flag):
         return args[args.index(flag) + 1]
 
+    def profile(self, worktree, scratch=None):
+        """The Codex permissions profile a reviewer's commands run in, which writes only to a check's checkout and its
+        `scratch` folder, has no network, and hides the keys and logins in the home folder."""
+        hidden = sorted(os.path.realpath(self.home / name) for name in ('.ssh', '.config/google-chrome-ba', '.netrc'))
+        entries = ['":root"="read"', *(f'"{path}"="deny"' for path in hidden),
+                   *(f'"{path}"="write"' for path in ([worktree, scratch] if scratch else []))]
+        return f'permissions.ba_crossreview_check={{filesystem={{{",".join(entries)}}},network={{enabled=false}}}}'
+
     def ledger(self):
         return self.repo / '.git/ba-crossreview'
 
@@ -207,7 +221,8 @@ class CrossReview(unittest.TestCase):
         call, = self.calls('codex')
         self.assertEqual(call['args'][0], 'exec')
         self.assertNotIn('resume', call['args'])
-        self.assertIn('sandbox_mode="read-only"', call['args'])
+        self.assertIn('default_permissions="ba_crossreview_check"', call['args'])
+        self.assertIn(self.profile(Path(call['cwd'])), call['args'])
         self.assertIn('--ignore-user-config', call['args'])
         self.assertIn('--ignore-rules', call['args'])
         self.assertFalse([arg for arg in call['args'] if arg.startswith('model')])
@@ -222,7 +237,8 @@ class CrossReview(unittest.TestCase):
         self.assertIn('Add the widget', (change / 'commits.txt').read_text(encoding='utf-8'))
         for text in ('You are Codex', 'pull request #7', 'fixture/repo', '"Add the widget"', 'which Claude wrote',
                      f'git diff {self.base}...{self.head}', str(change / 'change.diff'), str(change / 'commits.txt'),
-                     'Closes #3', 'AGENTS.md', 'commands that only read', 'status` "question"'):
+                     'Closes #3', 'AGENTS.md', 'commands that only read', 'status` "question"',
+                     "The files and folders in your home that hold keys and logins, such as `~/.ssh`, can't be read."):
             self.assertIn(text, call['stdin'])
         comment, = self.posts()
         self.assertEqual(comment['repo'], 'fixture/repo')
@@ -296,7 +312,7 @@ class CrossReview(unittest.TestCase):
         self.assertEqual(result['resolved'], ['F1'])
         first_call, call = self.calls('codex')
         self.assertEqual(call['args'][1:3], ['resume', 'codex-thread-1'])
-        self.assertIn('sandbox_mode="read-only"', call['args'])
+        self.assertIn(self.profile(Path(call['cwd'])), call['args'])
         self.assertEqual(Path(call['cwd']), Path(first_call['cwd']))
         self.assertEqual(self.git('rev-parse', 'HEAD', cwd=Path(call['cwd'])), head)
         change = Path(call['cwd']).with_name(Path(call['cwd']).name + '.change')
@@ -721,7 +737,8 @@ class CrossReview(unittest.TestCase):
         self.assertEqual((result['check'], result['commits'], result['turn']), (1, [first, second], 'reply'))
         self.assertEqual([finding['id'] for finding in result['open']], ['F1'])
         call = self.calls('codex')[1]
-        self.assertIn('sandbox_mode="workspace-write"', call['args'])
+        worktree = Path(call['cwd'])
+        self.assertIn(self.profile(worktree, worktree.with_name(worktree.name + '.tmp')), call['args'])
         for text in ('chose a focused check of those commits', f'reviewed it up to {self.head}', f'{self.head}..{second}',
                      'Review only these commits', 'leave `verdicts` empty', 'Closes #3', "the project's tests among them",
                      'When Cicely chose this, she said, word for word:\n\n> Just check those two.'):
@@ -856,14 +873,12 @@ class CrossReview(unittest.TestCase):
         self.assertEqual((result['verified'], result['unverified'], result['stopped']), (['F1'], ['F2'], None))
         call = self.calls('codex')[2]
         self.assertNotIn('resume', call['args'])
-        for arg in ('sandbox_mode="workspace-write"', 'sandbox_workspace_write.network_access=false',
-                    'sandbox_workspace_write.exclude_slash_tmp=true',
-                    'sandbox_workspace_write.exclude_tmpdir_env_var=true', '--ignore-user-config', '--ignore-rules'):
+        for arg in ('default_permissions="ba_crossreview_check"', '--ignore-user-config', '--ignore-rules'):
             self.assertIn(arg, call['args'])
         worktree = Path(call['cwd'])
         scratch = worktree.with_name(worktree.name + '.tmp')
         self.assertEqual(call['tmpdir'], str(scratch))
-        self.assertIn(f'sandbox_workspace_write.writable_roots=[{json.dumps(str(scratch))}]', call['args'])
+        self.assertIn(self.profile(worktree, scratch), call['args'])
         self.assertFalse(scratch.exists())
         self.assertEqual(self.git('status', '--short', '--ignored', cwd=worktree), '')
         for text in ('Cicely, who owns the project, chose a focused check', 'F1 (minor, widget.py:2): No test',
@@ -1003,7 +1018,8 @@ class CrossReview(unittest.TestCase):
         result = self.reply(('F1', 'declined', 'Not a bug.'))
         self.assertIn('2. **A focused check** of F1: Claude checks only that, in a fresh session, within 1M tokens and '
                       "20 min unless you set other limits. Claude may run the tests, in Codex's sandbox, which writes "
-                      'only to its checkout and a temp folder of its own, with no network.', result['briefing'])
+                      'only to its checkout and a temp folder of its own, with no network, and hides your keys and '
+                      'logins.', result['briefing'])
         self.decide(('next-round', 'Check it.', 'check'))
         # Each event of a message repeats its usage, so 600 tokens twice is 600, inside a budget of 1000.
         self.queue(check(('F1', 'not verified', 'test_widget fails either way.'),
@@ -1022,7 +1038,9 @@ class CrossReview(unittest.TestCase):
         self.assertIn('--restricted', args)
         self.assertEqual(json.loads(self.option(args, '--json-schema'))['required'], ['summary', 'verdicts', 'problems'])
         self.assertIn("and the Bash tool, whose commands, the project's tests among them, run in a sandbox: you can "
-                      'write only in your working directory and in the temp folder `$TMPDIR` names', call['stdin'])
+                      'write only in your working directory and in the temp folder `$TMPDIR` names, Git can\'t write, '
+                      'and there is no network. The files and folders in your home that hold keys and logins, such as '
+                      "`~/.ssh`, can't be read.", call['stdin'])
         self.assertIn("Claude could run the tests, in Codex's sandbox, which writes only", self.posts()[3]['body'])
         # A trial command came first, outside the checkout, through the same wrapper.
         self.assertEqual((self.option(trial['args'], '--tools'), trial['prefix'], trial['tmpdir']),
@@ -1030,15 +1048,14 @@ class CrossReview(unittest.TestCase):
         self.assertNotIn('--json-schema', trial['args'])
         self.assertNotEqual(Path(trial['cwd']), worktree)
         # Every command ran in Codex's sandbox, outside your Codex configuration, writing only to the checkout and the
-        # check's temp folder, with no network. What the commands left is gone, and so is the wrapper.
+        # check's temp folder, with no network and your keys and logins hidden. What the commands left is gone, and so
+        # is the wrapper.
         sandboxed = self.calls('codex')
         self.assertEqual([call['args'][-1] for call in sandboxed],
                          ['true', 'python3 -c pass', 'echo left > left.txt; echo left > "$TMPDIR/left.txt"'])
         for each in sandboxed:
-            self.assertEqual(each['args'][:-1], [
-                'sandbox', '-P', 'ba_crossreview_check', '-C', str(worktree), '-c',
-                'permissions.ba_crossreview_check={filesystem={":root"="read",'
-                f'"{worktree}"="write","{scratch}"="write"}},network={{enabled=false}}}}', '--', 'bash', '-c'])
+            self.assertEqual(each['args'][:-1], ['sandbox', '-P', 'ba_crossreview_check', '-C', str(worktree), '-c',
+                                                 self.profile(worktree, scratch), '--', 'bash', '-c'])
             self.assertEqual(each['tmpdir'], str(scratch))
             self.assertNotEqual(each['codexHome'], str(self.codex_home))
         self.assertEqual(Path(sandboxed[-1]['cwd']), worktree)
@@ -1070,6 +1087,35 @@ class CrossReview(unittest.TestCase):
         self.assertEqual(self.calls('codex')[-1]['args'][-1], 'sleep 3; echo late > late.txt')
         time.sleep(4)
         self.assertFalse((worktree / 'late.txt').exists())
+
+    def test_a_codex_check_stopped_at_its_limit_stops_the_commands_it_started(self):
+        # Codex, too, starts each command in a session of its own, which stopping Codex doesn't reach.
+        self.queue(review(finding('One', 'minor')))
+        self.review()
+        self.reply(('F1', 'declined', 'Not a bug.'))
+        self.decide(('next-round', 'Check it.', 'check'))
+        self.queue(check(('F1', 'verified', 'Fine.'), runs=['sleep 3; echo late > late.txt'], detached=True, sleep=30))
+        result = self.review('claude', '--timeout-minutes', '0.02')
+        self.assertEqual((result['stopped'], result['turn']), ('time', 'cicely'))
+        worktree = Path(self.calls('codex')[-1]['cwd'])
+        time.sleep(4)
+        self.assertFalse((worktree / 'late.txt').exists())
+
+    def test_whatever_a_reviewer_leaves_running_is_stopped_when_it_ends(self):
+        late = self.root / 'late.txt'
+        self.queue(review(finding('One', 'minor'), runs=[f'sleep 4; echo late > {shlex.quote(str(late))}'],
+                          detached=True, sleep=2))
+        self.assertEqual(self.review()['turn'], 'reply')
+        time.sleep(4)
+        self.assertFalse(late.exists())
+
+    def test_a_folder_of_keys_that_holds_the_checkout_isnt_hidden(self):
+        # Hiding it would hide the checkout too.
+        (self.home / '.claude').symlink_to(self.root)
+        self.queue(review(finding('One', 'minor')))
+        self.review()
+        call, = self.calls('codex')
+        self.assertIn(self.profile(Path(call['cwd'])), call['args'])
 
     def test_a_claude_check_is_refused_unless_its_trial_command_reaches_the_sandbox(self):
         self.queue(review(finding('One', 'minor')))
@@ -1132,7 +1178,7 @@ class CrossReview(unittest.TestCase):
         self.assertEqual((result['unlisted'], 'verdict' in result['open'][0]), (['F1'], False))
         call = self.calls('codex')[2]
         self.assertNotIn('resume', call['args'])
-        self.assertIn('sandbox_mode="read-only"', call['args'])
+        self.assertIn(self.profile(Path(call['cwd'])), call['args'])
         # Codex found the round read only what came after the check, not everything since round 1.
         for text in ('You are Codex', 'Since then a focused check ran in another session',
                      "The check couldn't verify it: No Sunday in the tests.", 'Claude fixed it: Handles Sundays now.',
