@@ -1,6 +1,6 @@
 ## Verify self-test probe: a script that leaves a node orphaned while deciding
 ## to skip itself. GUT counts it, but runs no test and no before_all() or
-## after_all() there. tools/verify.ps1 must fail although nothing else does.
+## after_all() there. The gate must fail although nothing else does.
 extends GutTest
 
 ## The node left orphaned, kept so it is never freed.

@@ -56,7 +56,7 @@ def main():
         return dict(status=status,sourceHash=b.manifest_hash(manifest),trackedPaths=len(manifest),binaryPaths=[e['path'] for e in manifest if Path(e['path']).suffix in ('.png','.ico','.icns')])
     def negative(directory,label,relative,fixture,pattern):
         path=b.owned(run,directory/relative); before=path.read_bytes()
-        try: path.write_bytes((ROOT/'tests/bootstrap/fixtures/native'/fixture).read_bytes()); return gate(directory,label,pattern)
+        try: path.write_bytes((ROOT/'tests/bootstrap-linux/fixtures/native'/fixture).read_bytes()); return gate(directory,label,pattern)
         finally: path.write_bytes(before)
     try:
         variants=['compatibility','forward-plus','mobile'] if args.preset=='godot' else ['tauri'] if args.preset=='tauri' else ['compatibility','forward-plus','mobile','tauri']

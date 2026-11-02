@@ -1,4 +1,4 @@
-## Verify self-test probe: a test whose assertion fails. tools/verify.ps1
+## Verify self-test probe: a test whose assertion fails. The gate
 ## must fail.
 extends GutTest
 

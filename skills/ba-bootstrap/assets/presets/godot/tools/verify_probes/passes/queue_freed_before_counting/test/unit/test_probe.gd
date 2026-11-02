@@ -1,6 +1,6 @@
 ## Verify self-test probe: a test that takes a node out of the tree and frees
 ## it with queue_free(), as the application puts things away, and lets the
-## frame end in after_each() before GUT counts orphans. tools/verify.ps1 must
+## frame end in after_each() before GUT counts orphans. The gate must
 ## pass: the node is gone by then.
 extends GutTest
 
