@@ -1,5 +1,5 @@
 ## Verify self-test probe: a node left orphaned in before_all(), where GUT
-## counts it under no test. tools/verify.ps1 must fail even though the test
+## counts it under no test. The gate must fail even though the test
 ## passes.
 extends GutTest
 

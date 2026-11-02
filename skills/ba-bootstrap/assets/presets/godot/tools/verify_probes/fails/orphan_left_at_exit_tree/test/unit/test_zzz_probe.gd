@@ -1,6 +1,6 @@
 ## Verify self-test probe: a script that leaves a node orphaned as GUT takes
 ## it out of the tree, after GUT has counted the script's orphans. Named to run
-## last, so no later script's count can catch it. tools/verify.ps1 must fail
+## last, so no later script's count can catch it. The gate must fail
 ## although its test passes.
 extends GutTest
 

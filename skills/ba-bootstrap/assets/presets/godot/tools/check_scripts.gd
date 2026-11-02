@@ -1,5 +1,5 @@
 ## Compiles every GDScript file in the project outside res://addons and quits
-## non-zero if any fails, so tools/verify.ps1 catches parse errors and
+## non-zero if any fails, so the gate catches parse errors and
 ## warnings configured as errors even in scripts no test loads. GUT cannot be
 ## relied on for this: it skips a test script that fails to compile, with only
 ## a warning, and still exits zero.
@@ -34,7 +34,7 @@ func _initialize() -> void:
 ## Returns every .gd file below [param directory], skipping directories as
 ## Godot's editor file system does: names beginning with a dot, such as
 ## .godot, and any directory holding a .gdignore file or a nested project's
-## project.godot. tools/verify.ps1 applies the same rules when it reads
+## project.godot. The gate applies the same rules when it reads
 ## import results. res://addons is skipped as well.
 func _scripts_under(directory: String) -> PackedStringArray:
 	var found: PackedStringArray = []

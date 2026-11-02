@@ -1,4 +1,4 @@
-## GUT pre-run hook that tools/verify.ps1 installs, so that verification fails
+## GUT pre-run hook that the gate installs, so that verification fails
 ## on orphaned nodes, as it does on errors. GUT counts the nodes left out of
 ## the tree after each test, and after each script's before_all() and
 ## after_all(), and prints them, but fails nothing for them. This notes every

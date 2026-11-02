@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native BA release engine. Python 3 standard library; never executes PowerShell.
+"""BA release engine. Python 3 standard library.
 
 Every external operation is an argument array. Persisted journals contain only
 approved public metadata, snapshots and deliberately sanitized diagnostics.
@@ -871,15 +871,12 @@ def configuration(repo, document=None, incomplete=False):
             return None
         if not isinstance(path, str):
             fail("Verification hook must name an inspected native script.")
-        # Windows release.json remains shared: choose an existing native sibling explicitly.
         if path.endswith(".ps1"):
-            native = path[:-4] + ".sh"
-            if (repo / native).is_file():
-                path = native
-            else:
-                fail(
-                    "PowerShell hook has no native .sh sibling; configure a Linux hook before preparation."
-                )
+            fail(
+                "PowerShell hooks are no longer run; name a .sh or .py hook in release.json instead of "
+                + path
+                + "."
+            )
         return safe_path(repo, path, leaf=True)
 
     verification = hook(gate["script"])
@@ -1487,16 +1484,6 @@ def engine(executable=None):
 
 
 def hook_run(settings, script, args, cwd):
-    if script.endswith(".ps1"):
-        script = script[:-4] + ".sh"
-        args = [
-            (
-                ("--" + re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", a[1:]).lower())
-                if re.fullmatch(r"-[A-Za-z][A-Za-z0-9]*", a)
-                else a
-            )
-            for a in args
-        ]
     path = safe_path(settings["repository"], script, leaf=True)
     if path.suffix == ".sh":
         return run("bash", [path, *args], cwd)
@@ -2960,7 +2947,8 @@ def publish_play(
 
 
 def complete_derived_metadata(state, fresh):
-    # Release.psm1 Update-ReleaseDerivedPlanMetadata permits exactly this one
+    # The original PowerShell engine (Release.psm1's
+    # Update-ReleaseDerivedPlanMetadata) permitted exactly this one
     # historical omission. Compare every other field and preserve array order.
     if state["plan"] == fresh:
         return False
@@ -3908,10 +3896,6 @@ def setup_document(facts, stores, existing_aliases=None):
     repo = Path(facts["repository"])
 
     def shared_hook(stem):
-        # Prefer the shared Windows spelling when a native sibling exists, so
-        # newly configured repositories remain usable by both retained engines.
-        if (repo / (stem + ".ps1")).is_file() and (repo / (stem + ".sh")).is_file():
-            return stem + ".ps1"
         return next(
             (
                 stem + suffix

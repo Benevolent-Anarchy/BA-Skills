@@ -57,6 +57,7 @@ class RuntimeTests(unittest.TestCase):
         self.b.write_manifest(self.root / 'project', manifest)
         readme = (self.root / 'project/README.md').read_text()
         self.assertIn('Useful {{PROJECT_TITLE}}', readme)
+        self.assertFalse([p for p in (self.root / 'project').rglob('*') if p.suffix in ('.ps1', '.psm1')])
         gate = self.root / 'project/tools/verify.sh'
         result = subprocess.run([str(gate)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

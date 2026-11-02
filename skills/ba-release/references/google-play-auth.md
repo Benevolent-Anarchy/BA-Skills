@@ -1,8 +1,5 @@
 # Keyless Google Play authentication
 
-On Linux/WSL, use the [native entry points and option mapping](linux.md).
-Windows PowerShell examples below remain supported on Windows.
-
 Read this only when Google Play is selected and an Android Publisher token is
 needed. Holding Play must not run this setup or contact Google.
 
@@ -21,48 +18,37 @@ Use the shared Chrome account guard throughout console setup. Do not download
 a service-account key, weaken an organization key policy, or copy browser
 cookies into a script. Device/passkey verification remains a user action.
 
-Install the official Google Cloud CLI for the actual native Windows or WSL
-environment. Keep its credential cache outside Git, separate from existing
-user logins. HWB's native setup uses `%LOCALAPPDATA%/ba-release/gcloud`; WSL
-requires its own Linux CLI login/cache. Set `CLOUDSDK_CONFIG` for the login
+Install the official Google Cloud CLI. Keep its credential cache outside Git,
+separate from existing user logins. HWB's setup uses `~/.config/ba-release/gcloud`. Set `CLOUDSDK_CONFIG` for the login
 process and authenticate the explicitly approved account. Avoid overwriting
 Application Default Credentials. Open OAuth URLs through the verified BA
 profile; do not let a default-browser launch select the private profile.
 The CLI's loopback callback can complete authorization without copying its
 authorization code or tokens through the agent conversation.
-On a Windows Store app host, resolve the existing cache with
-`scripts/HostPaths.psm1`'s `Resolve-ReleaseWindowsPath` and retain that actual
-path in private runtime settings. A different native agent may not see the
-Store app's redirected cache through the logical Local AppData path.
 Keep credential-free provider arguments in a private per-user runtime file when
-needed across agents, outside Git. HWB's approved native provider is recorded at
+needed across agents, outside Git. HWB's approved provider is recorded at
 `~/.config/ba-release/google-play/How-to-Wait-for-the-Bus.json`. It contains only
 the helper's account, service account, actual cache path and CLI path; the CLI
 owns its separate credential cache. Do not treat an arbitrary profile file as
 authorization to grant new access, and do not copy its paths into release.json.
 
-Import `scripts/GooglePlayAuth.psm1` and wrap the selected operation:
+Wrap the selected operation with `scripts/google-play-auth.sh`, taking the
+values from the inspected private provider file where one exists:
 
-```powershell
-Import-Module <skill>/scripts/GooglePlayAuth.psm1
-# Alternatively, read the inspected private provider file as a hashtable.
-$authentication = @{
-    Account = '<approved-email>'
-    ServiceAccount = '<approved-service-account-email>'
-    GcloudConfigDirectory = '<existing-private-cache>'
-    GcloudExecutable = '<installed-gcloud>'
-}
-Invoke-WithGooglePlayAccessToken @authentication -Action {
-        & <skill>/scripts/release.ps1 -Mode doctor -Repository <game> -Destination <selected-ids>
-    }
+```bash
+<skill>/scripts/google-play-auth.sh \
+  --account '<approved-email>' \
+  --service-account '<approved-service-account-email>' \
+  --gcloud-config-directory '<existing-private-cache>' \
+  --gcloud-executable '<installed-gcloud>' \
+  -- <skill>/scripts/release.sh --mode doctor --repository <game> --destination <selected-ids>
 ```
 
-The helper checks the active CLI identity, then requests a one-hour token from
-the fixed IAM Credentials host with only the Android Publisher scope. It makes
-that token available as process `BA_GOOGLE_PLAY_ACCESS_TOKEN` during the action,
-restores the prior environment even on failure, and sanitizes provider errors.
-It neither logs in nor grants permissions. Its hidden `TokenTransport` argument
-is for disposable tests; real runs use the fixed HTTPS endpoint.
+The helper checks the active CLI identity, refuses a cache inside Git, then
+requests a one-hour token from the fixed IAM Credentials host with only the
+Android Publisher scope. It makes that token available to the action alone, as
+`BA_GOOGLE_PLAY_ACCESS_TOKEN`, and sanitizes provider errors. It neither logs in
+nor grants permissions.
 
 Use a fresh invocation before an approved publish/resume; never persist the
 token or set a dummy token to satisfy doctor. Authentication alone authorizes no

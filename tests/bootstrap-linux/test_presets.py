@@ -31,6 +31,7 @@ class Presets(unittest.TestCase):
         self.assertEqual((source/'addons/gut/binary.bin').read_bytes(),bytes(range(256)))
         self.assertEqual((source/'addons/gut/LICENSE.md').read_bytes(),b'License\r\n')
         self.assertTrue((source/'tools/verify_selftest.sh').is_file())
+        self.assertFalse([p for p in source.rglob('*') if p.suffix in ('.ps1','.psm1')])
         self.assertTrue(any(e['path'].endswith('.gd.uid') for e in manifest))
         self.engine.freeze(journal,source,manifest)
         self.engine.snapshot(journal)

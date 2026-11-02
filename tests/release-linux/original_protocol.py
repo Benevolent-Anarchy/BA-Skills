@@ -1,10 +1,10 @@
-"""Fixtures transcribed from the retained PowerShell release protocol.
+"""Fixtures transcribed from the original PowerShell release protocol.
 
 This builds journals WITHOUT calling the native planner, preparer or serializer.
 Field insertion order follows Release.psm1 Get-ReleasePlan/Get-ReleaseArtifact;
 pipeline cardinality follows `... | ConvertTo-Json -Compress` (0/1/many).
-Actions are literal original strings, including punctuation. The fixture uses
-shared .ps1 config hooks with existing .sh siblings, valid for both runtimes.
+Actions are literal original strings, including punctuation. The fixture's
+configuration names .sh hooks.
 """
 import copy
 import hashlib
