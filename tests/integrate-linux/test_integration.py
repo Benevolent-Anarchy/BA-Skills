@@ -280,11 +280,11 @@ print(json.dumps(o))
     def test_land_leaves_the_worktree_alone_and_runs_no_commit_hook(self):
         h=self.branch('feature','feature');self.local_remote()
         hook=self.repo/'.git/hooks/pre-commit';hook.write_text('#!/bin/sh\nexit 41\n');hook.chmod(0o755)
-        (self.repo/'file [one].txt').write_text('user work\n')
+        (self.repo/'file [one].txt').write_text('user work\n');self.git('config','commit.cleanup','verbatim')
         view=dict(state='OPEN',isDraft=False,headRefName='feature',headRefOid=h,baseRefName='main');self.state(views=[view,view],pr=dict(state='MERGED'))
         d=self.call('land',pull_request=1,branch='feature',approved_head=h,updated=h,base_branch='main',expected_base=self.base,rehearsed=h,message='Merge fixture',timeout_seconds=0,poll_seconds=0)
         self.assertTrue(d['merged']);self.assertEqual(self.git('ls-remote','origin','refs/heads/main').split()[0],d['mergeCommit'])
-        self.assertEqual(self.git('rev-list','--parents','-n','1',d['mergeCommit']).split()[1:],[self.base,h]);self.assertEqual(self.git('log','-1','--format=%B',d['mergeCommit']),'Merge fixture')
+        self.assertEqual(self.git('rev-list','--parents','-n','1',d['mergeCommit']).split()[1:],[self.base,h]);self.assertEqual(self.message(d['mergeCommit']),'Merge fixture')
         self.assertEqual((self.repo/'file [one].txt').read_text(),'user work\n');self.assertEqual(self.git('rev-parse','HEAD'),h);self.assertFalse((self.repo/'.git/MERGE_HEAD').exists())
     def test_land_wait_failure_is_resumable_without_second_merge(self):
         h=self.branch('feature','feature');self.local_remote()
@@ -381,15 +381,39 @@ print(json.dumps(o))
         (self.repo/'file [one].txt').write_text('user resolution');self.git('add','.')
         self.assertTrue(self.call('update',head=h,base=b,rehearsed=h)['matches'])
         self.assertTrue((self.repo/'.git/MERGE_HEAD').exists());self.assertEqual((self.repo/'file [one].txt').read_text(),'user resolution')
+    def message(self,commit):return self.git('cat-file','commit',commit,ok=False).stdout.split('\n\n',1)[1]
     def test_update_commit_is_cleaned_up_and_signed_as_git_commit_would(self):
         h=self.branch('feature','feature');b=self.branch('newbase','newbase')
         self.git('merge','--no-ff','--no-commit',h,ok=False)
         (self.repo/'file [one].txt').write_text('resolved\n');self.git('add','.');self.git('commit','-qm','resolved');r=self.git('rev-parse','HEAD')
+        # Each message is checked against what git commit -m makes of it under the same configuration.
+        text='\n# commentary\n  Merge main  \n\n\n; other\n\nfor integration\t'
+        for cleanup,comment in [(None,None),('default',None),('whitespace',None),('scissors',None),('strip',None),('strip',';'),('strip','auto'),('verbatim',None),('Strip',None)]:
+            for key,value in [('commit.cleanup',cleanup),('core.commentChar',comment)]:
+                if value is None:self.git('config','--unset-all',key,ok=False)
+                else:self.git('config',key,value)
+            for message in [text,'',' \n\t\n','# only a comment']:
+                with self.subTest(cleanup=cleanup,comment=comment,message=message):
+                    self.git('checkout','-q','--detach',r);p=self.git('commit','-q','--allow-empty','-m',message,ok=False)
+                    d=self.call('update',head=h,base=b,rehearsed=r,message=message,ok=p.returncode==0)
+                    if p.returncode==0:self.assertEqual(self.message(d['commit']),self.message('HEAD'))
+        for key in ['commit.cleanup','core.commentChar']:self.git('config','--unset-all',key,ok=False)
         gpg=self.root/'fake gpg';gpg.write_text('#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\nsys.stderr.write("\\n[GNUPG:] SIG_CREATED D 1 8 00 0 0 FIXTURE\\n")\nprint("-----BEGIN PGP SIGNATURE-----\\n\\nfixture\\n-----END PGP SIGNATURE-----")\n');gpg.chmod(0o755)
         self.git('config','gpg.program',str(gpg));self.git('config','user.signingKey','FIXTURE');self.git('config','commit.gpgSign','true')
-        commit=self.git('cat-file','commit',self.call('update',head=h,base=b,rehearsed=r,message='\n  Merge main  \n\n\n\nfor integration\t\n\n')['commit'])
-        self.assertIn('\ngpgsig -----BEGIN PGP SIGNATURE-----\n',commit);self.assertTrue(commit.endswith('\n\n  Merge main\n\nfor integration'),commit)
-        self.call('update',head=h,base=b,rehearsed=r,message=' \n\t\n',ok=False)
+        self.assertIn('\ngpgsig -----BEGIN PGP SIGNATURE-----\n',self.git('cat-file','commit',self.call('update',head=h,base=b,rehearsed=r)['commit']))
+    def test_update_compares_submodules_set_to_be_ignored(self):
+        (self.repo/'.gitmodules').write_text('[submodule "vendor/lib"]\n\tpath = vendor/lib\n\turl = ./lib\n\tignore = all\n')
+        self.git('add','.gitmodules');self.git('update-index','--add','--cacheinfo','160000,'+self.base+',vendor/lib');self.git('commit','-qm','submodule');start=self.git('rev-parse','HEAD')
+        def commit(parent,content):
+            self.git('checkout','-q','--detach',parent);(self.repo/'file [one].txt').write_text(content);self.git('add','file [one].txt');self.git('commit','-qm',content);return self.git('rev-parse','HEAD')
+        def advance():self.git('update-index','--cacheinfo','160000,'+start+',vendor/lib');self.git('commit','-qm','advance');return self.git('rev-parse','HEAD')
+        h=commit(start,'feature\n');b=commit(start,'newbase\n')
+        # The step resolves the conflict and also advances the submodule, which no conflict touched.
+        self.git('merge','--no-ff','--no-commit',h,ok=False);(self.repo/'file [one].txt').write_text('resolved\n');self.git('add','file [one].txt')
+        d=self.call('update',head=h,base=b,rehearsed=advance(),ok=False);self.assertEqual(d['differences'],['vendor/lib']);self.assertNotIn('commit',d)
+        # Already up to date, the head must still match the step exactly.
+        self.git('checkout','-q','--detach',h)
+        d=self.call('update',head=h,base=start,rehearsed=advance(),ok=False);self.assertTrue(d['upToDate']);self.assertEqual(d['differences'],['vendor/lib'])
     def lfs_history(self):
         # BA-Skills#76: the base stores textures as plain blobs under an LFS rule, one branch renormalizes them into
         # pointers, and another branched before it. Git can count every plain texture as changed after a checkout.

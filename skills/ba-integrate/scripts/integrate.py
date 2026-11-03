@@ -45,11 +45,22 @@ class Repo:
         return self.git('merge-base','--is-ancestor',a,b,allowed=(0,1)).returncode == 0
     def tree(self, sha):
         return self.text('rev-parse',sha+'^{tree}')
-    def commit(self, tree, parents, message):
-        # Made in the object store, with no worktree or index, so no commit hook runs. The message is
-        # cleaned up as git commit -m cleans one, and the commit is signed when commit.gpgSign asks.
-        message=self.git('stripspace',input=message).stdout
-        if not message.strip():raise RuntimeError('The commit message is empty; nothing was changed.')
+    def differing(self, a, b):
+        # Every path whose entry differs, including submodules set to be ignored.
+        return self.paths('diff-tree','-r','--no-renames','--ignore-submodules=none','--name-only',a,b)
+    def commit(self, tree, parents, message, from_file=False):
+        # Made in the object store, with no worktree or index, so no commit hook runs. The message is cleaned
+        # up as git commit -m (or -F, from_file) cleans one under commit.cleanup, and signed when commit.gpgSign asks.
+        def config(*args):return self.git('config',*args,allowed=(0,1)).stdout.splitlines()
+        mode=(config('--get','commit.cleanup') or ['default'])[-1]
+        if mode not in ('default','whitespace','scissors','strip','verbatim'):raise RuntimeError(f'Invalid commit.cleanup {mode}; nothing was changed.')
+        if mode=='verbatim':
+            if message and not message.endswith('\n') and not from_file:message+='\n'
+        else:
+            # An automatic comment character is one that begins no line of the message, so nothing is a comment.
+            automatic=(config('--get-regexp',r'^core\.comment(char|string)$') or [''])[-1].endswith(' auto')
+            message=self.git('stripspace',*(['--strip-comments'] if mode=='strip' and not automatic else []),input=message).stdout
+        if not message:raise RuntimeError('The commit message is empty; nothing was changed.')
         sign=self.git('config','--type=bool','--get','commit.gpgSign',allowed=(0,1)).stdout.strip()=='true'
         args=['commit-tree',*(['-S'] if sign else []),tree]
         for parent in parents:args+=['-p',parent]
@@ -131,13 +142,13 @@ def update(a,r,out):
     # Merged in the object store, never in a worktree: a checkout of a commit that stores files as plain blobs
     # under an LFS rule can show them all as changed, and git merge then refuses (BA-Skills#76).
     up=r.ancestor(b,h);replayed=[];commit=None
-    if up:commit=h;differences=r.paths('diff-tree','-r','--no-renames','--name-only',h,s)
+    if up:commit=h;differences=r.differing(h,s)
     else:
         p=r.git('merge-tree','--write-tree','--name-only','--no-messages','-z',h,b,allowed=(0,1))
         merged,*conflicted=p.stdout.split('\0')
         if p.returncode:replayed=sorted(set(x for x in conflicted if x))
         # Each conflicted path takes the step's version, or goes where the step removed it; every other path must already match the step.
-        differences=[x for x in r.paths('diff-tree','-r','--no-renames','--name-only',merged,s) if not any(x==y or x.startswith(y+'/') for y in replayed)]
+        differences=[x for x in r.differing(merged,s) if not any(x==y or x.startswith(y+'/') for y in replayed)]
         if not differences:commit=r.commit(r.tree(s),[h,b],a.message)
     out.update(rehearsedTree=r.tree(s),upToDate=up,replayed=replayed,matches=not differences)
     if commit:out.update(commit=commit,tree=r.tree(commit))
@@ -307,7 +318,7 @@ def land(a,r,out):
         ready([approved,updated],'before anything was pushed')
         # The expected base is in the update's history, so merging the update into it gives the update's tree,
         # which matched the rehearsed step above. Made without a worktree, as update's merge is (BA-Skills#76).
-        merge=r.commit(tree,[expected,updated],a.message)
+        merge=r.commit(tree,[expected,updated],a.message,from_file=True)
         if remote_branch!=updated:push(updated,a.branch,remote_branch);out['branchPushed']=True
         ready([updated],'after the branch push, before landing; base unchanged')
         push(merge,a.base_branch,expected);out.update(landed=True,mergeCommit=merge)
