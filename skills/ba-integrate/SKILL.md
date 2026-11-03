@@ -39,7 +39,17 @@ Create the rehearsal from the surveyed base commit, in the project's worktree fo
 git -C <root> worktree add -b integration/<yyyymmdd> <root>/.claude/worktrees/integration-<yyyymmdd> <base sha>
 ```
 
-Inspect every tracked `.gitattributes` in each checkout for `filter=lfs`, run `git lfs ls-files` when available, and hydrate the current revision with `git lfs pull` before inspecting assets or running a gate when LFS is used. Repeat after changing the checked-out revision, confirming every LFS object is present (`*`, not `-`). Use whatever the project's notes say a checkout there needs. Then, for each pull request in order:
+Inspect every tracked `.gitattributes` in each checkout for `filter=lfs`, run `git lfs ls-files` when available, and hydrate the current revision with `git lfs pull` before inspecting assets or running a gate when LFS is used. Repeat after changing the checked-out revision, confirming every LFS object is present (`*`, not `-`). Use whatever the project's notes say a checkout there needs.
+
+A merge in the rehearsal can refuse over files nobody changed, when a commit stores them as plain blobs that `.gitattributes` sends through LFS, as it does on either side of a `git add --renormalize`. Git re-checks a freshly written file through LFS's clean filter, gets a pointer, and counts the file as changed. If `git hash-object --no-filters <path>` matches `git rev-parse HEAD:<path>` for each, they are not changes. Wait a second, then refresh the index with LFS's clean filter bypassed, which marks as unchanged only files byte-identical to the commit, and merge again:
+
+```bash
+sleep 1 && git -C <rehearsal> -c filter.lfs.process= -c filter.lfs.clean=cat -c filter.lfs.required=false update-index -q --refresh
+```
+
+The scripts check nothing out, so this never stops them.
+
+Then, for each pull request in order:
 
 1. Merge its surveyed head with `git merge --no-ff --no-commit <head sha>`.
 2. Resolve each conflict as [resolving.md](references/resolving.md) and the project's notes say, and commit with `git commit --no-edit`. The step's commit, from `git rev-parse HEAD`, is what the merge step will reproduce. Put every change the step needs into this commit.
@@ -47,10 +57,9 @@ Inspect every tracked `.gitattributes` in each checkout for `filter=lfs`, run `g
 
    ```bash
    bash scripts/update.sh --worktree <rehearsal> --head <head sha> --base <previous step commit> --rehearsed <step commit>
-   git -C <rehearsal> checkout integration/<yyyymmdd>
    ```
 
-   It merges the base into the head and takes every conflicted path from the step's commit, whatever kind of conflict it was. It must report `matches: true`. A mismatch means the step changed a path no conflict touched, which the merge step cannot reproduce. Take that change out of the step and keep it for a follow-up draft pull request.
+   It merges the base into the head and takes every conflicted path from the step's commit, whatever kind of conflict it was. It works in Git's object store and leaves the rehearsal's checkout as it was. It must report `matches: true`. A mismatch means the step changed a path no conflict touched, which the merge step cannot reproduce. Take that change out of the step and keep it for a follow-up draft pull request.
 4. Check for the conflicts text cannot show, as resolving.md describes, then run the project's gate. Every step becomes the base at some point, so each one has to pass, unless the project's notes allow gating only the last. A failing gate is a finding for the plan, not something to fix silently.
 
 After the last step, re-read the hotspot files whole against the combined tree. List anything no longer true as a follow-up correction for after the run.
@@ -97,7 +106,7 @@ The expected base starts as the rehearsal's base commit and becomes each landing
    - the remote base and branch are exactly where the plan expects
    - GitHub shows the pull request open, not a draft, on that branch and targeting that base
 
-   It makes the merge commit on the expected base and pushes the update to the branch. It reads GitHub again, then pushes the merge commit to the base. A ref that moved, a ruleset or a merge-queue requirement therefore fails the push instead of landing something unrehearsed. It then waits for GitHub to report the pull request `MERGED`. Its `mergeCommit` is the next step's expected base.
+   It makes the merge commit on the expected base and pushes the update to the branch. Like `update.sh`, it makes its commit in Git's object store without checking anything out, so no commit hook runs on it. Both clean up the message as `git commit` does, and sign the commit when `commit.gpgSign` says so. It reads GitHub again, then pushes the merge commit to the base. A ref that moved, a ruleset or a merge-queue requirement therefore fails the push instead of landing something unrehearsed. It then waits for GitHub to report the pull request `MERGED`. Its `mergeCommit` is the next step's expected base.
 4. Once it reports `MERGED`, comment on the pull request with any resolutions, using the project's author prefix. Update its description if it no longer describes the change.
 5. Retarget the pull requests the plan listed for the merged branch to the base. Do this before deleting the branch, because GitHub can close a pull request whose base branch is deleted. Do it even when branches are kept, so a stacked pull request lands on the base. The script reads every page of the pull requests targeting the branch. If they are not exactly the approved ones, for instance because one was opened since, it retargets none and the run stops for a new approval. An approved one that already targets the base and is still open counts as retargeted, and is listed under `alreadyRetargeted`: GitHub moves stacked pull requests to the base itself when a repository deletes merged branches automatically. Otherwise it retargets each and confirms none is left:
 
@@ -123,7 +132,7 @@ When a run stops, report which pull requests merged, which did not, and what eac
 - `branchPushed: true, landed: false`: the branch holds the update (`branchTip`) and the base is unchanged. Fix what the error names. If the plan still holds, run `land.sh` again; if not, the run needs a new plan.
 - `landed: true, merged: false`: the merge commit (`mergeCommit`) is on the base, but GitHub has not yet reported the pull request merged. Run `land.sh` again to wait. Don't delete the branch, comment, or start the next step until it reports `merged: true`. Never land the pull request a second time.
 - `merged: true` with an `error`: the landing is complete, and GitHub has confirmed it. Only the read of its closing issues failed. Carry on from step 4, with `mergeCommit` as the next expected base. `check-issues` reads the closing issues again in step 6.
-- Any other refusal pushed nothing. If the cause was passing, such as a commit hook failing on the merge commit, the script has already abandoned the merge it started, so fix the cause and run it again with the same arguments. Otherwise, report it and replan.
+- Any other refusal pushed nothing. If the cause was passing, such as GitHub being unreachable, fix it and run the script again with the same arguments. Otherwise, report it and replan.
 
 ## 6. Finish
 
