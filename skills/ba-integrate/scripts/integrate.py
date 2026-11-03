@@ -407,7 +407,7 @@ def check_issues(a,r,out):
     ago=int((dt.datetime.now(dt.timezone.utc)-merged_at).total_seconds()) if merged_at else None
     for e in expected.values():
         e['linkedBy']='manual link' if e['manualLink'] else ('description keyword' if e['linked'] else ('commit keyword' if e['commits'] else 'merge commit keyword'))
-        issue=gh.call('issue','view',e['url'],'--json','state,stateReason,closedAt');e.update(state=issue['state'],closedAt=issue.get('closedAt'),findings=[]);findings=e['findings']
+        issue=gh.call('issue','view',e['url'],'--json','state,closedAt');e.update(state=issue['state'],closedAt=issue.get('closedAt'),findings=[]);findings=e['findings']
         if issue['state']=='CLOSED':continue
         if pr['state']!='MERGED':findings.append(f"#{a.pull_request} has not merged; it is {pr['state']}.")
         elif pr['baseRefName']!=default:findings.append(f"#{a.pull_request} merged into {pr['baseRefName']}, not the default branch {default}, and GitHub closes issues only for pull requests merged into the default branch.")

@@ -30,8 +30,14 @@ if d.get('fail'): print('fixture failure',file=sys.stderr);sys.exit(23)
 if d.get('warning'):print('fixture warning',file=sys.stderr)
 if a[:2] in (['pr','view'],['pr','edit']):
  if '--repo' not in a or a[a.index('--repo')+1]!='test/repo':raise SystemExit('repository not explicit')
- # Like Ubuntu's gh 2.46, which lacks this pr view field.
- if '--json' in a and 'closingIssuesReferences' in a[a.index('--json')+1]:raise SystemExit('Unknown JSON field: "closingIssuesReferences"')
+# The --json fields of Ubuntu's gh 2.46, from `gh <command> --json`. Like it, refuse any other,
+# such as closingIssuesReferences in pr view and stateReason in issue view.
+known={'issue view':'assignees,author,body,closed,closedAt,comments,createdAt,id,labels,milestone,number,projectCards,projectItems,reactionGroups,state,title,updatedAt,url',
+ 'pr view':'additions,assignees,author,autoMergeRequest,baseRefName,body,changedFiles,closed,closedAt,comments,commits,createdAt,deletions,files,headRefName,headRefOid,headRepository,headRepositoryOwner,id,isCrossRepository,isDraft,labels,latestReviews,maintainerCanModify,mergeCommit,mergeStateStatus,mergeable,mergedAt,mergedBy,milestone,number,potentialMergeCommit,projectCards,projectItems,reactionGroups,reviewDecision,reviewRequests,reviews,state,statusCheckRollup,title,updatedAt,url',
+ 'repo view':'assignableUsers,codeOfConduct,contactLinks,createdAt,defaultBranchRef,deleteBranchOnMerge,description,diskUsage,forkCount,fundingLinks,hasDiscussionsEnabled,hasIssuesEnabled,hasProjectsEnabled,hasWikiEnabled,homepageUrl,id,isArchived,isBlankIssuesEnabled,isEmpty,isFork,isInOrganization,isMirror,isPrivate,isSecurityPolicyEnabled,isTemplate,isUserConfigurationRepository,issueTemplates,issues,labels,languages,latestRelease,licenseInfo,mentionableUsers,mergeCommitAllowed,milestones,mirrorUrl,name,nameWithOwner,openGraphImageUrl,owner,parent,primaryLanguage,projects,pullRequestTemplates,pullRequests,pushedAt,rebaseMergeAllowed,repositoryTopics,securityPolicyUrl,squashMergeAllowed,sshUrl,stargazerCount,templateRepository,updatedAt,url,usesCustomOpenGraphImage,viewerCanAdminister,viewerDefaultCommitEmail,viewerDefaultMergeMethod,viewerHasStarred,viewerPermission,viewerPossibleCommitEmails,viewerSubscription,visibility,watchers'}
+if '--json' in a:
+ for x in a[a.index('--json')+1].split(','):
+  if x not in known[' '.join(a[:2])].split(','):raise SystemExit('Unknown JSON field: "'+x+'"')
 if a[:2]==['api','graphql'] and d.get('graphql_pages'):
  pages=d['graphql_pages'];o=pages.pop(0);d['graphql_pages']=pages;json.dump(d,open(p,'w'));print(json.dumps(o));sys.exit()
 if a[:2]==['api','graphql']:
