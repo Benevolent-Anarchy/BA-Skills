@@ -1,5 +1,5 @@
 """Behavior tests: every Git write is confined to temporary local repositories."""
-import json, os, pathlib, re, shutil, subprocess, tempfile, unittest
+import json, os, pathlib, re, shlex, shutil, subprocess, tempfile, time, unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / 'skills/ba-integrate/scripts'
 
@@ -30,8 +30,14 @@ if d.get('fail'): print('fixture failure',file=sys.stderr);sys.exit(23)
 if d.get('warning'):print('fixture warning',file=sys.stderr)
 if a[:2] in (['pr','view'],['pr','edit']):
  if '--repo' not in a or a[a.index('--repo')+1]!='test/repo':raise SystemExit('repository not explicit')
- # Like Ubuntu's gh 2.46, which lacks this pr view field.
- if '--json' in a and 'closingIssuesReferences' in a[a.index('--json')+1]:raise SystemExit('Unknown JSON field: "closingIssuesReferences"')
+# The --json fields of Ubuntu's gh 2.46, from `gh <command> --json`. Like it, refuse any other,
+# such as closingIssuesReferences in pr view and stateReason in issue view.
+known={'issue view':'assignees,author,body,closed,closedAt,comments,createdAt,id,labels,milestone,number,projectCards,projectItems,reactionGroups,state,title,updatedAt,url',
+ 'pr view':'additions,assignees,author,autoMergeRequest,baseRefName,body,changedFiles,closed,closedAt,comments,commits,createdAt,deletions,files,headRefName,headRefOid,headRepository,headRepositoryOwner,id,isCrossRepository,isDraft,labels,latestReviews,maintainerCanModify,mergeCommit,mergeStateStatus,mergeable,mergedAt,mergedBy,milestone,number,potentialMergeCommit,projectCards,projectItems,reactionGroups,reviewDecision,reviewRequests,reviews,state,statusCheckRollup,title,updatedAt,url',
+ 'repo view':'assignableUsers,codeOfConduct,contactLinks,createdAt,defaultBranchRef,deleteBranchOnMerge,description,diskUsage,forkCount,fundingLinks,hasDiscussionsEnabled,hasIssuesEnabled,hasProjectsEnabled,hasWikiEnabled,homepageUrl,id,isArchived,isBlankIssuesEnabled,isEmpty,isFork,isInOrganization,isMirror,isPrivate,isSecurityPolicyEnabled,isTemplate,isUserConfigurationRepository,issueTemplates,issues,labels,languages,latestRelease,licenseInfo,mentionableUsers,mergeCommitAllowed,milestones,mirrorUrl,name,nameWithOwner,openGraphImageUrl,owner,parent,primaryLanguage,projects,pullRequestTemplates,pullRequests,pushedAt,rebaseMergeAllowed,repositoryTopics,securityPolicyUrl,squashMergeAllowed,sshUrl,stargazerCount,templateRepository,updatedAt,url,usesCustomOpenGraphImage,viewerCanAdminister,viewerDefaultCommitEmail,viewerDefaultMergeMethod,viewerHasStarred,viewerPermission,viewerPossibleCommitEmails,viewerSubscription,visibility,watchers'}
+if '--json' in a:
+ for x in a[a.index('--json')+1].split(','):
+  if x not in known[' '.join(a[:2])].split(','):raise SystemExit('Unknown JSON field: "'+x+'"')
 if a[:2]==['api','graphql'] and d.get('graphql_pages'):
  pages=d['graphql_pages'];o=pages.pop(0);d['graphql_pages']=pages;json.dump(d,open(p,'w'));print(json.dumps(o));sys.exit()
 if a[:2]==['api','graphql']:
@@ -50,6 +56,9 @@ elif a[:2]==['pr','edit']:
  if d.get('fail_edit')==n:raise SystemExit('edit refused')
  d['targeting']=[x for x in d.get('targeting',[]) if x['number']!=n];json.dump(d,open(p,'w'));print('{}');sys.exit()
 elif a[:2]==['pr','view']:
+ if d.get('on_view'):
+  # Once, as if someone moved a ref after the script read it.
+  import subprocess;c=d.pop('on_view');json.dump(d,open(p,'w'));subprocess.run(c,check=True)
  views=d.get('views',[])
  if views: o=views.pop(0);d['views']=views;json.dump(d,open(p,'w'))
  else:o=d.get('pr',{'number':1,'url':'https://github.com/test/repo/pull/1','state':'OPEN','baseRefName':'main'})
@@ -105,13 +114,31 @@ print(json.dumps(o))
         p=self.root/'prs.json';p.write_text(json.dumps(prs));d=self.call('survey',base='main',pull_requests_json=p)
         self.assertLess(d['order'].index(1),d['order'].index(3));self.assertEqual(d['conflicts'][0]['files'],['file [one].txt'])
         self.assertEqual(next(p for p in d['pullRequests'] if p['number']==3)['includesUnready'][0]['number'],4)
-    def test_update_replays_conflict_and_preserves_dirty_tree(self):
+    def test_update_replays_conflict_and_leaves_the_worktree_alone(self):
         h=self.branch('feature','feature');b=self.branch('newbase','newbase')
         self.git('merge','--no-ff','--no-commit',h,ok=False)
         (self.repo/'file [one].txt').write_text('resolved\n');self.git('add','.');self.git('commit','-qm','resolved');r=self.git('rev-parse','HEAD')
         d=self.call('update',head=h,base=b,rehearsed=r);self.assertTrue(d['matches']);self.assertEqual(d['replayed'],['file [one].txt'])
+        self.assertEqual(self.git('rev-list','--parents','-n','1',d['commit']).split()[1:],[h,b]);self.assertEqual(d['tree'],self.git('rev-parse',r+'^{tree}'))
+        self.assertEqual(self.git('log','-1','--format=%B',d['commit']),'Merge the integration base into this pull request')
+        # It checks nothing out, so uncommitted work stays as it was.
         (self.repo/'file [one].txt').write_text('user work\n')
-        d=self.call('update',head=h,base=b,rehearsed=r,ok=False);self.assertIn('uncommitted',d['error']);self.assertEqual((self.repo/'file [one].txt').read_text(),'user work\n')
+        d=self.call('update',head=h,base=b,rehearsed=r);self.assertTrue(d['matches'])
+        self.assertEqual((self.repo/'file [one].txt').read_text(),'user work\n');self.assertEqual(self.git('rev-parse','HEAD'),r)
+    def test_update_compares_every_path_outside_the_conflicts(self):
+        h=self.branch('feature','feature');b=self.branch('newbase','newbase')
+        def step(change):
+            self.git('checkout','-q','--detach',b);self.git('merge','--no-ff','--no-commit',h,ok=False)
+            change();self.git('add','-A');self.git('commit','-qm','step');return self.git('rev-parse','HEAD')
+        def directory():
+            path=self.repo/'file [one].txt';path.unlink();path.mkdir();(path/'resolved').write_text('resolved\n')
+        # A conflicted file may become a directory: everything under it is the step's.
+        d=self.call('update',head=h,base=b,rehearsed=step(directory));self.assertTrue(d['matches']);self.assertEqual(d['replayed'],['file [one].txt'])
+        def outside():
+            (self.repo/'file [one].txt').write_text('resolved\n');(self.repo/'file [one].txt 2').write_text('unrelated\n')
+        # A path no conflict touched cannot come from the step, even one whose name begins with a conflicted path's.
+        d=self.call('update',head=h,base=b,rehearsed=step(outside),ok=False)
+        self.assertFalse(d['matches']);self.assertEqual(d['differences'],['file [one].txt 2']);self.assertNotIn('commit',d)
     def test_update_mismatch_and_bad_source(self):
         h=self.branch('feature','feature')
         d=self.call('update',head=h,base=self.base,rehearsed=self.base,ok=False);self.assertFalse(d['matches'])
@@ -250,12 +277,15 @@ print(json.dumps(o))
         self.env['FIXTURE_REMOTE']=str(remote);self.git('push','-q','origin','main')
         d=self.call('survey',base='main',github_cli=self.gh)
         self.assertEqual(d['order'],[7]);self.assertEqual(d['pullRequests'][0]['unresolvedReviewThreads'],2)
-    def test_land_commit_failure_aborts_own_merge(self):
+    def test_land_leaves_the_worktree_alone_and_runs_no_commit_hook(self):
         h=self.branch('feature','feature');self.local_remote()
         hook=self.repo/'.git/hooks/pre-commit';hook.write_text('#!/bin/sh\nexit 41\n');hook.chmod(0o755)
-        view=dict(state='OPEN',isDraft=False,headRefName='feature',headRefOid=h,baseRefName='main');self.state(pr=view)
-        d=self.call('land',pull_request=1,branch='feature',approved_head=h,updated=h,base_branch='main',expected_base=self.base,rehearsed=h,message='bad hook',timeout_seconds=0,ok=False)
-        self.assertFalse(d['landed']);self.assertFalse((self.repo/'.git/MERGE_HEAD').exists());self.assertEqual(self.git('ls-remote','origin','refs/heads/main').split()[0],self.base)
+        (self.repo/'file [one].txt').write_text('user work\n');self.git('config','commit.cleanup','verbatim')
+        view=dict(state='OPEN',isDraft=False,headRefName='feature',headRefOid=h,baseRefName='main');self.state(views=[view,view],pr=dict(state='MERGED'))
+        d=self.call('land',pull_request=1,branch='feature',approved_head=h,updated=h,base_branch='main',expected_base=self.base,rehearsed=h,message='Merge fixture',timeout_seconds=0,poll_seconds=0)
+        self.assertTrue(d['merged']);self.assertEqual(self.git('ls-remote','origin','refs/heads/main').split()[0],d['mergeCommit'])
+        self.assertEqual(self.git('rev-list','--parents','-n','1',d['mergeCommit']).split()[1:],[self.base,h]);self.assertEqual(self.message(d['mergeCommit']),'Merge fixture')
+        self.assertEqual((self.repo/'file [one].txt').read_text(),'user work\n');self.assertEqual(self.git('rev-parse','HEAD'),h);self.assertFalse((self.repo/'.git/MERGE_HEAD').exists())
     def test_land_wait_failure_is_resumable_without_second_merge(self):
         h=self.branch('feature','feature');self.local_remote()
         view=dict(state='OPEN',isDraft=False,headRefName='feature',headRefOid=h,baseRefName='main');self.state(pr=view)
@@ -346,11 +376,88 @@ print(json.dumps(o))
     def test_partial_graphql_page_is_never_empty_success(self):
         self.github();self.state(graphql_pages=[{'data':{'repository':{'pullRequests':{'nodes':[],'pageInfo':{}}}}}])
         self.call('retarget',branch='feature',base_branch='main',approved='none',ok=False)
-    def test_update_does_not_abandon_existing_merge(self):
+    def test_update_leaves_a_merge_in_progress_alone(self):
         h=self.branch('feature','feature');b=self.branch('newbase','base update');self.git('merge','--no-ff','--no-commit',h,ok=False)
         (self.repo/'file [one].txt').write_text('user resolution');self.git('add','.')
-        self.call('update',head=h,base=b,rehearsed=h,ok=False)
+        self.assertTrue(self.call('update',head=h,base=b,rehearsed=h)['matches'])
         self.assertTrue((self.repo/'.git/MERGE_HEAD').exists());self.assertEqual((self.repo/'file [one].txt').read_text(),'user resolution')
+    def message(self,commit):return self.git('cat-file','commit',commit,ok=False).stdout.split('\n\n',1)[1]
+    def test_update_commit_is_cleaned_up_and_signed_as_git_commit_would(self):
+        h=self.branch('feature','feature');b=self.branch('newbase','newbase')
+        self.git('merge','--no-ff','--no-commit',h,ok=False)
+        (self.repo/'file [one].txt').write_text('resolved\n');self.git('add','.');self.git('commit','-qm','resolved');r=self.git('rev-parse','HEAD')
+        # Each message is checked against what git commit -m makes of it under the same configuration.
+        text='\n# commentary\n  Merge main  \n\n\n; other\n\nfor integration\t'
+        for cleanup,comment in [(None,None),('default',None),('whitespace',None),('scissors',None),('strip',None),('strip',';'),('strip','auto'),('verbatim',None),('Strip',None)]:
+            for key,value in [('commit.cleanup',cleanup),('core.commentChar',comment)]:
+                if value is None:self.git('config','--unset-all',key,ok=False)
+                else:self.git('config',key,value)
+            for message in [text,'',' \n\t\n','# only a comment']:
+                with self.subTest(cleanup=cleanup,comment=comment,message=message):
+                    self.git('checkout','-q','--detach',r);p=self.git('commit','-q','--allow-empty','-m',message,ok=False)
+                    d=self.call('update',head=h,base=b,rehearsed=r,message=message,ok=p.returncode==0)
+                    if p.returncode==0:self.assertEqual(self.message(d['commit']),self.message('HEAD'))
+        for key in ['commit.cleanup','core.commentChar']:self.git('config','--unset-all',key,ok=False)
+        gpg=self.root/'fake gpg';gpg.write_text('#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\nsys.stderr.write("\\n[GNUPG:] SIG_CREATED D 1 8 00 0 0 FIXTURE\\n")\nprint("-----BEGIN PGP SIGNATURE-----\\n\\nfixture\\n-----END PGP SIGNATURE-----")\n');gpg.chmod(0o755)
+        self.git('config','gpg.program',str(gpg));self.git('config','user.signingKey','FIXTURE');self.git('config','commit.gpgSign','true')
+        self.assertIn('\ngpgsig -----BEGIN PGP SIGNATURE-----\n',self.git('cat-file','commit',self.call('update',head=h,base=b,rehearsed=r)['commit']))
+    def test_update_compares_submodules_set_to_be_ignored(self):
+        (self.repo/'.gitmodules').write_text('[submodule "vendor/lib"]\n\tpath = vendor/lib\n\turl = ./lib\n\tignore = all\n')
+        self.git('add','.gitmodules');self.git('update-index','--add','--cacheinfo','160000,'+self.base+',vendor/lib');self.git('commit','-qm','submodule');start=self.git('rev-parse','HEAD')
+        def commit(parent,content):
+            self.git('checkout','-q','--detach',parent);(self.repo/'file [one].txt').write_text(content);self.git('add','file [one].txt');self.git('commit','-qm',content);return self.git('rev-parse','HEAD')
+        def advance():self.git('update-index','--cacheinfo','160000,'+start+',vendor/lib');self.git('commit','-qm','advance');return self.git('rev-parse','HEAD')
+        h=commit(start,'feature\n');b=commit(start,'newbase\n')
+        # The step resolves the conflict and also advances the submodule, which no conflict touched.
+        self.git('merge','--no-ff','--no-commit',h,ok=False);(self.repo/'file [one].txt').write_text('resolved\n');self.git('add','file [one].txt')
+        d=self.call('update',head=h,base=b,rehearsed=advance(),ok=False);self.assertEqual(d['differences'],['vendor/lib']);self.assertNotIn('commit',d)
+        # Already up to date, the head must still match the step exactly.
+        self.git('checkout','-q','--detach',h)
+        d=self.call('update',head=h,base=start,rehearsed=advance(),ok=False);self.assertTrue(d['upToDate']);self.assertEqual(d['differences'],['vendor/lib'])
+    def lfs_history(self):
+        # BA-Skills#76: the base stores textures as plain blobs under an LFS rule, one branch renormalizes them into
+        # pointers, and another branched before it. Git can count every plain texture as changed after a checkout.
+        for key,value in [('process','git-lfs filter-process'),('clean','git-lfs clean -- %f'),('smudge','git-lfs smudge -- %f'),('required','true')]:self.git('config','filter.lfs.'+key,value)
+        textures=self.repo/'textures [plain]';textures.mkdir()
+        for n in range(25):(textures/f'texture {n}.png').write_bytes(os.urandom(2000))
+        self.git('add','.');self.git('commit','-qm','textures')
+        (self.repo/'.gitattributes').write_text('*.png filter=lfs diff=lfs merge=lfs -text\n');self.git('add','.gitattributes');self.git('commit','-qm','LFS takes the textures');plain=self.git('rev-parse','HEAD')
+        # Never commit -a here: Git may already count the plain textures as changed.
+        self.git('checkout','-qb','feature');(self.repo/'file [one].txt').write_text('feature\n');self.git('add','file [one].txt');self.git('commit','-qm','feature');feature=self.git('rev-parse','HEAD')
+        self.git('checkout','-qb','renormalize',plain);self.git('add','--renormalize','.');self.git('commit','-qm','renormalize');renormalized=self.git('rev-parse','HEAD')
+        self.assertTrue(self.git('cat-file','-p',renormalized+':textures [plain]/texture 0.png').startswith('version https://git-lfs'))
+        return plain,feature,renormalized
+    @unittest.skipUnless(shutil.which('git-lfs'),'git-lfs is not installed')
+    def test_update_and_land_files_moved_into_lfs(self):
+        # Neither checks anything out, so the plain textures can't stop their merges.
+        plain,feature,renormalized=self.lfs_history()
+        step1=self.git('commit-tree',renormalized+'^{tree}','-p',plain,'-p',renormalized,'-m','step 1')
+        step2=self.git('commit-tree',self.git('merge-tree','--write-tree',step1,feature).split()[0],'-p',step1,'-p',feature,'-m','step 2')
+        self.git('branch','-f','main',plain);self.local_remote();self.git('push','-q','origin','renormalize')
+        here=self.git('rev-parse','HEAD');common=dict(base_branch='main',timeout_seconds=0,poll_seconds=0)
+        def view(branch,head):return dict(state='OPEN',isDraft=False,headRefName=branch,headRefOid=head,baseRefName='main')
+        self.state(views=[view('renormalize',renormalized)]*2,pr=dict(state='MERGED'))
+        d=self.call('land',pull_request=1,branch='renormalize',approved_head=renormalized,updated=renormalized,expected_base=plain,rehearsed=step1,message='Merge renormalize',**common)
+        self.assertTrue(d['merged']);landed=d['mergeCommit']
+        d=self.call('update',head=feature,base=landed,rehearsed=step2);self.assertTrue(d['matches']);self.assertFalse(d['upToDate']);updated=d['commit']
+        self.state(views=[view('feature',feature),view('feature',updated)],pr=dict(state='MERGED'))
+        d=self.call('land',pull_request=2,branch='feature',approved_head=feature,updated=updated,expected_base=landed,rehearsed=step2,message='Merge feature',**common)
+        self.assertTrue(d['merged']);self.assertTrue(d['branchPushed'])
+        main=self.git('ls-remote','origin','refs/heads/main').split()[0];self.assertEqual(main,d['mergeCommit'])
+        self.assertEqual(self.git('rev-parse',main+'^{tree}'),self.git('rev-parse',step2+'^{tree}'));self.assertEqual(self.git('rev-parse','HEAD'),here)
+    @unittest.skipUnless(shutil.which('git-lfs'),'git-lfs is not installed')
+    def test_documented_lfs_refresh_lets_the_rehearsal_merge(self):
+        plain,feature,renormalized=self.lfs_history();self.git('checkout','-q','--detach',plain)
+        # Older mtimes than the index records make Git re-check every texture, as a racy checkout does.
+        textures=sorted((self.repo/'textures [plain]').iterdir());old=time.time()-3600
+        for path in textures:os.utime(path,(old,old))
+        self.assertEqual(len(self.git('status','--porcelain').splitlines()),25)
+        p=self.git('merge','--no-ff','--no-commit',renormalized,ok=False);self.assertNotEqual(p.returncode,0);self.assertIn('would be overwritten',p.stderr)
+        skill=(ROOT/'skills/ba-integrate/SKILL.md').read_text()
+        command=next(block for block in re.findall(r'```bash\n(.*?)```',skill,re.S) if 'update-index' in block).replace('<rehearsal>',shlex.quote(str(self.repo)))
+        p=subprocess.run(['bash','-c',command],env=self.env,capture_output=True,text=True);self.assertEqual(p.returncode,0,p.stderr)
+        self.assertEqual(self.git('status','--porcelain'),'')
+        self.git('merge','--no-ff','-m','step 1',renormalized);self.assertEqual(self.git('rev-parse','HEAD^{tree}'),self.git('rev-parse',renormalized+'^{tree}'))
     def test_update_replays_kept_file_and_deleted_file(self):
         h=self.branch('feature','feature');self.git('checkout','-qb','deletedbase',self.base);self.git('rm','--','file [one].txt');self.git('commit','-qm','delete');b=self.git('rev-parse','HEAD')
         self.git('merge','--no-ff','--no-commit',h,ok=False);self.git('rm','--force','--','file [one].txt');self.git('commit','-qm','resolve deletion');deleted=self.git('rev-parse','HEAD')
@@ -378,11 +485,11 @@ print(json.dumps(o))
         return h,b,u,remote,dict(pull_request=1,branch='feature',approved_head=h,updated=u,base_branch='main',expected_base=b,rehearsed=u,message='fixture',timeout_seconds=0,poll_seconds=0)
     def test_base_moved_back_after_check_is_not_restored(self):
         h,b,u,remote,args=self.prepared_landing()
-        hook=self.repo/'.git/hooks/pre-commit';hook.write_text('#!/usr/bin/env python3\nimport subprocess\nsubprocess.run('+repr(['git','--git-dir',str(remote),'update-ref','refs/heads/main',self.base])+',check=True)\n');hook.chmod(0o755)
+        self.state(**json.loads(self.data.read_text()),on_view=['git','--git-dir',str(remote),'update-ref','refs/heads/main',self.base])
         d=self.call('land',ok=False,**args);self.assertTrue(d['branchPushed']);self.assertFalse(d['landed']);self.assertEqual(self.git('ls-remote','origin','refs/heads/main').split()[0],self.base);self.assertEqual(self.git('ls-remote','origin','refs/heads/feature').split()[0],u)
     def test_branch_vanished_after_check_is_not_recreated(self):
         h,b,u,remote,args=self.prepared_landing()
-        hook=self.repo/'.git/hooks/pre-commit';hook.write_text('#!/usr/bin/env python3\nimport subprocess\nsubprocess.run('+repr(['git','--git-dir',str(remote),'update-ref','-d','refs/heads/feature'])+',check=True)\n');hook.chmod(0o755)
+        self.state(**json.loads(self.data.read_text()),on_view=['git','--git-dir',str(remote),'update-ref','-d','refs/heads/feature'])
         d=self.call('land',ok=False,**args);self.assertFalse(d['branchPushed']);self.assertFalse(d['landed']);self.assertEqual(self.git('ls-remote','origin','refs/heads/feature'),'');self.assertEqual(self.git('ls-remote','origin','refs/heads/main').split()[0],b)
     def test_partial_retarget_failure_reports_completed_edits(self):
         self.github();self.state(targeting=[dict(number=n,title=str(n),url='url',isDraft=False) for n in [1,2]],fail_edit=2)

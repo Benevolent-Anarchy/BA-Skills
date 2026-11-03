@@ -17,8 +17,8 @@ def redact(text):
     return re.sub(r'([A-Za-z][A-Za-z0-9+.-]*://)[^\s/]+@', r'\1***@', str(text))
 
 
-def run(args, cwd, allowed=(0,)):
-    p = subprocess.run(args, cwd=cwd, text=True, encoding='utf-8', errors='replace', capture_output=True)
+def run(args, cwd, allowed=(0,), input=None):
+    p = subprocess.run(args, cwd=cwd, input=input, text=True, encoding='utf-8', errors='replace', capture_output=True)
     if p.returncode not in allowed:
         raise RuntimeError(f'{args[0]} {" ".join(args[1:])} failed ({p.returncode}): {p.stdout} {p.stderr}')
     return p
@@ -28,8 +28,8 @@ class Repo:
     def __init__(self, path):
         self.path = str(pathlib.Path(path).resolve(strict=True))
         self.git('rev-parse', '--git-dir')
-    def git(self, *args, allowed=(0,)):
-        return run(['git', '--literal-pathspecs', '-c', 'core.quotePath=false', '-C', self.path, *args], self.path, allowed)
+    def git(self, *args, allowed=(0,), input=None):
+        return run(['git', '--literal-pathspecs', '-c', 'core.quotePath=false', '-C', self.path, *args], self.path, allowed, input)
     def text(self, *args):
         return self.git(*args).stdout.strip()
     def paths(self, *args):
@@ -43,12 +43,28 @@ class Repo:
         return self.git('cat-file','-e',sha+'^{commit}',allowed=(0,1,128)).returncode == 0
     def ancestor(self, a, b):
         return self.git('merge-base','--is-ancestor',a,b,allowed=(0,1)).returncode == 0
-    def merging(self):
-        return self.git('rev-parse','--quiet','--verify','MERGE_HEAD',allowed=(0,1)).returncode == 0
-    def clean(self):
-        return not self.git('status','--porcelain','--untracked-files=no').stdout.strip() and not self.merging()
     def tree(self, sha):
         return self.text('rev-parse',sha+'^{tree}')
+    def differing(self, a, b):
+        # Every path whose entry differs, including submodules set to be ignored.
+        return self.paths('diff-tree','-r','--no-renames','--ignore-submodules=none','--name-only',a,b)
+    def commit(self, tree, parents, message, from_file=False):
+        # Made in the object store, with no worktree or index, so no commit hook runs. The message is cleaned
+        # up as git commit -m (or -F, from_file) cleans one under commit.cleanup, and signed when commit.gpgSign asks.
+        def config(*args):return self.git('config',*args,allowed=(0,1)).stdout.splitlines()
+        mode=(config('--get','commit.cleanup') or ['default'])[-1]
+        if mode not in ('default','whitespace','scissors','strip','verbatim'):raise RuntimeError(f'Invalid commit.cleanup {mode}; nothing was changed.')
+        if mode=='verbatim':
+            if message and not message.endswith('\n') and not from_file:message+='\n'
+        else:
+            # An automatic comment character is one that begins no line of the message, so nothing is a comment.
+            automatic=(config('--get-regexp',r'^core\.comment(char|string)$') or [''])[-1].endswith(' auto')
+            message=self.git('stripspace',*(['--strip-comments'] if mode=='strip' and not automatic else []),input=message).stdout
+        if not message:raise RuntimeError('The commit message is empty; nothing was changed.')
+        sign=self.git('config','--type=bool','--get','commit.gpgSign',allowed=(0,1)).stdout.strip()=='true'
+        args=['commit-tree',*(['-S'] if sign else []),tree]
+        for parent in parents:args+=['-p',parent]
+        return self.git(*args,'-F','-',input=message).stdout.strip()
     def remote(self, remote, branch):
         # Validate names before constructing refspecs or lease expressions.
         self.git('check-ref-format','refs/heads/'+branch)
@@ -123,27 +139,22 @@ class GitHub:
 def update(a,r,out):
     h=r.resolve(a.head,'Head');b=r.resolve(a.base,'Base');s=r.resolve(a.rehearsed,'Rehearsed step')
     out.update(head=h,base=b,rehearsed=s)
-    if not r.clean():raise RuntimeError('The integration worktree has uncommitted changes or a merge in progress; nothing was changed.')
-    started=False
-    try:
-        r.git('checkout','--quiet','--detach',h)
-        up=r.ancestor(b,h);replayed=[]
-        if not up:
-            started=True;r.git('merge','--no-ff','--no-commit','--no-edit',b,allowed=(0,1))
-            replayed=sorted(set(r.paths('diff','--name-only','--diff-filter=U')))
-            for path in replayed:
-                kept=r.git('cat-file','-e',s+':'+path,allowed=(0,1,128)).returncode==0
-                if kept:r.git('checkout',s,'--',path)
-                else:r.git('rm','--quiet','--force','--',path)
-            if r.paths('diff','--name-only','--diff-filter=U'):raise RuntimeError('Paths still unmerged after replaying the rehearsal.')
-            if r.merging():r.git('commit','--quiet','-m',a.message)
-        out.update(commit=r.text('rev-parse','HEAD'),tree=r.tree('HEAD'),rehearsedTree=r.tree(s),upToDate=up,replayed=replayed)
-        out['matches']=out['tree']==out['rehearsedTree']
-        if not out['matches']:
-            out['differences']=r.paths('diff','--name-only',s,'HEAD')
-            raise RuntimeError('The updated head differs from the rehearsed step in: '+', '.join(out['differences']))
-    finally:
-        if started and r.merging():r.git('merge','--abort')
+    # Merged in the object store, never in a worktree: a checkout of a commit that stores files as plain blobs
+    # under an LFS rule can show them all as changed, and git merge then refuses (BA-Skills#76).
+    up=r.ancestor(b,h);replayed=[];commit=None
+    if up:commit=h;differences=r.differing(h,s)
+    else:
+        p=r.git('merge-tree','--write-tree','--name-only','--no-messages','-z',h,b,allowed=(0,1))
+        merged,*conflicted=p.stdout.split('\0')
+        if p.returncode:replayed=sorted(set(x for x in conflicted if x))
+        # Each conflicted path takes the step's version, or goes where the step removed it; every other path must already match the step.
+        differences=[x for x in r.differing(merged,s) if not any(x==y or x.startswith(y+'/') for y in replayed)]
+        if not differences:commit=r.commit(r.tree(s),[h,b],a.message)
+    out.update(rehearsedTree=r.tree(s),upToDate=up,replayed=replayed,matches=not differences)
+    if commit:out.update(commit=commit,tree=r.tree(commit))
+    if differences:
+        out['differences']=differences
+        raise RuntimeError('The updated head differs from the rehearsed step in: '+', '.join(differences))
 
 
 def conflicts(r,left,right):
@@ -298,40 +309,32 @@ def land(a,r,out):
     if remote_base and remote_base!=expected and r.exists(remote_base):
         parents=r.text('rev-list','--parents','-n','1',remote_base).split()[1:]
         resumed=parents==[expected,updated] and r.tree(remote_base)==tree
-    started=False
-    try:
-        if resumed:
-            out.update(resumed=True,landed=True,mergeCommit=remote_base,branchPushed=r.remote(a.remote,a.branch)==updated)
-        else:
-            if remote_base!=expected:raise RuntimeError('Base branch has moved; nothing was pushed.')
-            remote_branch=r.remote(a.remote,a.branch)
-            if remote_branch not in (approved,updated):raise RuntimeError('Pull request branch has moved; nothing was pushed.')
-            ready([approved,updated],'before anything was pushed')
-            if not r.clean():raise RuntimeError('The integration worktree has uncommitted changes or a merge in progress. Nothing was pushed.')
-            r.git('checkout','--quiet','--detach',expected);started=True
-            r.git('merge','--no-ff','--no-commit',updated)
-            with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8') as f:
-                f.write(a.message);f.flush();r.git('commit','--quiet','-F',f.name)
-            merge=r.text('rev-parse','HEAD')
-            if r.tree(merge)!=tree:raise RuntimeError('The merge commit differs from the rehearsed step. Nothing was pushed.')
-            if remote_branch!=updated:push(updated,a.branch,remote_branch);out['branchPushed']=True
-            ready([updated],'after the branch push, before landing; base unchanged')
-            push(merge,a.base_branch,expected);out.update(landed=True,mergeCommit=merge)
-        deadline=time.monotonic()+a.timeout_seconds;last_error=None;p=None
-        while True:
-            try:p=view()
-            except (RuntimeError,ValueError) as e:last_error=str(e);p=None
-            if p and p.get('state')=='MERGED':break
-            if time.monotonic()>=deadline:break
-            time.sleep(a.poll_seconds)
-        out['state']=p.get('state') if p else None
-        if not p or p.get('state')!='MERGED':raise RuntimeError('Landed on the base, but GitHub has not confirmed MERGED. Do not delete its branch or start the next step. Run again with the same arguments to resume waiting. '+(last_error or ''))
-        out['merged']=True
-        try:closing=gh.closing(here,a.pull_request)
-        except (RuntimeError,ValueError,KeyError,TypeError) as e:raise RuntimeError('GitHub reports the pull request MERGED, but its closing issues could not be read; check-issues reads them again. '+str(e))
-        out['closingIssues']=[dict(url=x['url'],repository=x['repository']['nameWithOwner'],number=x['number']) for x in closing]
-    finally:
-        if started and r.merging():r.git('merge','--abort')
+    if resumed:
+        out.update(resumed=True,landed=True,mergeCommit=remote_base,branchPushed=r.remote(a.remote,a.branch)==updated)
+    else:
+        if remote_base!=expected:raise RuntimeError('Base branch has moved; nothing was pushed.')
+        remote_branch=r.remote(a.remote,a.branch)
+        if remote_branch not in (approved,updated):raise RuntimeError('Pull request branch has moved; nothing was pushed.')
+        ready([approved,updated],'before anything was pushed')
+        # The expected base is in the update's history, so merging the update into it gives the update's tree,
+        # which matched the rehearsed step above. Made without a worktree, as update's merge is (BA-Skills#76).
+        merge=r.commit(tree,[expected,updated],a.message,from_file=True)
+        if remote_branch!=updated:push(updated,a.branch,remote_branch);out['branchPushed']=True
+        ready([updated],'after the branch push, before landing; base unchanged')
+        push(merge,a.base_branch,expected);out.update(landed=True,mergeCommit=merge)
+    deadline=time.monotonic()+a.timeout_seconds;last_error=None;p=None
+    while True:
+        try:p=view()
+        except (RuntimeError,ValueError) as e:last_error=str(e);p=None
+        if p and p.get('state')=='MERGED':break
+        if time.monotonic()>=deadline:break
+        time.sleep(a.poll_seconds)
+    out['state']=p.get('state') if p else None
+    if not p or p.get('state')!='MERGED':raise RuntimeError('Landed on the base, but GitHub has not confirmed MERGED. Do not delete its branch or start the next step. Run again with the same arguments to resume waiting. '+(last_error or ''))
+    out['merged']=True
+    try:closing=gh.closing(here,a.pull_request)
+    except (RuntimeError,ValueError,KeyError,TypeError) as e:raise RuntimeError('GitHub reports the pull request MERGED, but its closing issues could not be read; check-issues reads them again. '+str(e))
+    out['closingIssues']=[dict(url=x['url'],repository=x['repository']['nameWithOwner'],number=x['number']) for x in closing]
 
 
 def timestamp(value):
@@ -407,7 +410,7 @@ def check_issues(a,r,out):
     ago=int((dt.datetime.now(dt.timezone.utc)-merged_at).total_seconds()) if merged_at else None
     for e in expected.values():
         e['linkedBy']='manual link' if e['manualLink'] else ('description keyword' if e['linked'] else ('commit keyword' if e['commits'] else 'merge commit keyword'))
-        issue=gh.call('issue','view',e['url'],'--json','state,stateReason,closedAt');e.update(state=issue['state'],closedAt=issue.get('closedAt'),findings=[]);findings=e['findings']
+        issue=gh.call('issue','view',e['url'],'--json','state,closedAt');e.update(state=issue['state'],closedAt=issue.get('closedAt'),findings=[]);findings=e['findings']
         if issue['state']=='CLOSED':continue
         if pr['state']!='MERGED':findings.append(f"#{a.pull_request} has not merged; it is {pr['state']}.")
         elif pr['baseRefName']!=default:findings.append(f"#{a.pull_request} merged into {pr['baseRefName']}, not the default branch {default}, and GitHub closes issues only for pull requests merged into the default branch.")
