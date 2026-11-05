@@ -1,9 +1,13 @@
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 sys.dont_write_bytecode=True
 ROOT = Path(__file__).resolve().parents[2]
 GATE = ROOT/'skills/ba-bootstrap/assets/project/tools/verify_linux.py'
@@ -63,8 +67,192 @@ class NativeGateStages(unittest.TestCase):
                 binary=self.root/'src-tauri/target/release/test-app'; binary.parent.mkdir(parents=True,exist_ok=True); binary.write_bytes(b'fixture app binary')
             return ''
         result=self.g.verify(self.root,True,runner); self.assertTrue(result['Passed'],result)
-        self.assertEqual([s['Name'] for s in result['Stages']],config['requiredChecks'])
+        self.assertEqual([s['Name'] for s in result['Stages']],['documentation','git-lfs-pointers',*config['requiredChecks'][1:]])
+        self.assertEqual(result['Stages'][1]['NotChecked'],'this is not a Git checkout')
         output['empty']=True; result=self.g.verify(self.root,True,runner); self.assertFalse(result['Passed']); self.assertTrue(any(s['Name']=='frontend-tests' and not s['Passed'] for s in result['Stages']))
         output.update(empty=False,binary=False); (self.root/'src-tauri/target/release/test-app').unlink(); result=self.g.verify(self.root,True,runner); self.assertFalse(result['Passed']); self.assertTrue(any('application binary' in d for d in result['Diagnostics']))
+
+LFS_FILTER=[('filter.lfs.clean','git-lfs clean -- %f'),('filter.lfs.smudge','git-lfs smudge -- %f'),('filter.lfs.process','git-lfs filter-process'),('filter.lfs.required','true')]
+LFS_RULE='*.png filter=lfs diff=lfs merge=lfs -text\n'
+PLAIN=Path('assets/plaster wall/base colour.png')
+NEEDS_GIT_LFS=unittest.skipUnless(shutil.which('git-lfs'),'git-lfs is not installed, so the fixture cannot make pointers')
+class GitLfsPointers(unittest.TestCase):
+    """The gate checks LFS pointers at HEAD only in a Git checkout of the project that has a committed filter=lfs rule."""
+    setUpClass=GateTests.__dict__['setUpClass']
+    def setUp(self):
+        GateTests.setUp(self)
+        environment={'GIT_CONFIG_GLOBAL':os.devnull,'GIT_CONFIG_NOSYSTEM':'1','GIT_ATTR_NOSYSTEM':'1','XDG_CONFIG_HOME':str(self.root/'no config'),'GIT_AUTHOR_NAME':'Gate','GIT_AUTHOR_EMAIL':'gate@example.invalid','GIT_COMMITTER_NAME':'Gate','GIT_COMMITTER_EMAIL':'gate@example.invalid'}
+        patcher=mock.patch.dict(os.environ,environment); patcher.start(); self.addCleanup(patcher.stop)
+        self.project=self.root/'project ü'; self.project.mkdir()
+    def git(self,*args,at=None):
+        return subprocess.run(['git','-C',str(at or self.project),*args],check=True,capture_output=True,text=True).stdout
+    def blob(self,path):
+        return subprocess.run(['git','-C',str(self.project),'cat-file','blob','HEAD:'+Path(path).as_posix()],check=True,capture_output=True).stdout
+    def write(self,path,data):
+        path=self.project/path; path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(data) if isinstance(data,bytes) else path.write_text(data)
+    def checkout(self,lfs=True):
+        self.git('init','-q','--initial-branch=main')
+        for key,value in LFS_FILTER if lfs else []: self.git('config',key,value)
+    def commit(self,message,*paths):
+        self.git('add','-A','--',*paths); self.git('commit','-q','-m',message)
+    def only(self,*commands):
+        # PATH and Git's exec path hold only the named commands, so a missing git-lfs or Git is missing for real.
+        tools=Path(tempfile.mkdtemp(dir=self.root,prefix='only '))
+        for name in commands: (tools/name).symlink_to(shutil.which(name))
+        return mock.patch.dict(os.environ,{'PATH':str(tools),'GIT_EXEC_PATH':str(tools)})
+    def plain_file_under_rule(self,attributes='.gitattributes',rule=LFS_RULE,data=b'\x89PNG plain texture'):
+        # A plain file committed before its rule, as a commit made without Git LFS stores it.
+        # Only the rule is staged after it: staging the texture again would store a pointer.
+        self.checkout(); self.write(PLAIN,data); self.commit('Add a texture')
+        self.write(attributes,rule); self.commit('Send textures through Git LFS',attributes)
+        self.assertEqual(self.blob(PLAIN),data)
+    def fails_naming(self,*paths):
+        with self.assertRaises(ValueError) as caught: self.g.lfs_pointers(self.project)
+        message=str(caught.exception)
+        self.assertIn('committed at HEAD as plain files rather than LFS pointers',message)
+        for path in paths: self.assertIn('\n'+Path(path).as_posix()+'\n',message)
+        self.assertIn('git add --renormalize',message)
+        return message
+
+    def test_project_that_is_not_its_own_git_checkout_is_not_checked(self):
+        self.assertEqual(self.g.lfs_pointers(self.project),'this is not a Git checkout')
+        # A copy inside another checkout, such as the selftest's, is still not one.
+        self.git('init','-q',at=self.root); self.write('.gitattributes',LFS_RULE); self.write(PLAIN,b'plain')
+        self.git('add','-A',at=self.root); self.git('commit','-q','-m','Outer',at=self.root)
+        self.assertEqual(self.g.lfs_pointers(self.project),'this is not a Git checkout')
+    def test_checkout_with_no_commit_yet_is_not_checked(self):
+        # Bootstrap runs the gate again on a staging copy it has initialised but not committed.
+        self.checkout(); self.write('.gitattributes',LFS_RULE)
+        self.assertEqual(self.g.lfs_pointers(self.project),'there is no commit yet')
+    def test_checkout_without_a_committed_lfs_rule_is_not_checked(self):
+        self.checkout(lfs=False)
+        self.write('.gitattributes','* text=auto eol=lf\n*.png binary\n# *.png filter=lfs diff=lfs merge=lfs -text\n  # *.jpg filter=lfs\nfilter=lfs\n')
+        self.write(PLAIN,b'plain'); self.commit('Add a texture')
+        # A rule not yet committed is not checked: only commits are.
+        self.write('assets/.gitattributes',LFS_RULE)
+        with self.only('git'):
+            self.assertEqual(self.g.lfs_pointers(self.project),'no committed .gitattributes sends files through Git LFS')
+    @NEEDS_GIT_LFS
+    def test_plain_file_git_lfs_should_hold_fails_naming_it(self):
+        cases={'top-level rule':('.gitattributes',LFS_RULE,b'\x89PNG plain texture'),
+               # git lfs fsck --pointers (git-lfs 3.8.1) misses this one: the rule's folder holds the file only in a subfolder.
+               'rule in a parent folder':('assets/.gitattributes',LFS_RULE,b'\x89PNG plain texture'),
+               'macro':('.gitattributes','[attr]texture filter=lfs diff=lfs merge=lfs -text\n*.png texture\n',b'\x89PNG plain texture'),
+               'quoted pattern':('.gitattributes','"assets/plaster wall/*.png" filter=lfs diff=lfs merge=lfs -text\n',b'\x89PNG plain texture'),
+               'file too large to be a pointer':('.gitattributes',LFS_RULE,b'\x89PNG'+bytes(4096)),
+               'pointer cut short':('.gitattributes',LFS_RULE,b'version https://git-lfs.github.com/spec/v1\noid sha256:'+b'0'*64+b'\n'),
+               'pointer with more after it':('.gitattributes',LFS_RULE,b'version https://git-lfs.github.com/spec/v1\noid sha256:'+b'0'*64+b'\nsize 12\nmore\n')}
+        for case,(attributes,rule,data) in cases.items():
+            with self.subTest(case):
+                shutil.rmtree(self.project); self.project.mkdir()
+                self.plain_file_under_rule(attributes,rule,data); self.fails_naming(PLAIN)
+    @NEEDS_GIT_LFS
+    def test_files_committed_as_pointers_pass(self):
+        self.checkout(); self.write('.gitattributes',LFS_RULE); self.write(PLAIN,b'\x89PNG texture')
+        # An empty file stays empty, and Git runs no filter on a symbolic link.
+        self.write('assets/empty.png',b''); (self.project/'assets/link.png').symlink_to('plaster wall/base colour.png')
+        self.commit('Add textures through Git LFS')
+        self.assertTrue(self.blob(PLAIN).startswith(b'version https://git-lfs.github.com/spec/v1\n'))
+        self.assertEqual(self.blob('assets/empty.png'),b'')
+        self.assertIsNone(self.g.lfs_pointers(self.project))
+        # Renormalizing in a new commit is the remedy the failure names.
+        shutil.rmtree(self.project); self.project.mkdir(); self.plain_file_under_rule()
+        self.git('add','--renormalize','.'); self.git('commit','-q','-m','Store the texture as a pointer')
+        self.assertIsNone(self.g.lfs_pointers(self.project))
+    @NEEDS_GIT_LFS
+    def test_names_every_plain_file_and_needs_no_git_lfs(self):
+        self.checkout(); self.write('assets/a.png',b'plain a'); self.write('assets/sub/b.png',b'plain b'); self.write('kept.png',b'plain, but no rule sends it')
+        self.commit('Add textures'); self.write('assets/.gitattributes',LFS_RULE); self.commit('Send textures through Git LFS','assets/.gitattributes')
+        self.write('assets/c.png',b'\x89PNG texture'); self.commit('Add a texture through Git LFS','assets/c.png')
+        with self.only('git'):
+            message=self.fails_naming('assets/a.png','assets/sub/b.png')
+            self.assertIn('2 file(s)',message); self.assertNotIn('kept.png',message); self.assertNotIn('assets/c.png',message)
+        # The rules at HEAD decide, not the working tree's.
+        self.write('assets/.gitattributes','')
+        with self.only('git'): self.fails_naming('assets/a.png','assets/sub/b.png')
+        with self.subTest('Git missing'), self.only():
+            with self.assertRaisesRegex(ValueError,'Git is not installed'): self.g.lfs_pointers(self.project)
+    @NEEDS_GIT_LFS
+    def test_global_attributes_do_not_count_but_the_checkouts_own_do(self):
+        self.checkout(); self.write('.gitattributes',LFS_RULE); self.write(PLAIN,b'\x89PNG texture'); self.write('notes.txt',b'plain notes')
+        self.commit('Add a texture through Git LFS, and notes')
+        # A user's global attributes file is not the project's, so it does not count.
+        config=self.root/'config'; (config/'git').mkdir(parents=True); (config/'git/attributes').write_text('*.txt filter=lfs diff=lfs merge=lfs -text\n')
+        with mock.patch.dict(os.environ,{'XDG_CONFIG_HOME':str(config)}):
+            self.assertIsNone(self.g.lfs_pointers(self.project))
+        # The checkout's own .git/info/attributes does, as Git applies it on commit there.
+        (self.project/'.git/info').mkdir(exist_ok=True); (self.project/'.git/info/attributes').write_text('*.txt filter=lfs diff=lfs merge=lfs -text\n')
+        self.fails_naming('notes.txt')
+    def test_pointer_is_what_git_lfs_fsck_accepts(self):
+        oid=b'oid sha256:'+b'a'*64+b'\n'; version=b'version https://git-lfs.github.com/spec/v1\n'
+        def ext(key): return key+b' sha256:'+b'b'*64+b'\n'
+        cases={'canonical':(version+oid+b'size 12\n',True),
+               'empty file':(b'',True),
+               'extension name with a hyphen':(version+ext(b'ext-0-foo-bar')+oid+b'size 12\n',True),
+               'extensions in rising priority':(version+ext(b'ext-0-a')+ext(b'ext-1-b')+oid+b'size 12\n',True),
+               'largest size':(version+oid+b'size 9223372036854775807\n',True),
+               'extensions out of order':(version+ext(b'ext-1-b')+ext(b'ext-0-a')+oid+b'size 12\n',False),
+               'two extensions sharing a priority':(version+ext(b'ext-0-a')+ext(b'ext-0-b')+oid+b'size 12\n',False),
+               'two-digit priority':(version+ext(b'ext-10-a')+oid+b'size 12\n',False),
+               'extension name without a word character first':(version+ext(b'ext-0--a')+oid+b'size 12\n',False),
+               'size too large':(version+oid+b'size 9223372036854775808\n',False),
+               'size zero':(version+oid+b'size 0\n',False),
+               'size with a leading zero':(version+oid+b'size 012\n',False),
+               'size with a sign':(version+oid+b'size +12\n',False),
+               'uppercase object id':(version+b'oid sha256:'+b'A'*64+b'\n'+b'size 12\n',False),
+               'carriage returns':((version+oid+b'size 12\n').replace(b'\n',b'\r\n'),False),
+               'trailing space':(version+oid+b'size 12 \n',False),
+               'older version name':(b'version https://hawser.github.com/spec/v1\n'+oid+b'size 12\n',False),
+               'no size':(version+oid,False),
+               'extra line':(version+oid+b'size 12\nmore 1\n',False),
+               'plain bytes':(b'\x89PNG texture',False),
+               # git-lfs reads no pointer from a blob of 1024 bytes or more, however well formed.
+               'canonical but 1024 bytes or more':(version+ext(b'ext-0-'+b'a'*900)+oid+b'size 12\n',False)}
+        lfs=shutil.which('git-lfs')
+        for case,(data,expected) in cases.items():
+            with self.subTest(case):
+                self.assertEqual(self.g.lfs_pointer(data),expected)
+                # Where git-lfs is installed, it must agree: its strict check is what fsck --pointers applies.
+                if lfs: self.assertEqual(subprocess.run([lfs,'pointer','--check','--strict','--stdin'],input=data,capture_output=True).returncode==0,expected)
+    @NEEDS_GIT_LFS
+    def test_names_read_as_bytes(self):
+        # Text mode would turn the carriage return into a line feed, and could not read the byte that is not UTF-8.
+        carriage=Path('assets/a\r.png'); undecodable=Path(os.fsdecode(b'assets/\xff.png'))
+        self.checkout(); self.write(carriage,b'plain a'); self.write(undecodable,b'plain b'); self.commit('Add textures')
+        self.write('.gitattributes','"assets/a\\r.png" filter=lfs diff=lfs merge=lfs -text\n"assets/\\377.png" filter=lfs diff=lfs merge=lfs -text\n')
+        self.commit('Send textures through Git LFS','.gitattributes')
+        message=self.fails_naming()
+        self.assertIn('2 file(s)',message); self.assertIn('\n"assets/a\\r.png"\n',message); self.assertIn('\n"assets/\\udcff.png"\n',message)
+    @NEEDS_GIT_LFS
+    def test_names_every_plain_file_however_many(self):
+        self.checkout(); names=[f'assets/{n:02}.png' for n in range(25)]
+        for name in names: self.write(name,b'plain '+name.encode())
+        self.commit('Add textures'); self.write('.gitattributes',LFS_RULE); self.commit('Send textures through Git LFS','.gitattributes')
+        self.assertIn('25 file(s)',self.fails_naming(*names))
+    def test_checkout_git_cannot_read_fails(self):
+        self.write('.git','gitdir: '+str(self.root/'missing')+'\n')
+        with self.assertRaisesRegex(ValueError,'Git cannot read the checkout'): self.g.lfs_pointers(self.project)
+    @NEEDS_GIT_LFS
+    def test_gate_reports_whether_it_checked(self):
+        tools=self.project/'tools'; tools.mkdir()
+        for name in ('verify_linux.py','process_linux.py'): shutil.copy2(GATE.parent/name,tools/name)
+        shutil.copytree(GATE.parent/'_vendor',tools/'_vendor',ignore=shutil.ignore_patterns('__pycache__'))
+        self.write('tools/verify.json',json.dumps({'schemaVersion':1,'preset':'foundation','requiredChecks':['documentation']}))
+        for name in ('design','decisions','judgements'):
+            (self.project/'docs'/name).mkdir(parents=True); self.write('docs/'+name.upper()+'.md','# Index\n\n## Index\n')
+        def gate():
+            return subprocess.run([sys.executable,'-B',str(tools/'verify_linux.py')],capture_output=True,text=True)
+        ran=gate(); self.assertEqual(ran.returncode,0,ran.stdout+ran.stderr)
+        self.assertIn('git-lfs-pointers: not checked, as this is not a Git checkout\n',ran.stdout)
+        self.plain_file_under_rule()
+        ran=gate(); self.assertEqual(ran.returncode,1,ran.stdout+ran.stderr)
+        self.assertIn('git-lfs-pointers: FAILED\n',ran.stdout); self.assertIn(PLAIN.as_posix(),ran.stdout)
+        result=self.g.verify(self.project)
+        self.assertFalse(result['Passed']); self.assertEqual([s['Name'] for s in result['Stages']],['documentation','git-lfs-pointers'])
+        self.assertTrue(result['Stages'][0]['Passed'],result)
+        self.git('add','--renormalize','.'); self.git('commit','-q','-m','Store the texture as a pointer')
+        ran=gate(); self.assertEqual(ran.returncode,0,ran.stdout+ran.stderr)
+        self.assertIn('git-lfs-pointers: passed\n',ran.stdout)
 
 if __name__=='__main__': unittest.main()

@@ -387,6 +387,87 @@ def npm_lock(root):
     for key in ('dependencies','devDependencies'):
         if app.get(key,{})!=package.get(key,{}): raise ValueError('npm lockfile '+key+' is stale')
 
+def lfs_rule(text):
+    for line in text.splitlines():
+        fields=line.split()
+        if fields and not fields[0].startswith('#') and 'filter=lfs' in fields[1:]: return True
+    return False
+
+# What git lfs fsck --pointers accepts, as git-lfs 3.8.1's lfs/pointer.go reads it: a
+# pointer under 1024 bytes that parses and that git-lfs writes back byte for byte, its
+# canonical form. An empty file stands for itself. Extensions come in rising priority,
+# one digit each; a name starts with a word character and runs to the space.
+LFS_POINTER=re.compile(rb'version https://git-lfs\.github\.com/spec/v1\n((?:ext-[0-9]-\w[^ \n]* sha256:[0-9a-f]{64}\n)*)oid sha256:[0-9a-f]{64}\nsize ([1-9][0-9]*)\n')
+def lfs_pointer(data):
+    if not data: return True
+    match=LFS_POINTER.fullmatch(data) if len(data)<1024 else None
+    if not match or int(match[2])>=2**63: return False
+    priorities=[line[4] for line in match[1].split(b'\n') if line]
+    return all(a<b for a,b in zip(priorities,priorities[1:]))
+
+# A file name as Git quotes one that is not plain printable text, so it reads unambiguously.
+def shown(path):
+    return path if path.isprintable() else json.dumps(path)
+
+# Fails when a file committed at HEAD that .gitattributes sends through Git LFS is a
+# plain file rather than an LFS pointer, as a commit made where Git LFS is not set up
+# stores it. The plain copy stays in history and every clone, and a checkout counts
+# the file as changed, which once stopped an integration (Benevolent-Anarchy/BA-Skills#76).
+# Failing cannot take it out of history, since its fix is a new commit, but it keeps
+# the file from staying plain at the tip.
+# Git's own attribute matching decides which files Git LFS should hold, not git-lfs's:
+# git lfs fsck --pointers, in git-lfs 3.8.1, applies a pattern in a subfolder's
+# .gitattributes only to files directly in that folder, where Git applies it at every
+# depth. So the check needs no git-lfs, and it needs Git 2.40 or newer for
+# check-attr --source. File names are read as bytes, so any name Git can hold is checked. The checkout's .git/info/attributes counts, as Git applies it
+# on commit there; a global attributes file does not.
+# Only commits are checked, and only once a committed .gitattributes has a filter=lfs
+# rule. Returns why it did not check, or None once it has. A checkout Git cannot read
+# fails rather than pass unchecked.
+def lfs_pointers(root):
+    root=Path(root)
+    if not os.path.lexists(root/'.git'): return 'this is not a Git checkout'
+    if not shutil.which('git'): raise ValueError('Git is not installed, so the Git LFS pointers at HEAD cannot be checked.')
+    def git(*args,**options): return run_process(['git',*args],cwd=root,check=False,**options)
+    def read(result,what):
+        if result.returncode:
+            output=result.stdout if isinstance(result.stdout,str) else result.stdout.decode('utf-8','replace')
+            raise ValueError(f'Git cannot {what}, so the Git LFS pointers at HEAD cannot be checked.\n'+output.strip())
+        return result.stdout
+    read(git('rev-parse','--git-dir'),f'read the checkout at {root}')
+    if git('rev-parse','--quiet','--verify','HEAD^{commit}').returncode:
+        branch=git('symbolic-ref','--quiet','HEAD')
+        if not branch.returncode and git('show-ref','--quiet','--verify',branch.stdout.strip()).returncode: return 'there is no commit yet'
+        raise ValueError(f'Git cannot read HEAD at {root}, so the Git LFS pointers at HEAD cannot be checked.')
+    def name(raw): return raw.decode('utf-8','surrogateescape')
+    files={}
+    for entry in name(read(git('ls-tree','-r','-z','-l','--full-tree','HEAD',text=False),'list the files at HEAD')).split('\0'):
+        if not entry: continue
+        meta,path=entry.split('\t',1); mode,kind,oid,size=meta.split()
+        # Git runs no filter on a symbolic link, so only regular files can be pointers.
+        if kind=='blob' and mode!='120000': files[path]=(oid,int(size))
+    if not any(path.rsplit('/',1)[-1]=='.gitattributes' and lfs_rule(name(read(git('cat-file','blob','HEAD:'+path,text=False),'read '+shown(path)+' at HEAD'))) for path in files):
+        return 'no committed .gitattributes sends files through Git LFS'
+    answer=name(read(git('-c','core.attributesFile=/dev/null','check-attr','--source=HEAD','-z','--stdin','filter',input=''.join(path+'\0' for path in files).encode('utf-8','surrogateescape'),text=False,env={'GIT_ATTR_NOSYSTEM':'1'}),
+                     'match the attributes at HEAD (check-attr --source needs Git 2.40 or newer)')).split('\0')
+    if len(answer)!=3*len(files)+1: raise ValueError('Git answered for other files than those at HEAD, so the Git LFS pointers cannot be checked.')
+    sent=[answer[at] for at in range(0,len(answer)-1,3) if answer[at+2]=='lfs']
+    # A pointer is under 1024 bytes and an empty file stays empty, so only the rest are read.
+    plain=[path for path in sent if files[path][1]>=1024]; small=[path for path in sent if 0<files[path][1]<1024]
+    if small:
+        output=read(git('cat-file','--batch',input=''.join(files[path][0]+'\n' for path in small).encode(),text=False),'read the files at HEAD')
+        at=0
+        for path in small:
+            end=output.find(b'\n',at); header=output[at:end].split()
+            if end<0 or header!=[files[path][0].encode(),b'blob',str(files[path][1]).encode()]: raise ValueError('Git answered for another object than '+shown(path)+', so the Git LFS pointers cannot be checked.')
+            if not lfs_pointer(output[end+1:end+1+files[path][1]]): plain.append(path)
+            at=end+2+files[path][1]
+    if plain:
+        listed='\n'.join(shown(path) for path in sorted(plain))
+        raise ValueError(f'.gitattributes sends {len(plain)} file(s) through Git LFS that are committed at HEAD as plain files rather than LFS pointers:\n{listed}\n'
+                         'Commit each as a pointer where Git LFS is set up: git add --renormalize <path>, then commit.')
+    return None
+
 def verify(root, exact=False, runner=process):
     root=Path(root).absolute(); stages=[]; diagnostics=[]; binary=None
     def stage(name, action):
@@ -399,6 +480,10 @@ def verify(root, exact=False, runner=process):
         if config.get('schemaVersion')!=1 or preset not in REQUIRED or not isinstance(required,list) or len(set(required))!=len(required) or not set(REQUIRED[preset])<=set(required) or set(required)-set(REQUIRED[preset]+(['gut-rendered'] if preset=='godot' else [])): raise ValueError('Invalid verification configuration or required checks')
     except Exception as exc: return {'Passed':False,'Stages':[],'Diagnostics':[str(exc)]}
     docs=documentation(root); stages.append({'Name':'documentation','Passed':docs['Passed'],'ExitCode':0 if docs['Passed'] else 1,'Diagnostics':docs['Diagnostics']}); diagnostics+=docs['Diagnostics']
+    try:
+        unchecked=lfs_pointers(root); stages.append({'Name':'git-lfs-pointers','Passed':True,'ExitCode':0,'Diagnostics':[],**({'NotChecked':unchecked} if unchecked else {})})
+    except Exception as exc:
+        diagnostics.append('git-lfs-pointers failed: '+str(exc)); stages.append({'Name':'git-lfs-pointers','Passed':False,'ExitCode':1,'Diagnostics':[str(exc)]})
     try:
         if preset=='godot':
             settings=config.get('godot',{})
@@ -473,6 +558,6 @@ if __name__=='__main__':
     if args.json: print(json.dumps(report))
     else:
         for message in report['Diagnostics']: print(message)
-        for item in report['Stages']: print(item['Name']+(': passed' if item['Passed'] else ': FAILED'))
+        for item in report['Stages']: print(item['Name']+(': FAILED' if not item['Passed'] else ': not checked, as '+item['NotChecked'] if item.get('NotChecked') else ': passed'))
         if report['Passed']: print('Verification passed: complete project gate.')
     sys.exit(0 if report['Passed'] else 1)

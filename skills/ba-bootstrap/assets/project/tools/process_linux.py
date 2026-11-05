@@ -82,11 +82,11 @@ def stop(child,grace_seconds):
         if child.stderr: child.stderr.close()
         child.wait(timeout=grace_seconds)
 
-def run(args,cwd=None,env=None,check=True,timeout=900,grace_seconds=1.0):
+def run(args,cwd=None,env=None,check=True,timeout=900,grace_seconds=1.0,input=None,text=True):
     with cancellation_handlers():
-        child=subprocess.Popen([str(a) for a in args],cwd=cwd,env={**os.environ,**(env or {})},stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,start_new_session=True)
+        child=subprocess.Popen([str(a) for a in args],cwd=cwd,env={**os.environ,**(env or {})},stdin=None if input is None else subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=text,start_new_session=True)
         try:
-            output,_=child.communicate(timeout=timeout)
+            output,_=child.communicate(input=input,timeout=timeout)
         except subprocess.TimeoutExpired:
             with uninterrupted_cleanup(): stop(child,grace_seconds)
             raise RuntimeError('Process timed out: '+str(args[0])) from None
