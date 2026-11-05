@@ -184,6 +184,52 @@ class GitLfsPointers(unittest.TestCase):
         # The checkout's own .git/info/attributes does, as Git applies it on commit there.
         (self.project/'.git/info').mkdir(exist_ok=True); (self.project/'.git/info/attributes').write_text('*.txt filter=lfs diff=lfs merge=lfs -text\n')
         self.fails_naming('notes.txt')
+    def test_pointer_is_what_git_lfs_fsck_accepts(self):
+        oid=b'oid sha256:'+b'a'*64+b'\n'; version=b'version https://git-lfs.github.com/spec/v1\n'
+        def ext(key): return key+b' sha256:'+b'b'*64+b'\n'
+        cases={'canonical':(version+oid+b'size 12\n',True),
+               'empty file':(b'',True),
+               'extension name with a hyphen':(version+ext(b'ext-0-foo-bar')+oid+b'size 12\n',True),
+               'extensions in rising priority':(version+ext(b'ext-0-a')+ext(b'ext-1-b')+oid+b'size 12\n',True),
+               'largest size':(version+oid+b'size 9223372036854775807\n',True),
+               'extensions out of order':(version+ext(b'ext-1-b')+ext(b'ext-0-a')+oid+b'size 12\n',False),
+               'two extensions sharing a priority':(version+ext(b'ext-0-a')+ext(b'ext-0-b')+oid+b'size 12\n',False),
+               'two-digit priority':(version+ext(b'ext-10-a')+oid+b'size 12\n',False),
+               'extension name without a word character first':(version+ext(b'ext-0--a')+oid+b'size 12\n',False),
+               'size too large':(version+oid+b'size 9223372036854775808\n',False),
+               'size zero':(version+oid+b'size 0\n',False),
+               'size with a leading zero':(version+oid+b'size 012\n',False),
+               'size with a sign':(version+oid+b'size +12\n',False),
+               'uppercase object id':(version+b'oid sha256:'+b'A'*64+b'\n'+b'size 12\n',False),
+               'carriage returns':((version+oid+b'size 12\n').replace(b'\n',b'\r\n'),False),
+               'trailing space':(version+oid+b'size 12 \n',False),
+               'older version name':(b'version https://hawser.github.com/spec/v1\n'+oid+b'size 12\n',False),
+               'no size':(version+oid,False),
+               'extra line':(version+oid+b'size 12\nmore 1\n',False),
+               'plain bytes':(b'\x89PNG texture',False),
+               # git-lfs reads no pointer from a blob of 1024 bytes or more, however well formed.
+               'canonical but 1024 bytes or more':(version+ext(b'ext-0-'+b'a'*900)+oid+b'size 12\n',False)}
+        lfs=shutil.which('git-lfs')
+        for case,(data,expected) in cases.items():
+            with self.subTest(case):
+                self.assertEqual(self.g.lfs_pointer(data),expected)
+                # Where git-lfs is installed, it must agree: its strict check is what fsck --pointers applies.
+                if lfs: self.assertEqual(subprocess.run([lfs,'pointer','--check','--strict','--stdin'],input=data,capture_output=True).returncode==0,expected)
+    @NEEDS_GIT_LFS
+    def test_names_read_as_bytes(self):
+        # Text mode would turn the carriage return into a line feed, and could not read the byte that is not UTF-8.
+        carriage=Path('assets/a\r.png'); undecodable=Path(os.fsdecode(b'assets/\xff.png'))
+        self.checkout(); self.write(carriage,b'plain a'); self.write(undecodable,b'plain b'); self.commit('Add textures')
+        self.write('.gitattributes','"assets/a\\r.png" filter=lfs diff=lfs merge=lfs -text\n"assets/\\377.png" filter=lfs diff=lfs merge=lfs -text\n')
+        self.commit('Send textures through Git LFS','.gitattributes')
+        message=self.fails_naming()
+        self.assertIn('2 file(s)',message); self.assertIn('\n"assets/a\\r.png"\n',message); self.assertIn('\n"assets/\\udcff.png"\n',message)
+    @NEEDS_GIT_LFS
+    def test_names_every_plain_file_however_many(self):
+        self.checkout(); names=[f'assets/{n:02}.png' for n in range(25)]
+        for name in names: self.write(name,b'plain '+name.encode())
+        self.commit('Add textures'); self.write('.gitattributes',LFS_RULE); self.commit('Send textures through Git LFS','.gitattributes')
+        self.assertIn('25 file(s)',self.fails_naming(*names))
     def test_checkout_git_cannot_read_fails(self):
         self.write('.git','gitdir: '+str(self.root/'missing')+'\n')
         with self.assertRaisesRegex(ValueError,'Git cannot read the checkout'): self.g.lfs_pointers(self.project)
